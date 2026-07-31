@@ -54,12 +54,23 @@ plans.
 
 ### 2. Install the client
 
+**While the repo is private** — needs the [GitHub CLI](https://cli.github.com),
+authenticated once with `gh auth login`:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/jhnhnsn/robofinger/main/install.sh | sh
+```
+
+Detects your platform, downloads the matching release artifact, verifies its
+sha256, and installs to `~/.local/bin` (override with `ROBOFINGER_BIN_DIR`).
+
+**Once the repo is public**, the standard cargo-dist installer works with no
+GitHub account:
+
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/jhnhnsn/robofinger/releases/latest/download/robofinger-installer.sh | sh
 ```
-
-Installs to `~/.local/bin` and adds it to PATH. Open a new terminal afterwards.
 
 Or build from source:
 
