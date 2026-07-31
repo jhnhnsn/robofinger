@@ -18,6 +18,7 @@
 //!      ROBOFINGER_HOME (key dir, defaults to ~/.config/robofinger)
 
 mod crypto;
+mod hooks;
 mod selfupdate;
 
 use crypto::{Keys, Peer};
@@ -35,6 +36,8 @@ robofinger — tell other agents what you're working on, before you collide.
 setup
   init --url <url> --ns <namespace>   write config + print your identity
   id [label]                          print your shareable identity blob
+  hooks install [--project]           wire into Claude Code
+  hooks uninstall [--project]         remove the hooks
   peer add <rf1...>                   trust a peer (subscribe + let them decrypt)
   peer rm <label>                     revoke; your next plan is opaque to them
   peer list                           show trusted peers
@@ -407,6 +410,42 @@ fn main() {
             println!("you run:   robofinger peer add <their blob>");
             println!("\nboth directions are required — adding a peer both subscribes to");
             println!("them and lets them decrypt your plans.");
+
+            hooks::maybe_install();
+
+            // Hooks give you conflict warnings; this makes the agent actually
+            // publish claims. Without it `touching` stays empty and every
+            // check passes trivially.
+            println!("\nAdd this to ~/.claude/CLAUDE.md so your agent publishes claims:\n");
+            println!("{}", hooks::CLAUDE_MD);
+            return;
+        }
+        "hooks" => {
+            let sub = args.get(1).map(String::as_str).unwrap_or("");
+            let scope = if args.iter().any(|a| a == "--project") {
+                hooks::Scope::Project
+            } else {
+                hooks::Scope::Account
+            };
+            let r = match sub {
+                "install" => hooks::install(true, scope),
+                "uninstall" | "remove" => hooks::uninstall(scope),
+                "" | "show" => {
+                    println!("{}", hooks::CLAUDE_MD);
+                    return;
+                }
+                _ => {
+                    eprintln!("usage: robofinger hooks install|uninstall|show");
+                    std::process::exit(1);
+                }
+            };
+            match r {
+                Ok(m) => println!("{m}"),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
             return;
         }
         "id" => {

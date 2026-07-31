@@ -110,7 +110,24 @@ half-open and claims silently fail to appear.
 
 ### 4. Wire into Claude Code
 
-Merge into `~/.claude/settings.json`:
+`robofinger init` offers to do this for you, asking whether to install at
+**account** scope (`~/.claude/settings.json`, every project on this machine) or
+**project** scope (`<repo>/.claude/settings.json`, this repo only — commit it so
+teammates get the hooks on clone).
+
+Or do it explicitly at any time:
+
+```sh
+robofinger hooks install              # account scope
+robofinger hooks install --project    # this repo only
+robofinger hooks uninstall            # remove, leaving other tools' hooks alone
+```
+
+The installer backs up `settings.json` first, preserves every other key, and is
+idempotent. It writes the binary's absolute path, so hooks work even when
+`~/.local/bin` is missing from the hook process's PATH.
+
+To wire it by hand instead, merge into `~/.claude/settings.json`:
 
 ```json
 {
@@ -146,7 +163,8 @@ to back off, don't silently ignore it.
 
 | Command | Does |
 |---|---|
-| `robofinger init --url <u> --ns <n>` | Write config, generate keys, print identity |
+| `robofinger init --url <u> --ns <n>` | Write config, generate keys, offer hook install |
+| `robofinger hooks install [--project]` | Wire into Claude Code (account or repo scope) |
 | `robofinger id [label]` | Print your shareable identity blob |
 | `robofinger peer add\|rm\|list` | Manage trusted peers |
 | `robofinger claim "<task>" <glob>...` | Publish a claim |
