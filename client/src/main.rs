@@ -25,6 +25,8 @@ use std::io::Read;
 
 const STALE_MULT: i64 = 2;
 const DEFAULT_ETA: i64 = 1800;
+/// Max peer keys in a `?from=` query before the URL gets too long for the edge.
+const MAX_FROM: usize = 100;
 
 const USAGE: &str = "\
 robofinger — tell other agents what you're working on, before you collide.
@@ -176,10 +178,18 @@ impl Envelope {
 /// else simply fail to decrypt and are skipped.
 fn fetch_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
     let subs = crypto::load_peers();
-    // Ask only for keys we trust, plus our own.
+    // Ask only for keys we trust, plus our own — this keeps the relay's rows-read
+    // proportional to peers rather than to everyone in the namespace.
     let mut want: Vec<String> = subs.iter().map(|p| p.pubkey.clone()).collect();
     want.push(k.pubkey());
-    let url = format!("{}/ns/{}/plans?from={}", c.url, c.ns, want.join(","));
+    // Past ~100 keys the URL exceeds what the edge accepts, so fetch everything
+    // and filter locally instead. Correctness is unchanged either way: untrusted
+    // keys are dropped below.
+    let url = if want.len() <= MAX_FROM {
+        format!("{}/ns/{}/plans?from={}", c.url, c.ns, want.join(","))
+    } else {
+        format!("{}/ns/{}/plans", c.url, c.ns)
+    };
 
     let envs: Vec<Envelope> = ureq::get(&url)
         .call()
@@ -646,7 +656,11 @@ fn watch(c: &Cfg, k: &Keys) {
     let subs = crypto::load_peers();
     let mut want: Vec<String> = subs.iter().map(|p| p.pubkey.clone()).collect();
     want.push(k.pubkey());
-    let url = format!("{}/ns/{}/subscribe?from={}", ws_url, c.ns, want.join(","));
+    let url = if want.len() <= MAX_FROM {
+        format!("{}/ns/{}/subscribe?from={}", ws_url, c.ns, want.join(","))
+    } else {
+        format!("{}/ns/{}/subscribe", ws_url, c.ns)
+    };
     let (mut sock, _) = match tungstenite::connect(&url) {
         Ok(x) => x,
         Err(e) => {

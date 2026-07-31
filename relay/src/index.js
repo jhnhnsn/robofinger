@@ -1,5 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
 
+// Cap on `?from=` keys per query. Bounds the SQL parameter count and stops a
+// caller turning one request into an arbitrarily large read.
+//
+// A 43-char key plus separator is ~44 bytes, and the edge rejects URLs beyond
+// roughly 4-6KB, so ~100 keys is the real ceiling regardless of what we set
+// here. Clients with more peers than this should fall back to an unfiltered
+// fetch rather than build a URL that 500s.
+const MAX_FROM = 100;
+
 // One Namespace DO per relay-routing key. Holds the latest signed envelope per
 // identity and fans it out to subscribers.
 //
@@ -104,13 +113,29 @@ export class Namespace extends DurableObject {
   }
 
   /// `from` is an optional comma-separated allowlist of pubkeys.
+  ///
+  /// Filtering happens in SQL, not JS. A client only ever wants the handful of
+  /// peers it trusts, so scanning every row in the namespace would make rows-read
+  /// grow with total agents rather than with the caller's peer count — the
+  /// difference between O(agents) and O(peers) on every single `check`.
   all(from) {
-    const rows = this.sql.exec("SELECT body FROM plans").toArray()
+    // `from == null` means the param was absent → return everything.
+    // `?from=` present but empty means "trust nobody" → return nothing.
+    const want = from === null || from === undefined
+      ? null
+      : from.split(",").filter(Boolean).slice(0, MAX_FROM);
+    if (want && want.length === 0) return [];
+
+    const rows = want
+      ? this.sql.exec(
+          `SELECT body FROM plans WHERE pubkey IN (${want.map(() => "?").join(",")})`,
+          ...want
+        ).toArray()
+      : this.sql.exec("SELECT body FROM plans").toArray();
+
+    return rows
       .map(r => { try { return JSON.parse(r.body); } catch { return null; } })
       .filter(r => r && typeof r.pubkey === "string");
-    if (!from) return rows;
-    const want = new Set(from.split(",").filter(Boolean));
-    return rows.filter(r => want.has(r.pubkey));
   }
 
   broadcast(env) {

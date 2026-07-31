@@ -263,5 +263,22 @@ The path test is a regression guard: target files usually do not exist yet
 
 ## Limits (Cloudflare free tier)
 
-100k DO requests/day, 5GB storage. A plan update is one request; a `check` is
-one request. Well inside the free tier for normal use.
+100k DO requests/day, 5M rows read/day, 5GB storage.
+
+| Operation | Requests | Rows read | Rows written |
+|---|---|---|---|
+| `check` | 1 | peers | 0 |
+| `claim` / `release` / `done` | 2 | peers + 1 | 1 |
+| `watch` connect | 1 | peers | 0 |
+
+`check` fires on every Edit/Write and dominates everything else. At ~500 edits
+per agent per day that is ~250 agents before the request limit binds.
+
+Rows read scales with **peers you trust**, not with agents in the namespace:
+`?from=` is applied in SQL against the `pubkey` primary key, so a client never
+pays for plans it would discard. Clients with more than ~100 peers fall back to
+an unfiltered fetch, because the URL would otherwise exceed what the edge
+accepts.
+
+Storage is one row per agent, overwritten in place — roughly 1KB each, so the
+5GB limit is unreachable in practice.
