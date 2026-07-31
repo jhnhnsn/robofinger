@@ -9,6 +9,19 @@ import { DurableObject } from "cloudflare:workers";
 // fetch rather than build a URL that 500s.
 const MAX_FROM = 100;
 
+// A plan envelope is a few hundred bytes; 16KB is generous for a large
+// `touching` list encrypted to many recipients, and far below anything worth
+// storing on a free relay.
+const MAX_BODY = 16 * 1024;
+
+// Distinct publishers per namespace. Bounds storage and rows-read for any one
+// namespace, and a team past this size is not using it as a team any more.
+const MAX_AGENTS_PER_NS = 200;
+
+// Writes per publisher per minute. A publish happens on task boundaries, not
+// per keystroke, so single digits is normal and 30 is a wide margin.
+const WRITES_PER_MIN = 30;
+
 // One Namespace DO per relay-routing key. Holds the latest signed envelope per
 // identity and fans it out to subscribers.
 //
@@ -27,6 +40,13 @@ export class Namespace extends DurableObject {
       seq    INTEGER NOT NULL,
       epoch  INTEGER NOT NULL,
       body   TEXT NOT NULL
+    )`);
+    // Fixed-size sliding window per publisher. One row per key, overwritten —
+    // never grows beyond the plans table.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS writes(
+      pubkey       TEXT PRIMARY KEY,
+      window_start INTEGER NOT NULL,
+      count        INTEGER NOT NULL
     )`);
     // Pre-crypto namespaces keyed rows on `agent` and stored plaintext plans.
     // Those rows can never satisfy a signature check, so drop them rather than
@@ -69,9 +89,28 @@ export class Namespace extends DurableObject {
   }
 
   async put(pubkey, request) {
+    // Reject oversized writes on the declared length, before reading the body.
+    // A plan is a few hundred bytes; anything near the cap is abuse, and we do
+    // not want to buy the bandwidth to find out.
+    const declared = Number(request.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_BODY) {
+      return json({ error: `envelope too large (max ${MAX_BODY} bytes)` }, 413);
+    }
+
+    let raw;
+    try {
+      raw = await request.text();
+    } catch {
+      return json({ error: "could not read body" }, 400);
+    }
+    // Chunked uploads can omit content-length, so check the real size too.
+    if (raw.length > MAX_BODY) {
+      return json({ error: `envelope too large (max ${MAX_BODY} bytes)` }, 413);
+    }
+
     let env;
     try {
-      env = await request.json();
+      env = JSON.parse(raw);
     } catch {
       return json({ error: "invalid json" }, 400);
     }
@@ -99,6 +138,41 @@ export class Namespace extends DurableObject {
     const [prev] = this.sql.exec("SELECT seq FROM plans WHERE pubkey=?", pubkey).toArray();
     if (prev && seq <= prev.seq) {
       return json({ error: "stale seq", have: prev.seq, got: seq }, 409);
+    }
+
+    // Rate limit per publisher. Signature verification already proved they hold
+    // the key, so this is billed to an identity that cost them something to
+    // establish rather than to an IP they can rotate.
+    const now = Math.floor(Date.now() / 1000);
+    const [rl] = this.sql.exec(
+      "SELECT window_start, count FROM writes WHERE pubkey=?", pubkey
+    ).toArray();
+    if (rl && now - rl.window_start < 60) {
+      if (rl.count >= WRITES_PER_MIN) {
+        return json(
+          { error: "rate limit exceeded", retry_after: 60 - (now - rl.window_start) },
+          429
+        );
+      }
+      this.sql.exec("UPDATE writes SET count = count + 1 WHERE pubkey=?", pubkey);
+    } else {
+      this.sql.exec(
+        `INSERT INTO writes(pubkey,window_start,count) VALUES(?,?,1)
+         ON CONFLICT(pubkey) DO UPDATE SET window_start=excluded.window_start, count=1`,
+        pubkey, now
+      );
+    }
+
+    // Cap distinct publishers per namespace. Existing publishers are always
+    // allowed through so a full namespace keeps working for its members.
+    if (!prev) {
+      const [{ n }] = this.sql.exec("SELECT COUNT(*) AS n FROM plans").toArray();
+      if (n >= MAX_AGENTS_PER_NS) {
+        return json(
+          { error: `namespace full (max ${MAX_AGENTS_PER_NS} agents)` },
+          507
+        );
+      }
     }
 
     const row = JSON.stringify(env);
@@ -176,9 +250,9 @@ async function verify(pubkeyB64, sigB64, message) {
   }
 }
 
-const json = (o, status = 200) =>
+const json = (o, status = 200, extraHeaders = {}) =>
   new Response(JSON.stringify(o), {
-    status, headers: { "content-type": "application/json" }
+    status, headers: { "content-type": "application/json", ...extraHeaders }
   });
 
 export default {
@@ -190,7 +264,38 @@ export default {
     if (!m) {
       return json({ error: "usage: /ns/{namespace}/{plan/<pubkey>|plans|subscribe}" }, 404);
     }
+
+    // Reject oversized writes here, on the declared length, before the body is
+    // read or a Durable Object is touched.
+    const declared = Number(request.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_BODY) {
+      return json({ error: `envelope too large (max ${MAX_BODY} bytes)` }, 413);
+    }
+
+    // Rate limit per IP at the edge, BEFORE touching a Durable Object. Without
+    // this, spraying distinct namespace names would instantiate a DO per name
+    // at our expense. Per-key limits inside the DO cannot help there — the cost
+    // is incurred before any key is known.
+    //
+    // The body must be buffered first: awaiting the limiter detaches the
+    // request stream, and the DO would then fail to read it.
+    let forward = request;
+    if (env.RL) {
+      const buffered = request.method === "PUT" ? await request.arrayBuffer() : null;
+      const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+      const { success } = await env.RL.limit({ key: ip });
+      if (!success) {
+        return json({ error: "rate limit exceeded" }, 429, { "retry-after": "60" });
+      }
+      if (buffered !== null) {
+        if (buffered.byteLength > MAX_BODY) {
+          return json({ error: `envelope too large (max ${MAX_BODY} bytes)` }, 413);
+        }
+        forward = new Request(request, { body: buffered });
+      }
+    }
+
     const id = env.NAMESPACE.idFromName(m[1]);
-    return env.NAMESPACE.get(id).fetch(request);
+    return env.NAMESPACE.get(id).fetch(forward);
   }
 };
