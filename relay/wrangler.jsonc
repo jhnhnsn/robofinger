@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "planrelay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-01",
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [
+      { "name": "NAMESPACE", "class_name": "Namespace" }
+    ]
+  },
+  "exports": {
+    "Namespace": { "type": "durable-object", "storage": "sqlite" }
+  }
+}

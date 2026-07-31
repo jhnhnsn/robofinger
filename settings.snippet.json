@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "planrelay start" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "planrelay end" }] }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [{ "type": "command", "command": "planrelay check" }]
+      }
+    ]
+  }
+}
