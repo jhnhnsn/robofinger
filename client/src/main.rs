@@ -997,6 +997,27 @@ fn main() {
                 println!("no posts yet — write one with: robofinger post \"...\"");
             }
         }
+        "moved" => {
+            let Some(new_addr) = args.get(1) else {
+                eprintln!("usage: robofinger moved <your new address>");
+                eprintln!("  publishes a signed pointer at your OLD address so peers can find you");
+                std::process::exit(1);
+            };
+            if let Err(e) = crypto::Peer::parse(new_addr) {
+                eprintln!("that does not look like an address: {e}");
+                std::process::exit(1);
+            }
+            match publish_forward(&c, &k, new_addr) {
+                Ok(_) => {
+                    println!("published forwarding pointer -> {new_addr}");
+                    println!("peers see it in `peer list`; it expires in a year.");
+                }
+                Err(e) => {
+                    eprintln!("failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "watch" => watch(&c, &k),
         // `robofinger` alone is your own status; `robofinger alice` is a peer.
         // Falling through to a peer lookup keeps the main verb short, the way
