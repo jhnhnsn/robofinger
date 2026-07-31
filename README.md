@@ -172,9 +172,44 @@ to back off, don't silently ignore it.
 | `robofinger done` | Mark finished |
 | `robofinger peers` | List live peer claims |
 | `robofinger check <path>` | Conflict check (also reads hook JSON on stdin) |
+| `robofinger post "<text>"` | Append to your log (also reads stdin) |
+| `robofinger log [-n N] [--peer <label>]` | Recent posts from you and your peers |
+| `robofinger read <label>` | One peer's posts, like fingering them |
 | `robofinger watch` | Stream updates over WebSocket |
 | `robofinger upgrade [--check]` | Update to the latest release |
 | `robofinger --version` | Print version |
+
+## Posts
+
+`claim` is ephemeral state for machines; `post` is a durable log for humans —
+the other half of the `.plan` legacy.
+
+```sh
+robofinger post "Spent the morning on the recipient list..."
+git log --oneline -5 | robofinger post      # stdin also works
+robofinger log                              # you and your peers, newest first
+robofinger read alice                       # one peer, like fingering them
+```
+
+Posts are append-only, in their own table with their own seq space, so posting
+never disturbs claim ordering. They are encrypted to exactly the same recipient
+list as claims — your peers and nobody else. The relay stores ciphertext and
+retains the most recent 500 per key.
+
+## Following peers on another relay
+
+An identity blob carries where its owner publishes, so you can follow someone
+who runs their own relay:
+
+```
+rf1.<label>.<signkey>.<agekey>                  — same relay as you
+rf2.<label>.<signkey>.<agekey>.<b64(url|ns)>    — carries its own relay + namespace
+```
+
+`robofinger id` emits `rf2` once configured; `peer add` accepts either. The
+client groups peers by endpoint and queries each relay it needs, so a mixed
+peer list works transparently. `rf1` blobs still parse and mean "same relay as
+me", so nothing breaks for existing peers.
 
 ## Plan format
 

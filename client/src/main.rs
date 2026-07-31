@@ -48,6 +48,11 @@ use
   done                                mark finished
   peers                               live peer claims
   check <path>                        conflict check (hook JSON on stdin)
+
+write
+  post \"<text>\"                       append to your log (also reads stdin)
+  log [-n N] [--peer <label>]         recent posts from you and your peers
+  read <label>                        one peer\'s posts, like fingering them
   watch                               stream updates over WebSocket
 
 maintenance
@@ -144,6 +149,29 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Civil date-time from a unix timestamp, UTC.
+///
+/// Hand-rolled rather than pulling in `chrono` — this is one line of output in
+/// a log command, not worth a dependency in a binary that sits beside private
+/// keys. Days-since-epoch to y/m/d via the standard civil-from-days algorithm.
+fn stamp(epoch: i64) -> String {
+    let (days, secs) = (epoch.div_euclid(86_400), epoch.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60
+    )
+}
+
 fn git_toplevel() -> Option<String> {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -191,48 +219,100 @@ impl Envelope {
 /// Anything that fails verification is dropped silently — a forged or corrupt
 /// envelope must never reach the conflict check. Plans encrypted to someone
 /// else simply fail to decrypt and are skipped.
-fn fetch_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
-    let subs = crypto::load_peers();
-    // Ask only for keys we trust, plus our own — this keeps the relay's rows-read
-    // proportional to peers rather than to everyone in the namespace.
-    let mut want: Vec<String> = subs.iter().map(|p| p.pubkey.clone()).collect();
-    want.push(k.pubkey());
-    // Past ~100 keys the URL exceeds what the edge accepts, so fetch everything
-    // and filter locally instead. Correctness is unchanged either way: untrusted
-    // keys are dropped below.
-    let url = if want.len() <= MAX_FROM {
-        format!("{}/ns/{}/plans?from={}", c.url, c.ns, want.join(","))
-    } else {
-        format!("{}/ns/{}/plans", c.url, c.ns)
+/// Group the keys we care about by which relay+namespace hosts them.
+///
+/// Peers added from an `rf2` blob may live on a different relay entirely, so a
+/// single fetch is no longer enough. Most setups have exactly one group, which
+/// keeps the common case to one request.
+fn endpoints(c: &Cfg, k: &Keys, subs: &[Peer]) -> Vec<(String, String, Vec<String>)> {
+    let mut groups: Vec<(String, String, Vec<String>)> = Vec::new();
+    let mut add = |url: &str, ns: &str, key: String| match groups
+        .iter_mut()
+        .find(|(u, n, _)| u == url && n == ns)
+    {
+        Some((_, _, keys)) => keys.push(key),
+        None => groups.push((url.to_string(), ns.to_string(), vec![key])),
     };
+    // Our own key always lives on our own relay.
+    add(&c.url, &c.ns, k.pubkey());
+    for p in subs {
+        let (url, ns) = p.endpoint(&c.url, &c.ns);
+        add(url, ns, p.pubkey.clone());
+    }
+    groups
+}
 
-    let envs: Vec<Envelope> = ureq::get(&url)
-        .call()
-        .ok()
-        .and_then(|mut r| r.body_mut().read_json::<Vec<serde_json::Value>>().ok())
-        .map(|v| {
-            v.into_iter()
-                .filter_map(|x| serde_json::from_value::<Envelope>(x).ok())
-                .collect()
-        })
-        .unwrap_or_default();
+/// Fetch signed envelopes from `path` ("plans" or "posts") across every relay
+/// that hosts a key we trust, then verify and decrypt.
+fn fetch_envelopes(c: &Cfg, k: &Keys, subs: &[Peer], path: &str, query: &str) -> Vec<Envelope> {
+    let mut out = Vec::new();
+    for (url, ns, keys) in endpoints(c, k, subs) {
+        // Past ~100 keys the URL exceeds what the edge accepts, so fetch
+        // everything and filter locally. Untrusted keys are dropped below
+        // either way, so correctness is unchanged.
+        let base = if keys.len() <= MAX_FROM {
+            format!("{url}/ns/{ns}/{path}?from={}", keys.join(","))
+        } else {
+            format!("{url}/ns/{ns}/{path}?")
+        };
+        let full = if query.is_empty() {
+            base
+        } else {
+            format!("{base}&{query}")
+        };
+        let envs = ureq::get(&full)
+            .call()
+            .ok()
+            .and_then(|mut r| r.body_mut().read_json::<Vec<serde_json::Value>>().ok())
+            .map(|v| {
+                v.into_iter()
+                    .filter_map(|x| serde_json::from_value::<Envelope>(x).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        out.extend(envs);
+    }
 
-    envs.into_iter()
+    out.into_iter()
         .filter(|e| {
             // Trust only keys we subscribed to (or ourselves), and only if the
             // signature actually checks out.
             (e.pubkey == k.pubkey() || subs.iter().any(|p| p.pubkey == e.pubkey))
                 && crypto::verify(&e.pubkey, &e.sig, &e.signed_message())
         })
-        .filter_map(|e| {
-            let plain = crypto::decrypt(&e.body, &k.age_secret).ok()?;
-            let mut plan: Plan = serde_json::from_slice(&plain).ok()?;
-            // seq comes from the signed envelope, not the encrypted body.
-            plan.seq = e.seq;
-            plan.pubkey = e.pubkey;
-            Some(plan)
-        })
         .collect()
+}
+
+/// Decrypt an envelope into a Plan, taking identity and ordering from the
+/// signed envelope rather than the encrypted body.
+fn decrypt_plan(e: &Envelope, k: &Keys) -> Option<Plan> {
+    let plain = crypto::decrypt(&e.body, &k.age_secret).ok()?;
+    let mut plan: Plan = serde_json::from_slice(&plain).ok()?;
+    plan.seq = e.seq;
+    plan.pubkey = e.pubkey.clone();
+    Some(plan)
+}
+
+fn fetch_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
+    let subs = crypto::load_peers();
+    fetch_envelopes(c, k, &subs, "plans", "")
+        .iter()
+        .filter_map(|e| decrypt_plan(e, k))
+        .collect()
+}
+
+/// Newest-first posts from you and everyone you trust.
+fn fetch_posts(c: &Cfg, k: &Keys, limit: usize) -> Vec<Plan> {
+    let subs = crypto::load_peers();
+    let mut posts: Vec<Plan> = fetch_envelopes(c, k, &subs, "posts", &format!("limit={limit}"))
+        .iter()
+        .filter_map(|e| decrypt_plan(e, k))
+        .collect();
+    // Merge across relays: each returns its own newest-first run, so the
+    // combined list needs re-sorting before truncation.
+    posts.sort_by(|a, b| b.epoch.cmp(&a.epoch));
+    posts.truncate(limit);
+    posts
 }
 
 fn publish(
@@ -262,8 +342,17 @@ fn publish(
             .unwrap_or(DEFAULT_ETA),
     };
 
-    // Encrypt to every peer plus self — omitting self means you cannot read
-    // your own plan back, which breaks the seq lookup above.
+    let body = crypto::encrypt(
+        &serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
+        &recipients(k),
+    )?;
+
+    send(c, k, "plan", plan.seq, body)
+}
+
+/// Encrypt to self + every peer. Always includes self, or you cannot read your
+/// own writes back.
+fn recipients(k: &Keys) -> Vec<age::x25519::Recipient> {
     let mut recips = vec![k.age_secret.to_public()];
     for p in crypto::load_peers() {
         match p.age_pub.parse::<age::x25519::Recipient>() {
@@ -271,24 +360,52 @@ fn publish(
             Err(_) => eprintln!("warning: peer {} has an unusable age key", p.label),
         }
     }
-    let body = crypto::encrypt(
-        &serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
-        &recips,
-    )?;
+    recips
+}
 
+/// Sign and PUT an envelope to `kind` ("plan" or "post") on our own relay.
+fn send(c: &Cfg, k: &Keys, kind: &str, seq: u64, body: String) -> Result<(), String> {
     let mut env = Envelope {
         pubkey: k.pubkey(),
-        seq: plan.seq,
+        seq,
         sig: String::new(),
         body,
     };
     env.sig = k.sign(&env.signed_message());
-
-    let url = format!("{}/ns/{}/plan/{}", c.url, c.ns, k.pubkey());
+    let url = format!("{}/ns/{}/{kind}/{}", c.url, c.ns, k.pubkey());
     ureq::put(&url)
         .send_json(&env)
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Append a post. Posts carry their own seq space, so posting never disturbs
+/// claim ordering.
+fn post(c: &Cfg, k: &Keys, text: &str) -> Result<(), String> {
+    let subs = crypto::load_peers();
+    let prev = fetch_envelopes(c, k, &subs, "posts", "limit=1")
+        .iter()
+        .filter(|e| e.pubkey == k.pubkey())
+        .map(|e| e.seq)
+        .max()
+        .unwrap_or(0);
+
+    let entry = Plan {
+        agent: c.agent.clone(),
+        pubkey: k.pubkey(),
+        seq: prev + 1,
+        epoch: now(),
+        status: "post".into(),
+        task: text.to_string(),
+        touching: vec![],
+        project: project(),
+        eta_s: 0,
+    };
+    let body = crypto::encrypt(
+        &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
+        &recipients(k),
+    )?;
+    send(c, k, "post", entry.seq, body)
 }
 
 /// Make `path` relative to the repo root.
@@ -404,7 +521,13 @@ fn main() {
             println!("\nyour identity — share this line with collaborators:");
             println!(
                 "  {}",
-                k.identity_blob(&hostname().unwrap_or_else(|| "agent".into()))
+                k.identity_blob(
+                    &hostname().unwrap_or_else(|| "agent".into()),
+                    Some(crypto::Home {
+                        url: url.clone(),
+                        ns: ns.clone()
+                    })
+                )
             );
             println!("\nthey run:  robofinger peer add <your blob>");
             println!("you run:   robofinger peer add <their blob>");
@@ -454,7 +577,11 @@ fn main() {
                 .cloned()
                 .or_else(hostname)
                 .unwrap_or_else(|| "agent".into());
-            println!("{}", k.identity_blob(&label));
+            let home = cfg().map(|c| crypto::Home {
+                url: c.url,
+                ns: c.ns,
+            });
+            println!("{}", k.identity_blob(&label, home));
             eprintln!("\nshare that line with a peer; they run: robofinger peer add <blob>");
             return;
         }
@@ -646,6 +773,78 @@ fn main() {
         "end" => {
             let _ = publish(&c, &k, "done", "", vec![]);
             std::process::exit(0);
+        }
+        "post" => {
+            // Prefer args; fall back to stdin so `... | robofinger post` works
+            // and prose isn't trapped behind shell quoting.
+            let text = if args.len() > 1 {
+                args[1..].join(" ")
+            } else {
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_to_string(&mut buf);
+                buf.trim_end().to_string()
+            };
+            if text.is_empty() {
+                eprintln!("nothing to post (pass text, or pipe it on stdin)");
+                std::process::exit(1);
+            }
+            match post(&c, &k, &text) {
+                Ok(_) => println!("posted ({} chars)", text.chars().count()),
+                Err(e) => {
+                    eprintln!("post failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "log" => {
+            let limit = args
+                .iter()
+                .position(|a| a == "-n")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20usize);
+            let who = args
+                .iter()
+                .position(|a| a == "--peer")
+                .and_then(|i| args.get(i + 1).cloned());
+            let subs = crypto::load_peers();
+            let mut any = false;
+            for p in fetch_posts(&c, &k, limit) {
+                if let Some(w) = &who {
+                    let matches =
+                        p.agent == *w || subs.iter().any(|s| &s.label == w && s.pubkey == p.pubkey);
+                    if !matches {
+                        continue;
+                    }
+                }
+                println!("{} {}\n{}\n", stamp(p.epoch), p.agent, p.task);
+                any = true;
+            }
+            if !any {
+                println!("no posts yet — write one with: robofinger post \"...\"");
+            }
+        }
+        "read" => {
+            let Some(who) = args.get(1) else {
+                eprintln!("usage: robofinger read <peer label>");
+                std::process::exit(1);
+            };
+            let subs = crypto::load_peers();
+            let Some(peer) = subs.iter().find(|p| &p.label == who) else {
+                eprintln!("no peer named {who} — see: robofinger peer list");
+                std::process::exit(1);
+            };
+            let mut found = false;
+            for p in fetch_posts(&c, &k, 50) {
+                if p.pubkey != peer.pubkey {
+                    continue;
+                }
+                println!("{} {}\n{}\n", stamp(p.epoch), p.agent, p.task);
+                found = true;
+            }
+            if !found {
+                println!("nothing from {who} yet (or their posts predate your key exchange)");
+            }
         }
         "watch" => watch(&c, &k),
         _ => {

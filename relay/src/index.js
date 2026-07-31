@@ -22,6 +22,12 @@ const MAX_AGENTS_PER_NS = 200;
 // per keystroke, so single digits is normal and 30 is a wide margin.
 const WRITES_PER_MIN = 30;
 
+// Posts are append-only, so unlike plans they need their own bound. 500 entries
+// at ~1KB is well under any storage concern while still being a real log.
+const MAX_POSTS_PER_KEY = 500;
+const DEFAULT_POST_LIMIT = 20;
+const MAX_POST_LIMIT = 100;
+
 // One Namespace DO per relay-routing key. Holds the latest signed envelope per
 // identity and fans it out to subscribers.
 //
@@ -48,6 +54,19 @@ export class Namespace extends DurableObject {
       window_start INTEGER NOT NULL,
       count        INTEGER NOT NULL
     )`);
+    // Append-only posts. Deliberately a separate table from `plans`: a claim is
+    // ephemeral state that expires and is overwritten, a post is a durable
+    // event. Conflating them makes the log fill with routine hook-generated
+    // claims and buries anything a human wrote.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS posts(
+      id     INTEGER PRIMARY KEY AUTOINCREMENT,
+      pubkey TEXT NOT NULL,
+      seq    INTEGER NOT NULL,
+      epoch  INTEGER NOT NULL,
+      body   TEXT NOT NULL,
+      UNIQUE(pubkey, seq)
+    )`);
+    this.sql.exec("CREATE INDEX IF NOT EXISTS idx_posts_pubkey ON posts(pubkey, id DESC)");
     // Pre-crypto namespaces keyed rows on `agent` and stored plaintext plans.
     // Those rows can never satisfy a signature check, so drop them rather than
     // let them surface as unverifiable garbage.
@@ -71,9 +90,19 @@ export class Namespace extends DurableObject {
 
     if (path === "/subscribe") return this.subscribe(url);
     if (path === "/plans") return json(this.all(url.searchParams.get("from")));
+    if (path === "/posts") {
+      return json(this.posts(
+        url.searchParams.get("from"),
+        Number(url.searchParams.get("limit")) || DEFAULT_POST_LIMIT,
+        Number(url.searchParams.get("before")) || null
+      ));
+    }
 
     const put = path.match(/^\/plan\/([A-Za-z0-9_-]{43})$/); // base64url ed25519 pubkey
     if (put && request.method === "PUT") return this.put(put[1], request);
+
+    const post = path.match(/^\/post\/([A-Za-z0-9_-]{43})$/);
+    if (post && request.method === "PUT") return this.addPost(post[1], request);
 
     return new Response("not found", { status: 404 });
   }
@@ -88,61 +117,61 @@ export class Namespace extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  async put(pubkey, request) {
+  /// Read, size-check, parse and signature-verify an incoming envelope.
+  /// Returns `{ env, seq }` on success or `{ error }` (a Response) on failure.
+  /// Shared by `put` and `addPost` so both enforce identical rules.
+  async readEnvelope(pubkey, request) {
     // Reject oversized writes on the declared length, before reading the body.
     // A plan is a few hundred bytes; anything near the cap is abuse, and we do
     // not want to buy the bandwidth to find out.
     const declared = Number(request.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > MAX_BODY) {
-      return json({ error: `envelope too large (max ${MAX_BODY} bytes)` }, 413);
+      return { error: json({ error: `envelope too large (max ${MAX_BODY} bytes)` }, 413) };
     }
 
     let raw;
     try {
       raw = await request.text();
     } catch {
-      return json({ error: "could not read body" }, 400);
+      return { error: json({ error: "could not read body" }, 400) };
     }
     // Chunked uploads can omit content-length, so check the real size too.
     if (raw.length > MAX_BODY) {
-      return json({ error: `envelope too large (max ${MAX_BODY} bytes)` }, 413);
+      return { error: json({ error: `envelope too large (max ${MAX_BODY} bytes)` }, 413) };
     }
 
     let env;
     try {
       env = JSON.parse(raw);
     } catch {
-      return json({ error: "invalid json" }, 400);
+      return { error: json({ error: "invalid json" }, 400) };
     }
     // JSON `null` and arrays parse fine but are not envelopes.
     if (env === null || typeof env !== "object" || Array.isArray(env)) {
-      return json({ error: "envelope must be an object" }, 400);
+      return { error: json({ error: "envelope must be an object" }, 400) };
     }
     if (env.pubkey !== pubkey) {
-      return json({ error: "pubkey mismatch: may only write your own key" }, 403);
+      return { error: json({ error: "pubkey mismatch: may only write your own key" }, 403) };
     }
     const seq = Number(env.seq);
     if (!Number.isInteger(seq) || seq < 1) {
-      return json({ error: "seq must be a positive integer" }, 400);
+      return { error: json({ error: "seq must be a positive integer" }, 400) };
     }
     if (typeof env.body !== "string" || typeof env.sig !== "string") {
-      return json({ error: "body and sig required" }, 400);
+      return { error: json({ error: "body and sig required" }, 400) };
     }
 
     // Signature covers pubkey|seq|body, so neither the ordering nor the
     // ciphertext can be altered by the relay or anyone in between.
     const ok = await verify(pubkey, env.sig, `${pubkey}|${seq}|${env.body}`);
-    if (!ok) return json({ error: "bad signature" }, 401);
+    if (!ok) return { error: json({ error: "bad signature" }, 401) };
 
-    // Monotonic seq: reject replays and out-of-order delivery.
-    const [prev] = this.sql.exec("SELECT seq FROM plans WHERE pubkey=?", pubkey).toArray();
-    if (prev && seq <= prev.seq) {
-      return json({ error: "stale seq", have: prev.seq, got: seq }, 409);
-    }
+    return { env, seq };
+  }
 
-    // Rate limit per publisher. Signature verification already proved they hold
-    // the key, so this is billed to an identity that cost them something to
-    // establish rather than to an IP they can rotate.
+  /// Sliding-window write limit per publisher. Returns a Response when the
+  /// caller is over budget, otherwise null.
+  rateLimit(pubkey) {
     const now = Math.floor(Date.now() / 1000);
     const [rl] = this.sql.exec(
       "SELECT window_start, count FROM writes WHERE pubkey=?", pubkey
@@ -162,6 +191,96 @@ export class Namespace extends DurableObject {
         pubkey, now
       );
     }
+    return null;
+  }
+
+  /// Append a post. Posts have their own seq space per publisher so writing a
+  /// post never disturbs claim ordering, and vice versa.
+  async addPost(pubkey, request) {
+    const { env, seq, error } = await this.readEnvelope(pubkey, request);
+    if (error) return error;
+
+    const limited = this.rateLimit(pubkey);
+    if (limited) return limited;
+
+    const [prev] = this.sql.exec(
+      "SELECT MAX(seq) AS seq FROM posts WHERE pubkey=?", pubkey
+    ).toArray();
+    if (prev?.seq != null && seq <= prev.seq) {
+      return json({ error: "stale seq", have: prev.seq, got: seq }, 409);
+    }
+
+    // Bound the log per publisher so an append-only table cannot grow without
+    // limit on a free relay. Oldest posts fall off first.
+    const [{ n }] = this.sql.exec(
+      "SELECT COUNT(*) AS n FROM posts WHERE pubkey=?", pubkey
+    ).toArray();
+    if (n >= MAX_POSTS_PER_KEY) {
+      this.sql.exec(
+        `DELETE FROM posts WHERE id IN (
+           SELECT id FROM posts WHERE pubkey=? ORDER BY id ASC LIMIT ?)`,
+        pubkey, n - MAX_POSTS_PER_KEY + 1
+      );
+    }
+
+    this.sql.exec(
+      "INSERT INTO posts(pubkey,seq,epoch,body) VALUES(?,?,?,?)",
+      pubkey, seq, Math.floor(Date.now() / 1000), JSON.stringify(env)
+    );
+
+    this.broadcast(env, "post");
+    return json({ ok: true, seq });
+  }
+
+  /// Newest-first posts, optionally filtered to trusted keys and paginated.
+  posts(from, limit, before) {
+    const want = from === null || from === undefined
+      ? null
+      : from.split(",").filter(Boolean).slice(0, MAX_FROM);
+    if (want && want.length === 0) return [];
+
+    limit = Math.min(Math.max(1, limit), MAX_POST_LIMIT);
+    const clauses = [];
+    const args = [];
+    if (want) {
+      clauses.push(`pubkey IN (${want.map(() => "?").join(",")})`);
+      args.push(...want);
+    }
+    if (before) {
+      clauses.push("id < ?");
+      args.push(before);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    args.push(limit);
+
+    return this.sql
+      .exec(`SELECT id, body FROM posts ${where} ORDER BY id DESC LIMIT ?`, ...args)
+      .toArray()
+      .map(r => {
+        try {
+          return { id: r.id, ...JSON.parse(r.body) };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  }
+
+  async put(pubkey, request) {
+    const { env, seq, error } = await this.readEnvelope(pubkey, request);
+    if (error) return error;
+
+    // Monotonic seq: reject replays and out-of-order delivery.
+    const [prev] = this.sql.exec("SELECT seq FROM plans WHERE pubkey=?", pubkey).toArray();
+    if (prev && seq <= prev.seq) {
+      return json({ error: "stale seq", have: prev.seq, got: seq }, 409);
+    }
+
+    // Rate limit per publisher. Signature verification already proved they hold
+    // the key, so this is billed to an identity that cost them something to
+    // establish rather than to an IP they can rotate.
+    const limited = this.rateLimit(pubkey);
+    if (limited) return limited;
 
     // Cap distinct publishers per namespace. Existing publishers are always
     // allowed through so a full namespace keeps working for its members.
@@ -212,8 +331,8 @@ export class Namespace extends DurableObject {
       .filter(r => r && typeof r.pubkey === "string");
   }
 
-  broadcast(env) {
-    const msg = JSON.stringify({ type: "plan", plan: env });
+  broadcast(env, kind = "plan") {
+    const msg = JSON.stringify({ type: kind, plan: env });
     for (const ws of this.ctx.getWebSockets()) {
       try {
         const { from } = ws.deserializeAttachment() ?? {};
