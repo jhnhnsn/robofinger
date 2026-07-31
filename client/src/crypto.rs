@@ -105,9 +105,7 @@ impl Keys {
     /// unconfigured — an identity is still shareable before `init`.
     pub fn identity_blob(&self, label: &str, home: Option<Home>) -> String {
         Peer {
-            // Dots and pipes are field separators in a blob; a hostname like
-            // "my.laptop" would otherwise silently corrupt every later field.
-            label: label.replace(['.', '|'], "-"),
+            label: label.to_string(),
             pubkey: self.pubkey(),
             age_pub: self.age_secret.to_public().to_string(),
             home,
@@ -120,12 +118,32 @@ impl Keys {
     }
 }
 
-/// Where a peer publishes. `None` means "wherever I am" — the local
-/// ROBOFINGER_URL and namespace.
+/// Where a peer publishes: a relay base URL whose path is the namespace.
+/// `None` means "wherever I am" — the local ROBOFINGER_URL.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Home {
     pub url: String,
-    pub ns: String,
+}
+
+/// Percent-encode the few characters that would break a query string. Labels
+/// are cosmetic, so this is deliberately minimal rather than a full URL encoder.
+fn encode_label(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            ' ' => "%20".to_string(),
+            '#' => "%23".to_string(),
+            '&' => "%26".to_string(),
+            '?' => "%3F".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
+fn decode_label(s: &str) -> String {
+    s.replace("%20", " ")
+        .replace("%23", "#")
+        .replace("%26", "&")
+        .replace("%3F", "?")
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -138,84 +156,89 @@ pub struct Peer {
 }
 
 impl Peer {
-    /// Accepts both blob versions:
-    ///   rf1.<label>.<signkey>.<agekey>                       — same relay as you
-    ///   rf2.<label>.<signkey>.<agekey>.<url>|<namespace>     — carries its home
+    /// An address is a URL:
     ///
-    /// The home field is left as readable text so you can see at a glance where
-    /// a peer publishes. It may contain dots (every URL does), so the blob is
-    /// split on the first four separators only and the remainder is the home —
-    /// splitting on every dot would shred `relay.example.com`.
-    pub fn parse(blob: &str) -> Result<Peer, String> {
-        let blob = blob.trim();
-        // A label with a dot would shift every later field, so reject it at the
-        // source: `id` sanitizes labels, but a hand-edited peers file might not.
-        let p: Vec<&str> = blob.splitn(5, '.').collect();
-        let version = match p.first() {
-            Some(&"rf1") => "rf1",
-            Some(&"rf2") => "rf2",
-            _ => return Err("expected an rf1... or rf2... identity blob".into()),
-        };
-        let expected = if version == "rf1" { 4 } else { 5 };
-        if p.len() != expected {
-            return Err(format!(
-                "malformed {version} blob: expected {expected} parts, got {}",
-                p.len()
-            ));
-        }
-        // rf1 has no home, so a 4th segment containing a dot means the caller
-        // pasted an rf2 blob under an rf1 tag (or truncated one).
-        if version == "rf1" && p[3].contains('.') {
-            return Err("rf1 blob has trailing data — did you mean rf2?".into());
-        }
-        if B64.decode(p[2]).map(|v| v.len()) != Ok(32) {
-            return Err("bad ed25519 key".into());
-        }
-        if !p[3].starts_with("age1") {
-            return Err("bad age key".into());
+    ///   https://relay.example.com/plan/u/<pubkey>?label=laptop#<agekey>
+    ///   └────────── base = namespace ──┘    │           │         │
+    ///                                    identity     label   encryption key
+    ///
+    /// The base path IS the namespace, so a relay can live at
+    /// `example.com/plan` without colliding with the rest of the site.
+    ///
+    /// The age key sits in the fragment because browsers never send fragments
+    /// to servers — paste this in a browser and the relay still cannot learn
+    /// your encryption key. (A convention, not a guarantee: only well-behaved
+    /// relays are bound by it. Confidentiality still rests on encryption.)
+    pub fn parse(addr: &str) -> Result<Peer, String> {
+        let addr = addr.trim();
+        if !addr.starts_with("http://") && !addr.starts_with("https://") {
+            return Err("address must be an http(s) URL".into());
         }
 
-        let home = if version == "rf2" {
-            let (url, ns) = p[4]
-                .split_once('|')
-                .ok_or_else(|| "home must be <url>|<namespace>".to_string())?;
-            if url.is_empty() || ns.is_empty() {
-                return Err("home url and namespace must both be set".into());
-            }
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                return Err(format!("home url must be http(s): got {url}"));
-            }
-            Some(Home {
-                url: url.trim_end_matches('/').to_string(),
-                ns: ns.to_string(),
-            })
-        } else {
-            None
+        // Fragment first — everything after the first '#' is the age key.
+        let (rest, age_pub) = addr
+            .split_once('#')
+            .ok_or_else(|| "address is missing its #<agekey> fragment".to_string())?;
+        if !age_pub.starts_with("age1") {
+            return Err(format!("bad age key in fragment: {age_pub}"));
+        }
+
+        // Query is optional and carries only the display label.
+        let (path_part, query) = match rest.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (rest, None),
         };
+        let label = query
+            .and_then(|q| {
+                q.split('&')
+                    .find_map(|kv| kv.strip_prefix("label=").map(str::to_string))
+            })
+            .unwrap_or_default();
+
+        let (base, pubkey) = path_part
+            .rsplit_once("/u/")
+            .ok_or_else(|| "address must contain /u/<pubkey>".to_string())?;
+        if B64.decode(pubkey).map(|v| v.len()) != Ok(32) {
+            return Err(format!("bad ed25519 key: {pubkey}"));
+        }
+        if base.is_empty() {
+            return Err("address is missing its relay URL".into());
+        }
 
         Ok(Peer {
-            label: p[1].into(),
-            pubkey: p[2].into(),
-            age_pub: p[3].into(),
-            home,
+            label: if label.is_empty() {
+                pubkey[..8].to_string()
+            } else {
+                decode_label(&label)
+            },
+            pubkey: pubkey.to_string(),
+            age_pub: age_pub.to_string(),
+            home: Some(Home {
+                url: base.trim_end_matches('/').to_string(),
+            }),
         })
     }
 
     pub fn to_blob(&self) -> String {
-        match &self.home {
-            None => format!("rf1.{}.{}.{}", self.label, self.pubkey, self.age_pub),
-            Some(h) => format!(
-                "rf2.{}.{}.{}.{}|{}",
-                self.label, self.pubkey, self.age_pub, h.url, h.ns
-            ),
-        }
+        let base = self
+            .home
+            .as_ref()
+            .map(|h| h.url.as_str())
+            .unwrap_or_default();
+        format!(
+            "{}/u/{}?label={}#{}",
+            base,
+            self.pubkey,
+            encode_label(&self.label),
+            self.age_pub
+        )
     }
 
-    /// Relay and namespace to fetch this peer from, falling back to your own.
-    pub fn endpoint<'a>(&'a self, my_url: &'a str, my_ns: &'a str) -> (&'a str, &'a str) {
+    /// Relay base URL to fetch this peer from, falling back to your own.
+    pub fn endpoint<'a>(&'a self, my_url: &'a str) -> &'a str {
         match &self.home {
-            Some(h) => (&h.url, &h.ns),
-            None => (my_url, my_ns),
+            Some(h) => &h.url,
+            None => my_url,
         }
     }
 }
@@ -344,120 +367,91 @@ mod tests {
     }
 
     #[test]
-    fn home_is_readable_not_encoded() {
-        let k = keys_in("readable");
+    fn address_is_a_url_with_key_in_the_fragment() {
+        let k = keys_in("urlform");
         let home = Home {
-            url: "https://relay.example.com".into(),
-            ns: "team-ns".into(),
+            url: "https://relay.example.com/plan".into(),
         };
-        let blob = k.identity_blob("box", Some(home));
-        // The whole point: you can see where a peer publishes by looking.
-        assert!(
-            blob.ends_with(".https://relay.example.com|team-ns"),
-            "home should be plain text, got {blob}"
-        );
+        let addr = k.identity_blob("laptop", Some(home));
+        assert!(addr.starts_with("https://relay.example.com/plan/u/"));
+        assert!(addr.contains("?label=laptop"));
+        // The age key must be in the fragment: browsers never send it to servers.
+        let (_, frag) = addr.split_once('#').expect("needs a fragment");
+        assert_eq!(frag, k.age_secret.to_public().to_string());
+        let p = Peer::parse(&addr).unwrap();
+        assert_eq!(p.label, "laptop");
+        assert_eq!(p.pubkey, k.pubkey());
+        assert_eq!(p.home.unwrap().url, "https://relay.example.com/plan");
     }
 
     #[test]
-    fn dotted_urls_and_labels_survive() {
-        let k = keys_in("dots");
-        // A URL is full of dots — splitting on every dot would shred it.
+    fn path_is_the_namespace() {
+        let k = keys_in("pathns");
+        // A relay under a path coexists with the rest of the site, and deeper
+        // paths are separate rooms.
+        for base in [
+            "https://jhnhnsn.com/plan",
+            "https://jhnhnsn.com/plan/team-a",
+            "http://localhost:8787",
+        ] {
+            let addr = k.identity_blob("x", Some(Home { url: base.into() }));
+            let p = Peer::parse(&addr).unwrap();
+            assert_eq!(p.home.unwrap().url, base, "round-trip failed for {base}");
+        }
+    }
+
+    #[test]
+    fn labels_with_awkward_characters_survive() {
+        let k = keys_in("labels");
         let home = Home {
-            url: "https://a.b.c.example.com".into(),
-            ns: "n.s".into(),
+            url: "https://r.example.com".into(),
         };
-        let p = Peer::parse(&k.identity_blob("my.laptop", Some(home))).unwrap();
-        assert_eq!(p.label, "my-laptop", "dots in a label are sanitized");
-        let h = p.home.unwrap();
-        assert_eq!(h.url, "https://a.b.c.example.com");
-        assert_eq!(h.ns, "n.s", "dots in a namespace survive too");
+        // Spaces and separators would otherwise break the query string.
+        let p = Peer::parse(&k.identity_blob("my laptop", Some(home))).unwrap();
+        assert_eq!(p.label, "my laptop");
     }
 
     #[test]
-    fn home_url_must_be_http() {
-        let k = keys_in("scheme");
-        let bad = format!(
-            "rf2.x.{}.{}.ftp://nope.example|ns",
-            k.pubkey(),
-            k.age_secret.to_public()
-        );
-        assert!(
-            Peer::parse(&bad).is_err(),
-            "non-http scheme must be rejected"
-        );
-    }
-
-    #[test]
-    fn rf2_blob_carries_home_relay() {
-        let k = keys_in("rf2");
-        let home = Home {
-            url: "https://other.example.com".into(),
-            ns: "theirns".into(),
-        };
-        let blob = k.identity_blob("faraway", Some(home.clone()));
-        assert!(blob.starts_with("rf2."), "expected rf2, got {blob}");
-        let p = Peer::parse(&blob).unwrap();
-        assert_eq!(p.home, Some(home));
-        assert_eq!(p.label, "faraway");
-        // A trailing slash on the URL must not survive, or endpoint URLs double up.
-        let h2 = Home {
-            url: "https://x.example/".into(),
-            ns: "n".into(),
-        };
-        let p2 = Peer::parse(&k.identity_blob("t", Some(h2))).unwrap();
-        assert_eq!(p2.home.unwrap().url, "https://x.example");
-    }
-
-    #[test]
-    fn rf1_blobs_still_parse_and_mean_local() {
-        let k = keys_in("rf1compat");
-        let blob = k.identity_blob("local", None);
-        assert!(blob.starts_with("rf1."));
-        let p = Peer::parse(&blob).unwrap();
-        assert_eq!(p.home, None, "no home means use my own relay");
-        assert_eq!(p.endpoint("https://mine", "myns"), ("https://mine", "myns"));
-    }
-
-    #[test]
-    fn endpoint_prefers_the_peers_own_relay() {
-        let k = keys_in("endpoint");
-        let home = Home {
-            url: "https://theirs".into(),
-            ns: "theirns".into(),
-        };
-        let p = Peer::parse(&k.identity_blob("x", Some(home))).unwrap();
-        assert_eq!(
-            p.endpoint("https://mine", "myns"),
-            ("https://theirs", "theirns")
-        );
-    }
-
-    #[test]
-    fn malformed_blobs_are_rejected() {
-        assert!(Peer::parse("garbage").is_err());
-        assert!(Peer::parse("rf1.a.b.c").is_err(), "bad keys");
-        assert!(Peer::parse("rf2.a.b.c").is_err(), "rf2 needs 5 parts");
-        assert!(Peer::parse("rf9.a.b.c.d").is_err(), "unknown version");
-        let k = keys_in("malformed");
-        // rf2 with an unparseable home field
-        let bad = format!(
-            "rf2.x.{}.{}.no-pipe-here",
-            k.pubkey(),
-            k.age_secret.to_public()
-        );
-        assert!(Peer::parse(&bad).is_err(), "home needs url|ns");
+    fn malformed_addresses_are_rejected() {
+        let k = keys_in("badaddr");
+        let key = k.pubkey();
+        let age = k.age_secret.to_public().to_string();
+        let cases = [
+            ("not-a-url", "must be http(s)"),
+            ("https://r.example.com/u/{key}", "missing fragment"),
+            ("https://r.example.com/plans#{age}", "no /u/ segment"),
+            ("https://r.example.com/u/short#{age}", "bad ed25519 key"),
+            ("https://r.example.com/u/{key}#notanagekey", "bad age key"),
+        ];
+        for (tpl, why) in cases {
+            let addr = tpl.replace("{key}", &key).replace("{age}", &age);
+            assert!(Peer::parse(&addr).is_err(), "should reject ({why}): {addr}");
+        }
     }
 
     #[test]
     fn identity_blob_roundtrips() {
         let k = keys_in("blob");
-        let blob = k.identity_blob("laptop", None);
-        let p = Peer::parse(&blob).unwrap();
+        let home = Home {
+            url: "https://relay.example.com".into(),
+        };
+        let addr = k.identity_blob("laptop", Some(home));
+        let p = Peer::parse(&addr).unwrap();
         assert_eq!(p.label, "laptop");
         assert_eq!(p.pubkey, k.pubkey());
         assert_eq!(p.age_pub, k.age_secret.to_public().to_string());
-        assert!(Peer::parse("garbage").is_err());
-        assert!(Peer::parse("rf1.a.b.c").is_err(), "bad keys rejected");
+        // Round-trips through to_blob() unchanged, so a re-shared address is
+        // byte-identical to the original.
+        assert_eq!(p.to_blob(), addr);
+    }
+
+    #[test]
+    fn an_address_without_a_relay_is_rejected() {
+        let k = keys_in("norelay");
+        // identity_blob with no home cannot produce a usable address — there is
+        // nowhere to fetch from. Better to fail loudly than emit a broken URL.
+        let addr = k.identity_blob("nowhere", None);
+        assert!(Peer::parse(&addr).is_err(), "got {addr}");
     }
 
     #[test]

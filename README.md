@@ -88,7 +88,7 @@ package manager.
 ### 3. Configure
 
 ```sh
-robofinger init --url https://relay.example.com --ns your-team-namespace
+robofinger init --url https://relay.example.com/plan
 ```
 
 Writes `~/.config/robofinger/config`, generates keys on first use, and prints
@@ -166,7 +166,8 @@ to back off, don't silently ignore it.
 | `robofinger init --url <u> --ns <n>` | Write config, generate keys, offer hook install |
 | `robofinger hooks install [--project]` | Wire into Claude Code (account or repo scope) |
 | `robofinger id [label]` | Print your shareable identity blob |
-| `robofinger peer add\|rm\|list [-v]` | Manage trusted peers; `-v` prints full blobs |
+| `robofinger peer add\|rm\|list\|update [-v]` | Manage trusted peers; `update` accepts a move |
+| `robofinger moved <new address>` | Publish a signed forwarding pointer |
 | `robofinger claim "<task>" <glob>...` | Publish a claim |
 | `robofinger release` | Drop claims, stay working |
 | `robofinger done` | Mark finished |
@@ -196,31 +197,50 @@ never disturbs claim ordering. They are encrypted to exactly the same recipient
 list as claims — your peers and nobody else. The relay stores ciphertext and
 retains the most recent 500 per key.
 
-## Following peers on another relay
+## Addresses
 
-An identity blob carries where its owner publishes, so you can follow someone
-who runs their own relay:
-
-```
-rf1.<label>.<signkey>.<agekey>                     — same relay as you
-rf2.<label>.<signkey>.<agekey>.<url>|<namespace>   — carries its own relay
-```
-
-The home field is plain text so you can see where a peer publishes just by
-looking at their blob, or at your `peers` file:
+An address is a URL:
 
 ```
-rf2.laptop.fHC-SO9S….age1tj2wx….https://relay.example.com|team-ns
+https://relay.example.com/plan/u/<pubkey>?label=laptop#<agekey>
+└──────── base = namespace ───┘    │          │          │
+                                identity    label   encryption key
 ```
 
-Blobs are split on the first four dots only, so dotted URLs and namespaces
-survive intact. Labels have `.` and `|` replaced with `-`, since a hostname
-like `my.laptop` would otherwise shift every later field.
+**The base path is the namespace.** A relay can live at `example.com/plan`
+without colliding with the rest of the site, and `example.com/plan/team-a` is a
+separate room with separate storage. There is no separate namespace field —
+one URL says where and who.
 
-`robofinger id` emits `rf2` once configured; `peer add` accepts either. The
-client groups peers by endpoint and queries each relay it needs, so a mixed
-peer list works transparently. `rf1` blobs still parse and mean "same relay as
-me", so nothing breaks for existing peers.
+**The age key sits in the fragment**, which browsers never send to servers. Paste
+an address into a browser and the relay still cannot learn your encryption key.
+That is a convention rather than a guarantee — only well-behaved relays are
+bound by it — so confidentiality still rests on encryption, not on the fragment.
+
+`robofinger id` prints yours; `peer add` takes anyone's. Peers on different
+relays work transparently: the client groups them by base URL and queries each
+relay it needs.
+
+## Moving relay
+
+Publish a signed pointer at your old address before you leave:
+
+```sh
+robofinger moved https://newhost.example.com/plan/u/<pubkey>#<agekey>
+```
+
+Peers see it in `peer list` but **are never redirected automatically** — a
+stolen key would otherwise silently repoint them at an attacker's relay:
+
+```
+alice   39M2aVuUpbT6   old.example.com/plan        2m ago
+        ↳ moved to https://newhost.example.com/plan/u/39M2…
+          accept with: robofinger peer update alice
+```
+
+`peer update` verifies the pointer was signed by the same key that owns the old
+address, and refuses a forward that names a *different* key — that would be an
+identity swap, not a move. Pointers expire after a year.
 
 ## Plan format
 

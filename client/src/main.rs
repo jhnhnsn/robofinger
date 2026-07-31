@@ -40,7 +40,9 @@ setup
   hooks uninstall [--project]         remove the hooks
   peer add <rf1...>                   trust a peer (subscribe + let them decrypt)
   peer rm <label>                     revoke; your next plan is opaque to them
-  peer list                           show trusted peers
+  peer list [-v]                      show trusted peers, relay and last-seen
+  peer update <label>                 accept a peer's published move
+  moved <new address>                 tell peers you have moved relay
 
 use
   claim \"<task>\" <glob>...            announce what you're touching
@@ -97,8 +99,10 @@ impl Plan {
 }
 
 struct Cfg {
+    /// Relay base URL. Its path IS the namespace, so
+    /// `https://example.com/plan` and `https://example.com/plan/team-a` are
+    /// separate rooms with separate storage.
     url: String,
-    ns: String,
     agent: String,
 }
 
@@ -122,16 +126,16 @@ fn cfg() -> Option<Cfg> {
             .filter(|s| !s.is_empty())
             .or_else(|| file.get(k).cloned())
     };
-    let url = get("ROBOFINGER_URL")?;
-    let ns = get("ROBOFINGER_NS")?;
+    let mut url = get("ROBOFINGER_URL")?.trim_end_matches('/').to_string();
+    // Back-compat: an older config carried the namespace separately. Fold it
+    // into the URL path, which is where it lives now.
+    if let Some(ns) = get("ROBOFINGER_NS").filter(|s| !s.is_empty()) {
+        url = format!("{url}/{ns}");
+    }
     let agent = get("ROBOFINGER_AGENT")
         .or_else(hostname)
         .unwrap_or_else(|| "unknown".into());
-    Some(Cfg {
-        url: url.trim_end_matches('/').to_string(),
-        ns,
-        agent,
-    })
+    Some(Cfg { url, agent })
 }
 
 fn hostname() -> Option<String> {
@@ -235,20 +239,16 @@ impl Envelope {
 /// Peers added from an `rf2` blob may live on a different relay entirely, so a
 /// single fetch is no longer enough. Most setups have exactly one group, which
 /// keeps the common case to one request.
-fn endpoints(c: &Cfg, k: &Keys, subs: &[Peer]) -> Vec<(String, String, Vec<String>)> {
-    let mut groups: Vec<(String, String, Vec<String>)> = Vec::new();
-    let mut add = |url: &str, ns: &str, key: String| match groups
-        .iter_mut()
-        .find(|(u, n, _)| u == url && n == ns)
-    {
-        Some((_, _, keys)) => keys.push(key),
-        None => groups.push((url.to_string(), ns.to_string(), vec![key])),
+fn endpoints(c: &Cfg, k: &Keys, subs: &[Peer]) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    let mut add = |url: &str, key: String| match groups.iter_mut().find(|(u, _)| u == url) {
+        Some((_, keys)) => keys.push(key),
+        None => groups.push((url.to_string(), vec![key])),
     };
     // Our own key always lives on our own relay.
-    add(&c.url, &c.ns, k.pubkey());
+    add(&c.url, k.pubkey());
     for p in subs {
-        let (url, ns) = p.endpoint(&c.url, &c.ns);
-        add(url, ns, p.pubkey.clone());
+        add(p.endpoint(&c.url), p.pubkey.clone());
     }
     groups
 }
@@ -257,14 +257,14 @@ fn endpoints(c: &Cfg, k: &Keys, subs: &[Peer]) -> Vec<(String, String, Vec<Strin
 /// that hosts a key we trust, then verify and decrypt.
 fn fetch_envelopes(c: &Cfg, k: &Keys, subs: &[Peer], path: &str, query: &str) -> Vec<Envelope> {
     let mut out = Vec::new();
-    for (url, ns, keys) in endpoints(c, k, subs) {
+    for (url, keys) in endpoints(c, k, subs) {
         // Past ~100 keys the URL exceeds what the edge accepts, so fetch
         // everything and filter locally. Untrusted keys are dropped below
         // either way, so correctness is unchanged.
         let base = if keys.len() <= MAX_FROM {
-            format!("{url}/ns/{ns}/{path}?from={}", keys.join(","))
+            format!("{url}/{path}?from={}", keys.join(","))
         } else {
-            format!("{url}/ns/{ns}/{path}?")
+            format!("{url}/{path}?")
         };
         let full = if query.is_empty() {
             base
@@ -310,6 +310,27 @@ fn fetch_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
         .iter()
         .filter_map(|e| decrypt_plan(e, k))
         .collect()
+}
+
+/// A signed "I moved" pointer, if the peer published one.
+///
+/// Verified against the same key that owns the old address — an unsigned
+/// redirect would let anyone hijack a peer by pointing them at their own relay.
+fn fetch_forward(url: &str, pubkey: &str, k: &Keys, subs: &[Peer]) -> Option<String> {
+    let env: Envelope = ureq::get(&format!("{url}/forward/{pubkey}"))
+        .call()
+        .ok()
+        .and_then(|mut r| r.body_mut().read_json::<serde_json::Value>().ok())
+        .and_then(|v| serde_json::from_value(v).ok())?;
+    if env.pubkey != pubkey || !crypto::verify(&env.pubkey, &env.sig, &env.signed_message()) {
+        return None;
+    }
+    // The new address is encrypted like everything else, so only peers the
+    // mover still trusts learn where they went.
+    let _ = subs;
+    let plain = crypto::decrypt(&env.body, &k.age_secret).ok()?;
+    let plan: Plan = serde_json::from_slice(&plain).ok()?;
+    Some(plan.task)
 }
 
 /// Newest-first posts from you and everyone you trust.
@@ -383,11 +404,31 @@ fn send(c: &Cfg, k: &Keys, kind: &str, seq: u64, body: String) -> Result<(), Str
         body,
     };
     env.sig = k.sign(&env.signed_message());
-    let url = format!("{}/ns/{}/{kind}/{}", c.url, c.ns, k.pubkey());
+    let url = format!("{}/{kind}/{}", c.url, k.pubkey());
     ureq::put(&url)
         .send_json(&env)
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Publish a signed forwarding pointer at the OLD address.
+fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
+    let entry = Plan {
+        agent: c.agent.clone(),
+        pubkey: k.pubkey(),
+        seq: now() as u64,
+        epoch: now(),
+        status: "moved".into(),
+        task: new_addr.to_string(),
+        touching: vec![],
+        project: String::new(),
+        eta_s: 0,
+    };
+    let body = crypto::encrypt(
+        &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
+        &recipients(k),
+    )?;
+    send(c, k, "forward", entry.seq, body)
 }
 
 /// Append a post. Posts carry their own seq space, so posting never disturbs
@@ -511,15 +552,25 @@ fn main() {
             // Keep values already configured so re-running init is not destructive.
             let existing = config_file();
             let url = url.or_else(|| existing.get("ROBOFINGER_URL").cloned());
-            let ns = ns.or_else(|| existing.get("ROBOFINGER_NS").cloned());
-            let (Some(url), Some(ns)) = (url, ns) else {
+            let Some(mut url) = url else {
                 eprintln!(
-                    "usage: robofinger init --url <relay url> --ns <namespace> [--agent <label>]"
+                    "usage: robofinger init --url <relay url> [--ns <room>] [--agent <label>]"
                 );
+                eprintln!("  the relay URL's path is the namespace, e.g.");
+                eprintln!("    https://example.com/plan            your own space");
+                eprintln!("    https://example.com/plan/team-a     a shared room");
                 std::process::exit(1);
             };
+            url = url.trim_end_matches('/').to_string();
+            // --ns is sugar for appending a path segment, kept because it reads
+            // naturally when joining a shared room.
+            if let Some(ns) = ns.filter(|s| !s.is_empty())
+                && !url.ends_with(&format!("/{ns}"))
+            {
+                url = format!("{url}/{ns}");
+            }
 
-            let mut body = format!("ROBOFINGER_URL={url}\nROBOFINGER_NS={ns}\n");
+            let mut body = format!("ROBOFINGER_URL={url}\n");
             if let Some(a) = agent.or_else(|| existing.get("ROBOFINGER_AGENT").cloned()) {
                 body.push_str(&format!("ROBOFINGER_AGENT={a}\n"));
             }
@@ -534,10 +585,7 @@ fn main() {
                 "  {}",
                 k.identity_blob(
                     &hostname().unwrap_or_else(|| "agent".into()),
-                    Some(crypto::Home {
-                        url: url.clone(),
-                        ns: ns.clone()
-                    })
+                    Some(crypto::Home { url: url.clone() })
                 )
             );
             println!("\nthey run:  robofinger peer add <your blob>");
@@ -588,10 +636,7 @@ fn main() {
                 .cloned()
                 .or_else(hostname)
                 .unwrap_or_else(|| "agent".into());
-            let home = cfg().map(|c| crypto::Home {
-                url: c.url,
-                ns: c.ns,
-            });
+            let home = cfg().map(|c| crypto::Home { url: c.url });
             println!("{}", k.identity_blob(&label, home));
             eprintln!("\nshare that line with a peer; they run: robofinger peer add <blob>");
             return;
@@ -623,6 +668,57 @@ fn main() {
                         }
                         Err(e) => {
                             eprintln!("bad identity blob: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                "update" => {
+                    let Some(which) = args.get(2) else {
+                        eprintln!("usage: robofinger peer update <label>");
+                        std::process::exit(1);
+                    };
+                    let Some(c) = cfg() else {
+                        eprintln!("not configured — run robofinger init first");
+                        std::process::exit(1);
+                    };
+                    let Some(idx) = peers.iter().position(|p| &p.label == which) else {
+                        eprintln!("no peer named {which}");
+                        std::process::exit(1);
+                    };
+                    let old = peers[idx].clone();
+                    let Some(dest) = fetch_forward(old.endpoint(&c.url), &old.pubkey, &k, &peers)
+                    else {
+                        println!("{which} has not published a forwarding pointer");
+                        return;
+                    };
+                    match Peer::parse(&dest) {
+                        Ok(mut new) => {
+                            // The move is only trustworthy because it was signed
+                            // by the same key. Refuse a "move" to a different
+                            // identity — that is not a move, it is a swap.
+                            if new.pubkey != old.pubkey {
+                                eprintln!(
+                                    "refusing: forward points at a DIFFERENT key\n  old {}\n  new {}",
+                                    &old.pubkey[..16],
+                                    &new.pubkey[..16]
+                                );
+                                std::process::exit(1);
+                            }
+                            new.label = old.label.clone();
+                            peers[idx] = new.clone();
+                            match crypto::save_peers(&peers) {
+                                Ok(_) => println!(
+                                    "{which} updated -> {}",
+                                    new.home.map(|h| h.url).unwrap_or_default()
+                                ),
+                                Err(e) => {
+                                    eprintln!("{e}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("forward is not a valid address: {e}");
                             std::process::exit(1);
                         }
                     }
@@ -671,13 +767,11 @@ fn main() {
                     let t = now();
                     for p in &peers {
                         let where_ = match &p.home {
-                            Some(h) => format!(
-                                "{}/{}",
-                                h.url
-                                    .trim_start_matches("https://")
-                                    .trim_start_matches("http://"),
-                                h.ns
-                            ),
+                            Some(h) => h
+                                .url
+                                .trim_start_matches("https://")
+                                .trim_start_matches("http://")
+                                .to_string(),
                             None => "(your relay)".into(),
                         };
                         let last = match seen.get(&p.pubkey) {
@@ -691,13 +785,25 @@ fn main() {
                             where_,
                             last
                         );
+                        // Surface a move, but never follow it automatically: a
+                        // stolen key could otherwise silently repoint you at an
+                        // attacker's relay.
+                        if let Some(dest) = cfg()
+                            .and_then(|c| fetch_forward(p.endpoint(&c.url), &p.pubkey, &k, &peers))
+                        {
+                            println!("               ↳ moved to {dest}");
+                            println!(
+                                "                 accept with: robofinger peer update {}",
+                                p.label
+                            );
+                        }
                         if verbose {
                             println!("               {}", p.to_blob());
                         }
                     }
                 }
                 _ => {
-                    eprintln!("usage: robofinger peer add|rm|list [-v]");
+                    eprintln!("usage: robofinger peer add|rm|list|update [-v]");
                     std::process::exit(1);
                 }
             }
@@ -904,6 +1010,27 @@ fn main() {
                 println!("nothing from {who} yet (or their posts predate your key exchange)");
             }
         }
+        "moved" => {
+            let Some(new_addr) = args.get(1) else {
+                eprintln!("usage: robofinger moved <your new address>");
+                eprintln!("  publishes a signed pointer so peers can find you");
+                std::process::exit(1);
+            };
+            if let Err(e) = crypto::Peer::parse(new_addr) {
+                eprintln!("that does not look like an address: {e}");
+                std::process::exit(1);
+            }
+            match publish_forward(&c, &k, new_addr) {
+                Ok(_) => {
+                    println!("published forwarding pointer -> {new_addr}");
+                    println!("peers will see it next time they check; it expires in a year.");
+                }
+                Err(e) => {
+                    eprintln!("failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "watch" => watch(&c, &k),
         _ => {
             eprintln!("unknown command: {cmd}\n\n{USAGE}");
@@ -923,9 +1050,9 @@ fn watch(c: &Cfg, k: &Keys) {
     let mut want: Vec<String> = subs.iter().map(|p| p.pubkey.clone()).collect();
     want.push(k.pubkey());
     let url = if want.len() <= MAX_FROM {
-        format!("{}/ns/{}/subscribe?from={}", ws_url, c.ns, want.join(","))
+        format!("{ws_url}/subscribe?from={}", want.join(","))
     } else {
-        format!("{}/ns/{}/subscribe", ws_url, c.ns)
+        format!("{ws_url}/subscribe")
     };
     let (mut sock, _) = match tungstenite::connect(&url) {
         Ok(x) => x,
@@ -934,7 +1061,7 @@ fn watch(c: &Cfg, k: &Keys) {
             std::process::exit(1);
         }
     };
-    eprintln!("watching {} as {} ({} peer(s))", c.ns, c.agent, subs.len());
+    eprintln!("watching {} as {} ({} peer(s))", c.url, c.agent, subs.len());
 
     // Verify signature, then decrypt. Anything that fails either step is not
     // shown — an unverified plan is worse than no plan.

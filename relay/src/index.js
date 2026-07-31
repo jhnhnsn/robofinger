@@ -28,6 +28,10 @@ const MAX_POSTS_PER_KEY = 500;
 const DEFAULT_POST_LIMIT = 20;
 const MAX_POST_LIMIT = 100;
 
+// A forward must outlive the move that prompted it, but not forever — a year
+// is long enough that anyone still checking will find the trail.
+const FORWARD_TTL = 365 * 24 * 60 * 60;
+
 // One Namespace DO per relay-routing key. Holds the latest signed envelope per
 // identity and fans it out to subscribers.
 //
@@ -67,6 +71,13 @@ export class Namespace extends DurableObject {
       UNIQUE(pubkey, seq)
     )`);
     this.sql.exec("CREATE INDEX IF NOT EXISTS idx_posts_pubkey ON posts(pubkey, id DESC)");
+    // Forwarding pointers: one per key, overwritten, long-lived.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS forwards(
+      pubkey TEXT PRIMARY KEY,
+      seq    INTEGER NOT NULL,
+      epoch  INTEGER NOT NULL,
+      body   TEXT NOT NULL
+    )`);
     // Pre-crypto namespaces keyed rows on `agent` and stored plaintext plans.
     // Those rows can never satisfy a signature check, so drop them rather than
     // let them surface as unverifiable garbage.
@@ -86,11 +97,12 @@ export class Namespace extends DurableObject {
 
   async fetch(request) {
     const url = new URL(request.url);
-    const path = url.pathname.replace(/^\/[^/]+\/[^/]+/, ""); // strip /ns/{name}
+    const verb = request.headers.get("x-rf-verb");
+    const key = request.headers.get("x-rf-key");
 
-    if (path === "/subscribe") return this.subscribe(url);
-    if (path === "/plans") return json(this.all(url.searchParams.get("from")));
-    if (path === "/posts") {
+    if (verb === "subscribe") return this.subscribe(url);
+    if (verb === "plans") return json(this.all(url.searchParams.get("from")));
+    if (verb === "posts") {
       return json(this.posts(
         url.searchParams.get("from"),
         Number(url.searchParams.get("limit")) || DEFAULT_POST_LIMIT,
@@ -98,13 +110,64 @@ export class Namespace extends DurableObject {
       ));
     }
 
-    const put = path.match(/^\/plan\/([A-Za-z0-9_-]{43})$/); // base64url ed25519 pubkey
-    if (put && request.method === "PUT") return this.put(put[1], request);
+    // One identity: their plans, posts and forward in a single round trip.
+    // This is the address you paste, so it should answer everything at once.
+    if (verb === "u" && request.method === "GET") {
+      return json({
+        pubkey: key,
+        plans: this.all(key),
+        posts: this.posts(key, DEFAULT_POST_LIMIT, null),
+        forward: this.forward(key),
+      });
+    }
 
-    const post = path.match(/^\/post\/([A-Za-z0-9_-]{43})$/);
-    if (post && request.method === "PUT") return this.addPost(post[1], request);
+    if (verb === "plan" && request.method === "PUT") return this.put(key, request);
+    if (verb === "post" && request.method === "PUT") return this.addPost(key, request);
+    if (verb === "forward" && request.method === "PUT") return this.setForward(key, request);
+    if (verb === "forward" && request.method === "GET") return json(this.forward(key) ?? {});
 
     return new Response("not found", { status: 404 });
+  }
+
+  /// A signed "I moved" pointer. Separate from plans because it must outlive
+  /// them: a peer checking back months later still needs the trail. Signed by
+  /// the same key that owns the old address, so only its holder can redirect
+  /// it — an unsigned redirect would be a hijacking primitive.
+  async setForward(pubkey, request) {
+    const { env, seq, error } = await this.readEnvelope(pubkey, request);
+    if (error) return error;
+
+    const limited = this.rateLimit(pubkey);
+    if (limited) return limited;
+
+    const [prev] = this.sql.exec(
+      "SELECT seq FROM forwards WHERE pubkey=?", pubkey
+    ).toArray();
+    if (prev && seq <= prev.seq) {
+      return json({ error: "stale seq", have: prev.seq, got: seq }, 409);
+    }
+
+    this.sql.exec(
+      `INSERT INTO forwards(pubkey,seq,epoch,body) VALUES(?,?,?,?)
+       ON CONFLICT(pubkey) DO UPDATE SET seq=excluded.seq, epoch=excluded.epoch, body=excluded.body`,
+      pubkey, seq, Math.floor(Date.now() / 1000), JSON.stringify(env)
+    );
+    return json({ ok: true, seq });
+  }
+
+  /// The forward for one key, or null. Expires after FORWARD_TTL so a free
+  /// relay does not carry abandoned pointers forever.
+  forward(pubkey) {
+    if (!pubkey) return null;
+    const [row] = this.sql.exec(
+      "SELECT epoch, body FROM forwards WHERE pubkey=?", pubkey
+    ).toArray();
+    if (!row) return null;
+    if (Math.floor(Date.now() / 1000) - row.epoch > FORWARD_TTL) {
+      this.sql.exec("DELETE FROM forwards WHERE pubkey=?", pubkey);
+      return null;
+    }
+    try { return JSON.parse(row.body); } catch { return null; }
   }
 
   subscribe(url) {
@@ -374,14 +437,38 @@ const json = (o, status = 200, extraHeaders = {}) =>
     status, headers: { "content-type": "application/json", ...extraHeaders }
   });
 
+/// Split a request path into (base, verb).
+///
+/// The base path IS the namespace — a relay at `example.com/plan` and one at
+/// `example.com/plan/team-a` are separate rooms with separate storage, and
+/// neither collides with the rest of the site. This replaces the old
+/// `/ns/{name}/` prefix: one concept (a URL) instead of two (relay + namespace).
+///
+/// Verbs are the last one or two segments:
+///   <base>/plans            <base>/posts        <base>/subscribe
+///   <base>/u/<pubkey>       — read one identity
+///   <base>/plan/<pubkey>    <base>/post/<pubkey>   <base>/forward/<pubkey>
+const KEY = "[A-Za-z0-9_-]{43}";
+function route(pathname) {
+  const two = new RegExp(`^(.*)/(u|plan|post|forward)/(${KEY})$`);
+  const m2 = pathname.match(two);
+  if (m2) return { base: m2[1] || "/", verb: m2[2], key: m2[3] };
+
+  const m1 = pathname.match(/^(.*)\/(plans|posts|subscribe)$/);
+  if (m1) return { base: m1[1] || "/", verb: m1[2], key: null };
+
+  return null;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    // /ns/{namespace}/... — a routing key, not a secret. Confidentiality comes
-    // from encryption; authenticity from signatures.
-    const m = url.pathname.match(/^\/ns\/([A-Za-z0-9._-]{4,128})(\/|$)/);
-    if (!m) {
-      return json({ error: "usage: /ns/{namespace}/{plan/<pubkey>|plans|subscribe}" }, 404);
+    const r = route(url.pathname);
+    if (!r) {
+      return json(
+        { error: "usage: <base>/{plans|posts|subscribe} or <base>/{u|plan|post|forward}/<pubkey>" },
+        404
+      );
     }
 
     // Reject oversized writes here, on the declared length, before the body is
@@ -414,7 +501,20 @@ export default {
       }
     }
 
-    const id = env.NAMESPACE.idFromName(m[1]);
-    return env.NAMESPACE.get(id).fetch(forward);
+    // The base path is the namespace: /plan and /plan/team-a are separate DOs.
+    //
+    // The parsed verb/key travel as headers because the DO cannot re-parse the
+    // path without knowing where the base ends. Request headers are immutable,
+    // so build a fresh Request rather than mutating the incoming one.
+    const headers = new Headers(forward.headers);
+    headers.set("x-rf-verb", r.verb);
+    if (r.key) headers.set("x-rf-key", r.key);
+    const tagged = new Request(forward.url, {
+      method: forward.method,
+      headers,
+      body: forward.method === "PUT" ? await forward.arrayBuffer() : undefined,
+    });
+    const id = env.NAMESPACE.idFromName(r.base);
+    return env.NAMESPACE.get(id).fetch(tagged);
   }
 };
