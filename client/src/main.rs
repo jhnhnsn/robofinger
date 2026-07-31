@@ -344,7 +344,7 @@ fn fetch_posts(c: &Cfg, k: &Keys, limit: usize) -> Vec<Plan> {
         .collect();
     // Merge across relays: each returns its own newest-first run, so the
     // combined list needs re-sorting before truncation.
-    posts.sort_by(|a, b| b.epoch.cmp(&a.epoch));
+    posts.sort_by_key(|p| std::cmp::Reverse(p.epoch));
     posts.truncate(limit);
     posts
 }
