@@ -33,23 +33,63 @@ Agents announce what they're working on. Peers get warned before they collide.
 robofinger claim "migrate session store" 'src/auth/**'
 ```
 
-Now anyone else's agent that tries to edit `src/auth/anything` sees the warning
-above, in context, before the write happens. Their agent decides what to do —
-work elsewhere, or coordinate. Nothing is blocked, nothing deadlocks.
+Your agent does this at the start of a task; hooks handle the rest. Everyone
+else's agent now sees that claim before it edits anything under `src/auth/`.
 
-That's it. The rest is making it invisible.
+## What it looks like in a session
+
+Sam opens Claude Code. Before he types anything, his agent already knows what
+Jo is doing:
+
+> **SessionStart hook**
+> ```
+> Peer agent claims currently active:
+>   jo claims repo/src/auth/** (migrate session store to redis)
+> Before editing a claimed path, consider whether to coordinate.
+> ```
+
+Sam asks for something that would collide:
+
+> **Sam:** Add rate limiting to the session handler
+>
+> **Claude:** I'll start with `src/auth/session.ts`…
+>
+> *— PreToolUse hook fires before the edit —*
+> ```
+> CLAIM CONFLICT on src/auth/session.ts:
+> jo (migrate session store to redis) claims src/auth/**
+> This is advisory. Consider working elsewhere, or coordinate first.
+> ```
+>
+> **Claude:** Jo's mid-way through migrating the session store to Redis and has
+> `src/auth/**` claimed. Editing `session.ts` now would conflict with her work.
+>
+> I can add the rate limiting at the route layer instead —
+> `src/api/routes.ts` is unclaimed and gets the same result without touching
+> her files. Want me to do that, or wait for her migration to land?
+
+Sam never asked "is anyone in auth?" Nobody pinged anyone. The collision was
+caught **before the write**, with enough context for the agent to propose a
+real alternative.
+
+On an unclaimed file the hook emits **zero bytes** — you never know it ran.
 
 ## What you get
 
-**Collisions caught before they happen.** A `PreToolUse` hook checks every
-Edit and Write against what your peers have claimed. Silent when there's no
-conflict; a sentence of context when there is.
+**Your agent knows what everyone else's agent is doing.** Peer claims land in
+its context at session start and before every Edit or Write. It reasons about
+them like any other fact.
 
-**No cleanup when things break.** Claims expire on their own. An agent whose
-laptop dies releases its own work — no stuck locks, no admin, no "who has
-src/auth checked out?"
+**Nothing gets blocked.** These are warnings, not locks. Your agent decides —
+work elsewhere, ask, or proceed anyway. A hard lock deadlocks the moment
+someone's laptop dies; a warning with context never does.
 
-**A shared log worth reading.** The other half of the `.plan` tradition:
+**No cleanup when things break.** Claims expire on their own. An agent that
+crashes releases its own work — no stuck locks, no "who has src/auth checked
+out?"
+
+**A shared log worth reading.** The other half of the `.plan` tradition — your
+agent can write to it too, so context survives past the session:
 
 ```sh
 $ robofinger post "Session migration is uglier than expected. The old store
@@ -123,15 +163,14 @@ releases them when it's done; peers get warned automatically.
 
 ## A day with it
 
-| | |
-|---|---|
-| **09:15** | Jo's agent claims `src/auth/**` for a session-store migration |
-| **09:45** | Sam's agent goes to edit `src/auth/session.ts` — sees Jo's claim and takes the API work instead |
-| **12:30** | Jo posts what she learned; Sam reads it over lunch |
-| **17:30** | Jo's agent releases the claim; auth is free again |
+| | | Who typed it |
+|---|---|---|
+| **09:15** | Jo's agent claims `src/auth/**` for a session-store migration | agent |
+| **09:45** | Sam's agent hits the claim, proposes the API layer instead | agent |
+| **12:30** | Jo posts what she learned; Sam reads it over lunch | human |
+| **17:30** | Jo's agent releases the claim; auth is free again | agent |
 
-The only two commands anyone typed were `post` and `log`. Everything else was
-hooks.
+Two humans, one shared repo, zero "hey is anyone in auth?" messages.
 
 ## Commands
 
@@ -145,10 +184,6 @@ robofinger --help               everything else
 ```
 
 ## Good to know
-
-**Warnings are advisory.** Nothing is ever blocked. A hard lock deadlocks the
-moment an agent dies mid-task, and you'd disable it within a week. A warning
-with context is the stronger tool.
 
 **Claiming is best-effort.** The hooks always run, but *publishing* a claim is
 an instruction your agent follows. If it skips one, peers see nothing — you
