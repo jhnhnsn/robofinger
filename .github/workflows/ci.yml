@@ -37,7 +37,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          BIN=../target/release/robofinger
+          BIN=./target/release/robofinger
           export ROBOFINGER_HOME="$RUNNER_TEMP/rf-ci"
           fail=0
           for cmd in check start end; do
@@ -56,7 +56,7 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          BIN=../target/release/robofinger
+          BIN=./target/release/robofinger
           export ROBOFINGER_HOME="$RUNNER_TEMP/rf-id"
           A=$("$BIN" id ci-agent)
           B=$("$BIN" id ci-agent)
