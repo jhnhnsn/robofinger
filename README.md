@@ -204,8 +204,39 @@ robofinger peer rm <label>         # revoke
 - **Traffic analysis.** The relay sees which keys publish, when, and how often.
 - **A compromised peer.** Anyone you add as a recipient can read your plans and
   screenshot them.
-- **Loss of `~/.config/robofinger/`.** No key backup or rotation yet; losing the
-  keys means generating a new identity and re-exchanging with every peer.
+- **Key rotation.** Not implemented. Changing identity means re-exchanging with
+  every peer.
+
+### Backing up keys
+
+Losing `~/.config/robofinger/` means a new identity and re-exchanging with every
+peer, so back the two key files up somewhere encrypted. Any password manager
+works; below is [envstow](https://github.com/jhnhnsn/envstow), using a central
+store so the keys never enter a git repo:
+
+```sh
+envstow init --store robofinger
+export ENVSTOW_STORE=robofinger
+envstow set ROBOFINGER_SIGNING_KEY < ~/.config/robofinger/signing.key
+envstow set ROBOFINGER_AGE_KEY     < ~/.config/robofinger/age.key
+```
+
+Restore on a new machine:
+
+```sh
+export ENVSTOW_STORE=robofinger
+mkdir -p ~/.config/robofinger
+envstow run --only ROBOFINGER_SIGNING_KEY,ROBOFINGER_AGE_KEY -- sh -c '
+  umask 077
+  printf "%s" "$ROBOFINGER_SIGNING_KEY" > ~/.config/robofinger/signing.key
+  printf "%s" "$ROBOFINGER_AGE_KEY"     > ~/.config/robofinger/age.key
+'
+robofinger id      # must print the same rf1... blob as before
+```
+
+Piping through stdin keeps the key material off the command line and out of
+shell history. Verify a backup by restoring to a throwaway `ROBOFINGER_HOME`
+and checking `robofinger id` matches — an untested backup is not a backup.
 
 ## Tests
 
