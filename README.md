@@ -50,12 +50,12 @@ cp target/release/robofinger ~/.local/bin/
 
 ```sh
 export ROBOFINGER_URL=https://robofinger.you.workers.dev
-export ROBOFINGER_NS=your-team-shared-secret-string   # 8-128 chars
+export ROBOFINGER_NS=your-team-namespace             # routing key, not a secret
 export ROBOFINGER_AGENT=laptop                        # defaults to hostname
 ```
 
-The namespace **is** the access control right now — anyone who knows it can
-read and write plans in it. Treat it like a password. See Security below.
+Keys are generated on first use in `~/.config/robofinger/`. Exchange identities
+with peers before publishing — see Security below.
 
 ### 4. Wire into Claude Code
 
@@ -95,6 +95,8 @@ to back off, don't silently ignore it.
 
 | Command | Does |
 |---|---|
+| `robofinger id [label]` | Print your shareable identity blob |
+| `robofinger peer add\|rm\|list` | Manage trusted peers |
 | `robofinger claim "<task>" <glob>...` | Publish a claim |
 | `robofinger release` | Drop claims, stay working |
 | `robofinger done` | Mark finished |
@@ -124,20 +126,72 @@ to back off, don't silently ignore it.
 
 `check` runs per tool call and exits. A process that lives for one command
 cannot hold a WebSocket open, so `check` does a single HTTP GET — measured
-**~260ms** against a deployed Worker from a home connection. That is the cost
+**~95ms** against a deployed Worker from a home connection. That is the cost
 paid on every Edit/Write. `watch` is the WebSocket path, for humans and
 `/loop`, where a persistent connection is possible.
 
 ## Security
 
-**Plaintext, namespace-as-password.** The relay operator can read every plan.
-That is fine when you deploy it to your own Cloudflare account and the plans
-say things like "refactoring auth middleware".
+**Signed and encrypted end to end. The relay cannot read plans.**
 
-Not yet built: payload encryption (age/NaCl multi-recipient, so the relay never
-sees plaintext), signatures, per-agent auth tokens. The design supports all
-three — the relay treats the body as opaque and only reads `agent` and `seq`
-from the envelope.
+Each agent holds two keypairs in `~/.config/robofinger/` (mode 0600):
+
+| Key | Purpose |
+|---|---|
+| `signing.key` (Ed25519) | Signs envelopes. **The public key is the agent's identity.** |
+| `age.key` (X25519) | Decrypts plans addressed to you. Same `age` crate as envstow. |
+
+What goes over the wire is a cleartext envelope wrapping ciphertext:
+
+```json
+{
+  "pubkey": "Lrs8-Wyv...",     // identity — relay enforces single-writer
+  "seq": 47,                    // relay enforces monotonic ordering
+  "sig": "4TYHyEIU...",         // Ed25519 over pubkey|seq|body
+  "body": "YWdlLWVuY3J5..."     // age ciphertext — opaque to the relay
+}
+```
+
+The relay verifies signatures via WebCrypto and rejects anything that fails.
+It never sees task names, paths, project names, or agent labels.
+
+### Trust model
+
+**Identity is the public key, not the name.** `agent` is a display label
+anyone could copy; the Ed25519 key is what the relay checks. There is no name
+to squat on.
+
+**Two independent lists**, which is what makes revocation work:
+
+| | Controlled by | Effect |
+|---|---|---|
+| Subscription (`peer add`) | You | Whose plans you fetch and verify |
+| Recipients (same list) | The publisher | Who *can decrypt* what you publish |
+
+Subscribing to Alice does not let you read her plans — she must also have you
+as a recipient. So `robofinger peer rm bob` is **unilateral revocation**: the
+next publish is unreadable to Bob, with no relay cooperation. Bob keeps what he
+already decrypted; that is inherent to encryption, not a flaw.
+
+**The namespace is a routing key, not a secret.** Confidentiality comes from
+encryption, authenticity from signatures. Unrelated users can share one relay.
+
+### Exchanging identities
+
+```sh
+robofinger id                      # prints rf1.<label>.<signkey>.<agekey>
+robofinger peer add rf1....        # one paste: subscribe + add as recipient
+robofinger peer list
+robofinger peer rm <label>         # revoke
+```
+
+### What this does not protect against
+
+- **Traffic analysis.** The relay sees which keys publish, when, and how often.
+- **A compromised peer.** Anyone you add as a recipient can read your plans and
+  screenshot them.
+- **Loss of `~/.config/robofinger/`.** No key backup or rotation yet; losing the
+  keys means generating a new identity and re-exchanging with every peer.
 
 ## Tests
 
