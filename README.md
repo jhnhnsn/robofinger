@@ -166,7 +166,7 @@ to back off, don't silently ignore it.
 | `robofinger init --url <u> --ns <n>` | Write config, generate keys, offer hook install |
 | `robofinger hooks install [--project]` | Wire into Claude Code (account or repo scope) |
 | `robofinger id [label]` | Print your shareable identity blob |
-| `robofinger peer add\|rm\|list` | Manage trusted peers |
+| `robofinger peer add\|rm\|list [-v]` | Manage trusted peers; `-v` prints full blobs |
 | `robofinger claim "<task>" <glob>...` | Publish a claim |
 | `robofinger release` | Drop claims, stay working |
 | `robofinger done` | Mark finished |
@@ -293,6 +293,23 @@ already decrypted; that is inherent to encryption, not a flaw.
 
 **The namespace is a routing key, not a secret.** Confidentiality comes from
 encryption, authenticity from signatures. Unrelated users can share one relay.
+
+### The address book
+
+`~/.config/robofinger/peers` is one identity blob per line — plain text, hand
+editable, `#` comments ignored. It does double duty: it is both your
+**subscription list** (whose plans you fetch) and your **recipient list** (who
+can decrypt yours), which is why revoking someone is a single `peer rm`.
+
+```
+$ robofinger peer list
+alice          SL-fhgZqOqhq   relay.example.com/team-shared    36s ago
+dave           jxfEhMAnrT-a   other-relay.example.com/their-ns    —
+```
+
+Last-seen comes from the plans and posts you can already decrypt, so it only
+appears for peers who have added *you* as a recipient. A `—` means either they
+have not published or you cannot read what they published.
 
 ### Exchanging identities
 

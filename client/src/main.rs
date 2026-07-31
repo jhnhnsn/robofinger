@@ -149,6 +149,17 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// "4m", "3h", "2d" — compact relative age for list output.
+fn ago(secs: i64) -> String {
+    match secs {
+        s if s < 0 => "just now".into(),
+        s if s < 60 => format!("{s}s ago"),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86_400),
+    }
+}
+
 /// Civil date-time from a unix timestamp, UTC.
 ///
 /// Hand-rolled rather than pulling in `chrono` — this is one line of output in
@@ -633,13 +644,60 @@ fn main() {
                 "list" | "" => {
                     if peers.is_empty() {
                         println!("no peers yet — share `robofinger id` and add theirs");
+                        return;
                     }
+                    let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
+                    // Last-seen needs the relay; without config we still list
+                    // the book, just without activity.
+                    let seen: std::collections::HashMap<String, i64> = match cfg() {
+                        Some(c) => {
+                            let mut m = std::collections::HashMap::new();
+                            for pl in fetch_plans(&c, &k) {
+                                let e = m.entry(pl.pubkey.clone()).or_insert(pl.epoch);
+                                if pl.epoch > *e {
+                                    *e = pl.epoch;
+                                }
+                            }
+                            for pl in fetch_posts(&c, &k, 100) {
+                                let e = m.entry(pl.pubkey.clone()).or_insert(pl.epoch);
+                                if pl.epoch > *e {
+                                    *e = pl.epoch;
+                                }
+                            }
+                            m
+                        }
+                        None => Default::default(),
+                    };
+                    let t = now();
                     for p in &peers {
-                        println!("{:<14} {}...", p.label, &p.pubkey[..12]);
+                        let where_ = match &p.home {
+                            Some(h) => format!(
+                                "{}/{}",
+                                h.url
+                                    .trim_start_matches("https://")
+                                    .trim_start_matches("http://"),
+                                h.ns
+                            ),
+                            None => "(your relay)".into(),
+                        };
+                        let last = match seen.get(&p.pubkey) {
+                            Some(e) => ago(t - e),
+                            None => "—".into(),
+                        };
+                        println!(
+                            "{:<14} {:<14} {:<38} {}",
+                            p.label,
+                            &p.pubkey[..12],
+                            where_,
+                            last
+                        );
+                        if verbose {
+                            println!("               {}", p.to_blob());
+                        }
                     }
                 }
                 _ => {
-                    eprintln!("usage: robofinger peer add|rm|list");
+                    eprintln!("usage: robofinger peer add|rm|list [-v]");
                     std::process::exit(1);
                 }
             }
