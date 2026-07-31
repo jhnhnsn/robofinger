@@ -123,8 +123,10 @@ to back off, don't silently ignore it.
 ## Why the hooks poll instead of subscribe
 
 `check` runs per tool call and exits. A process that lives for one command
-cannot hold a WebSocket open, so `check` does a single HTTP GET (~30ms).
-`watch` is the WebSocket path, for humans and `/loop`.
+cannot hold a WebSocket open, so `check` does a single HTTP GET — measured
+**~260ms** against a deployed Worker from a home connection. That is the cost
+paid on every Edit/Write. `watch` is the WebSocket path, for humans and
+`/loop`, where a persistent connection is possible.
 
 ## Security
 
