@@ -1,40 +1,78 @@
 # robofinger
 
-**Your coding agents don't know what each other are doing. This tells them.**
+**`.plan` files for a world with agents.**
 
 ```
-CLAIM CONFLICT on src/auth/session.ts:
-  jo (migrate session store to redis) claims src/auth/**
-```
+$ robofinger jo
+jo @ https://relay.example.com/plan
 
-That warning appears in your agent's context *before* it makes the edit — not
-after you've both spent an hour on the same file.
+working: migrate session store to redis
+  claiming repo/src/auth/**
+  since 12m ago
+
+2026-07-31 12:30 jo
+Session migration is uglier than expected. The old store keyed on
+(user_id, device_id) and Redis wants a flat key, so every lookup path
+needs touching. Rollback: dual-write for a week.
+
+2026-07-30 18:04 jo
+Finally got the dog to stop barking at the mail carrier. Six weeks of
+treats. Unclear who trained whom.
+```
 
 ---
 
-## The problem
+## What a .plan was
+
+Before status pages and standups, Unix had `finger`. Everyone kept a `.plan`
+file in their home directory, and anyone could read it:
+
+```
+$ finger carmack@idsoftware.com
+```
+
+People wrote whatever they wanted in there. Carmack wrote engineering
+journals that a generation of programmers read religiously. Others wrote
+what they were stuck on, what they were reading, where they'd be Thursday.
+It was a low-cost way to ping someone and see what they were up to —
+**no notification, no reply expected, no performance.**
+
+Then it died, and we replaced it with Slack statuses nobody reads and
+standups everybody dreads.
+
+## What robofinger is
+
+The same idea, with two things added: **your agents can read it too**, and
+**it's encrypted so only people you choose can.**
+
+You write what you're working on. Your agent writes what it's touching.
+Anyone you've shared keys with can look you up — and so can their agent,
+which turns out to matter a lot when you both point coding agents at the
+same repo.
+
+```sh
+robofinger post "Spent the morning fighting the recipient list. Also my
+kid's science fair is Thursday so I'm out in the afternoon."
+```
+
+That's a blog post, a status update, and a heads-up — in one place, to
+exactly the people you chose, with no platform in between.
+
+## Why it matters when agents are involved
 
 Two people point coding agents at the same repo. Nothing tells either agent
-what the other is doing, so:
+what the other is doing, so both refactor `src/auth/` in parallel and find
+out at merge time.
 
-- Both refactor `src/auth/` in parallel and discover it at merge time
-- One agent renames a function the other is mid-way through calling
-- You ask "is anyone touching the payments code?" in Slack and wait
-- An agent finishes work someone else already finished an hour ago
-
-The information exists — each agent knows exactly what it's about to touch. It
-just never leaves the machine.
-
-## The solution
-
-Agents announce what they're working on. Peers get warned before they collide.
+The information exists — each agent knows exactly what it's about to touch.
+It just never leaves the machine.
 
 ```sh
 robofinger claim "migrate session store" 'src/auth/**'
 ```
 
-Your agent does this at the start of a task; hooks handle the rest. Everyone
-else's agent now sees that claim before it edits anything under `src/auth/`.
+Your agent does this when it starts a task. Everyone else's agent now sees
+that claim before it edits anything under `src/auth/`.
 
 ## What it looks like in a session
 
@@ -76,51 +114,40 @@ On an unclaimed file the hook emits **zero bytes** — you never know it ran.
 
 ## What you get
 
-**Your agent knows what everyone else's agent is doing.** Peer claims land in
-its context at session start and before every Edit or Write. It reasons about
-them like any other fact.
+**A place to think out loud.** Long-form, short-form, work, not-work. No
+character limit, no algorithm, no audience anxiety. `robofinger post` takes
+a sentence or an essay, and reads stdin so your tools can write to it too:
 
-**Nothing gets blocked.** These are warnings, not locks. Your agent decides —
-work elsewhere, ask, or proceed anyway. A hard lock deadlocks the moment
-someone's laptop dies; a warning with context never does.
+```sh
+$ robofinger post "Rewrote the parser. Third time. This one's right."
+$ git log --oneline -5 | robofinger post
+```
+
+**Reading someone is a poke, not a ping.** `robofinger jo` shows what she's
+working on and what she's written lately. No notification fires on her end.
+Nobody has to perform being busy. This is the part Slack got wrong.
+
+**Your agent reads it too.** Peer claims land in its context at session start
+and before every Edit or Write. It reasons about them like any other fact —
+which is what stops two agents refactoring the same file.
+
+**Nothing gets blocked.** Warnings, not locks. Your agent decides — work
+elsewhere, ask, or proceed anyway. A hard lock deadlocks the moment someone's
+laptop dies; a warning with context never does.
 
 **No cleanup when things break.** Claims expire on their own. An agent that
 crashes releases its own work — no stuck locks, no "who has src/auth checked
 out?"
 
-**A shared log worth reading.** The other half of the `.plan` tradition — your
-agent can write to it too, so context survives past the session:
+**Only the people you choose can read any of it.** Everything is encrypted on
+your machine before it leaves. The relay stores ciphertext and can't decrypt
+it — not your posts, not task names, not file paths. Drop someone from your
+peer list and your next post is unreadable to them, with no server involved
+and nobody to ask.
 
-```sh
-$ robofinger post "Session migration is uglier than expected. The old store
-keyed on (user_id, device_id) and Redis wants a flat key, so every lookup
-path needs touching. Rollback: dual-write for a week."
-
-$ robofinger log        # what everyone's been writing
-```
-
-**Look someone up.** The main verb, straight from `finger`:
-
-```
-$ robofinger jo
-jo @ https://relay.example.com/plan
-
-working: migrate session store to redis
-  claiming repo/src/auth/**
-  since 12m ago
-
-2026-07-31 12:30 jo
-Session migration is uglier than expected…
-```
-
-**Nobody can read your work but the people you choose.** Plans and posts are
-encrypted on your machine before they leave it. The relay stores ciphertext and
-can't decrypt it — not task names, not file paths, not project names. Remove
-someone from your peer list and your next post is unreadable to them, with no
-server involved.
-
-**No accounts.** No signup, no API keys, no directory. Your identity is a
-keypair on your machine. You share an address; they paste it. Done.
+**No accounts, no platform.** No signup, no API keys, no directory, nobody's
+feed to be ranked in. Your identity is a keypair on your machine. You share an
+address; they paste it. That's the whole social graph.
 
 ## Getting started
 
@@ -163,25 +190,30 @@ releases them when it's done; peers get warned automatically.
 
 ## A day with it
 
-| | | Who typed it |
+| | | |
 |---|---|---|
 | **09:15** | Jo's agent claims `src/auth/**` for a session-store migration | agent |
 | **09:45** | Sam's agent hits the claim, proposes the API layer instead | agent |
-| **12:30** | Jo posts what she learned; Sam reads it over lunch | human |
+| **12:30** | Jo posts what she learned, and that she's out Thursday | Jo |
+| **14:00** | Sam reads it over lunch. Doesn't reply. Doesn't need to. | Sam |
 | **17:30** | Jo's agent releases the claim; auth is free again | agent |
 
-Two humans, one shared repo, zero "hey is anyone in auth?" messages.
+Two humans, one shared repo, zero "hey is anyone in auth?" messages and zero
+notifications.
 
 ## Commands
 
 ```
-robofinger                      your status
-robofinger <peer>               look someone up
-robofinger post "…"             write to your log (or pipe stdin)
-robofinger log                  recent posts from you and your peers
+robofinger <peer>               read someone's .plan
+robofinger                      read your own
+robofinger post "…"             write to it (or pipe stdin)
+robofinger log                  everyone you follow, newest first
 robofinger peer add|list|rm     manage who you follow
 robofinger --help               everything else
 ```
+
+Your agent uses `claim`, `release` and `check` through the hooks. You mostly
+won't type those.
 
 ## Good to know
 

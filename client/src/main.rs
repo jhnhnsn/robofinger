@@ -1,5 +1,6 @@
 //! robofinger — agent plan sync over a Cloudflare relay.
 //!
+//!   robofinger <peer>                     look someone up
 //!   robofinger claim "<task>" <glob>...   publish a claim
 //!   robofinger release                    drop claims (status stays working)
 //!   robofinger done                       mark finished
@@ -12,8 +13,7 @@
 //! Plans are signed (Ed25519) and encrypted (age) client-side. The relay
 //! stores opaque ciphertext and can verify signatures but never read contents.
 //!
-//! Env: ROBOFINGER_URL (e.g. https://robofinger.you.workers.dev)
-//!      ROBOFINGER_NS  (routing key, not a secret)
+//! Env: ROBOFINGER_URL (e.g. https://example.com/plan — path is the namespace)
 //!      ROBOFINGER_AGENT (display label, defaults to hostname)
 //!      ROBOFINGER_HOME (key dir, defaults to ~/.config/robofinger)
 
@@ -37,11 +37,11 @@ robofinger — tell other agents what you're working on, before you collide.
   robofinger <peer>                   look someone up
 
 setup
-  init --url <url> --ns <namespace>   write config + print your identity
-  id [label]                          print your shareable identity blob
+  init --url <relay url>              write config + print your address
+  id [label]                          print your shareable address
   hooks install [--project]           wire into Claude Code
   hooks uninstall [--project]         remove the hooks
-  peer add <rf1...>                   trust a peer (subscribe + let them decrypt)
+  peer add <address>                  trust a peer (subscribe + let them decrypt)
   peer rm <label>                     revoke; your next plan is opaque to them
   peer list [-v]                      show trusted peers, relay and last-seen
   peer update <label>                 accept a peer's published move
@@ -64,7 +64,7 @@ maintenance
   --version                           print version
 
 config is read from ~/.config/robofinger/config; environment variables
-(ROBOFINGER_URL, ROBOFINGER_NS, ROBOFINGER_AGENT) override it.";
+(ROBOFINGER_URL, ROBOFINGER_AGENT) override it.";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Plan {
@@ -638,9 +638,15 @@ fn main() {
                 .cloned()
                 .or_else(hostname)
                 .unwrap_or_else(|| "agent".into());
-            let home = cfg().map(|c| crypto::Home { url: c.url });
-            println!("{}", k.identity_blob(&label, home));
-            eprintln!("\nshare that line with a peer; they run: robofinger peer add <blob>");
+            // Without a relay there is nowhere to fetch from, so an address
+            // would be unusable. Say so rather than emit a broken one.
+            let Some(home) = cfg().map(|c| crypto::Home { url: c.url }) else {
+                eprintln!("no relay configured — run: robofinger init --url <relay url>");
+                eprintln!("your public key is {}", k.pubkey());
+                std::process::exit(1);
+            };
+            println!("{}", k.identity_blob(&label, Some(home)));
+            eprintln!("\nshare that line with a peer; they run: robofinger peer add <it>");
             return;
         }
         "peer" => {

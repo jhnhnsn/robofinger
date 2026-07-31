@@ -58,10 +58,18 @@ jobs:
         run: |
           BIN=./target/release/robofinger
           export ROBOFINGER_HOME="$RUNNER_TEMP/rf-id"
+          export ROBOFINGER_URL="https://relay.example.com/plan"
           A=$("$BIN" id ci-agent)
           B=$("$BIN" id ci-agent)
           [ "$A" = "$B" ] || { echo "FAIL: identity changed between invocations"; exit 1; }
-          case "$A" in rf1.ci-agent.*) ;; *) echo "FAIL: bad blob format: $A"; exit 1 ;; esac
+          case "$A" in
+            https://relay.example.com/plan/u/*\?label=ci-agent\#age1*) ;;
+            *) echo "FAIL: bad address format: $A"; exit 1 ;;
+          esac
+          # Without a relay there is nowhere to fetch from, so `id` must refuse
+          # rather than print an unusable address.
+          env -u ROBOFINGER_URL "$BIN" id ci-agent >/dev/null 2>&1 \
+            && { echo "FAIL: id succeeded with no relay configured"; exit 1; }
           echo "identity: OK"
 
   relay:
