@@ -58,8 +58,11 @@ plans.
 authenticated once with `gh auth login`:
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/jhnhnsn/robofinger/main/install.sh | sh
+gh api repos/jhnhnsn/robofinger/contents/install.sh -H "Accept: application/vnd.github.raw" | sh
 ```
+
+(`raw.githubusercontent.com` is also private, so the script has to come through
+`gh` rather than plain `curl`.)
 
 Detects your platform, downloads the matching release artifact, verifies its
 sha256, and installs to `~/.local/bin` (override with `ROBOFINGER_BIN_DIR`).
