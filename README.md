@@ -274,6 +274,12 @@ The path test is a regression guard: target files usually do not exist yet
 (Write creates them), and on macOS git reports `/private/tmp` while hooks pass
 `/tmp`. Both broke conflict detection during development.
 
+## Design notes
+
+- [docs/DEVICE-REGISTRATION.md](./docs/DEVICE-REGISTRATION.md) — how a hosted
+  relay could gate access with Tailscale-style device grants, without the portal
+  ever being able to read plans. Design only, not implemented.
+
 ## Limits (Cloudflare free tier)
 
 100k DO requests/day, 5M rows read/day, 5GB storage.
