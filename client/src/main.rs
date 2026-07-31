@@ -18,6 +18,7 @@
 //!      ROBOFINGER_HOME (key dir, defaults to ~/.config/robofinger)
 
 mod crypto;
+mod selfupdate;
 
 use crypto::{Keys, Peer};
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,10 @@ use
   peers                               live peer claims
   check <path>                        conflict check (hook JSON on stdin)
   watch                               stream updates over WebSocket
+
+maintenance
+  upgrade [--check] [--yes]           update to the latest release
+  --version                           print version
 
 config is read from ~/.config/robofinger/config; environment variables
 (ROBOFINGER_URL, ROBOFINGER_NS, ROBOFINGER_AGENT) override it.";
@@ -114,11 +119,18 @@ fn cfg() -> Option<Cfg> {
     let agent = get("ROBOFINGER_AGENT")
         .or_else(hostname)
         .unwrap_or_else(|| "unknown".into());
-    Some(Cfg { url: url.trim_end_matches('/').to_string(), ns, agent })
+    Some(Cfg {
+        url: url.trim_end_matches('/').to_string(),
+        ns,
+        agent,
+    })
 }
 
 fn hostname() -> Option<String> {
-    let out = std::process::Command::new("hostname").arg("-s").output().ok()?;
+    let out = std::process::Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 
@@ -220,7 +232,13 @@ fn fetch_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
         .collect()
 }
 
-fn publish(c: &Cfg, k: &Keys, status: &str, task: &str, touching: Vec<String>) -> Result<(), String> {
+fn publish(
+    c: &Cfg,
+    k: &Keys,
+    status: &str,
+    task: &str,
+    touching: Vec<String>,
+) -> Result<(), String> {
     let prev_seq = fetch_plans(c, k)
         .iter()
         .find(|p| p.pubkey == k.pubkey())
@@ -250,9 +268,17 @@ fn publish(c: &Cfg, k: &Keys, status: &str, task: &str, touching: Vec<String>) -
             Err(_) => eprintln!("warning: peer {} has an unusable age key", p.label),
         }
     }
-    let body = crypto::encrypt(&serde_json::to_vec(&plan).map_err(|e| e.to_string())?, &recips)?;
+    let body = crypto::encrypt(
+        &serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
+        &recips,
+    )?;
 
-    let mut env = Envelope { pubkey: k.pubkey(), seq: plan.seq, sig: String::new(), body };
+    let mut env = Envelope {
+        pubkey: k.pubkey(),
+        seq: plan.seq,
+        sig: String::new(),
+        body,
+    };
     env.sig = k.sign(&env.signed_message());
 
     let url = format!("{}/ns/{}/plan/{}", c.url, c.ns, k.pubkey());
@@ -324,6 +350,17 @@ fn main() {
             println!("{USAGE}");
             return;
         }
+        "--version" | "-V" | "version" => {
+            println!("robofinger {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        "upgrade" | "update" => {
+            if let Err(e) = selfupdate::cmd_upgrade(&args[1..]) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         "init" => {
             let mut url = None;
             let mut ns = None;
@@ -345,7 +382,9 @@ fn main() {
             let url = url.or_else(|| existing.get("ROBOFINGER_URL").cloned());
             let ns = ns.or_else(|| existing.get("ROBOFINGER_NS").cloned());
             let (Some(url), Some(ns)) = (url, ns) else {
-                eprintln!("usage: robofinger init --url <relay url> --ns <namespace> [--agent <label>]");
+                eprintln!(
+                    "usage: robofinger init --url <relay url> --ns <namespace> [--agent <label>]"
+                );
                 std::process::exit(1);
             };
 
@@ -360,7 +399,10 @@ fn main() {
             }
             println!("wrote {}", path.display());
             println!("\nyour identity — share this line with collaborators:");
-            println!("  {}", k.identity_blob(&hostname().unwrap_or_else(|| "agent".into())));
+            println!(
+                "  {}",
+                k.identity_blob(&hostname().unwrap_or_else(|| "agent".into()))
+            );
             println!("\nthey run:  robofinger peer add <your blob>");
             println!("you run:   robofinger peer add <their blob>");
             println!("\nboth directions are required — adding a peer both subscribes to");
@@ -445,14 +487,20 @@ fn main() {
         if matches!(cmd, "check" | "start" | "end") {
             std::process::exit(0);
         }
-        eprintln!("not configured yet — run:\n  robofinger init --url <relay url> --ns <namespace>");
+        eprintln!(
+            "not configured yet — run:\n  robofinger init --url <relay url> --ns <namespace>"
+        );
         std::process::exit(1);
     };
 
     match cmd {
         "claim" => {
             let task = args.get(1).cloned().unwrap_or_default();
-            let globs: Vec<String> = if args.len() > 2 { args[2..].to_vec() } else { vec![] };
+            let globs: Vec<String> = if args.len() > 2 {
+                args[2..].to_vec()
+            } else {
+                vec![]
+            };
             match publish(&c, &k, "working", &task, globs.clone()) {
                 Ok(_) => println!("claimed {globs:?} ({task})"),
                 Err(e) => {
@@ -501,7 +549,9 @@ fn main() {
                     .as_str()
                     .map(String::from)
             });
-            let Some(path) = path else { std::process::exit(0) };
+            let Some(path) = path else {
+                std::process::exit(0)
+            };
 
             let hits = conflicts(&c, &k, &path);
             if !hits.is_empty() {
@@ -566,86 +616,6 @@ fn main() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn plan(agent: &str, project: &str, touching: &[&str], status: &str, age: i64) -> Plan {
-        Plan {
-            agent: agent.into(),
-            pubkey: format!("pk-{agent}"),
-            seq: 1,
-            epoch: now() - age,
-            status: status.into(),
-            task: "t".into(),
-            touching: touching.iter().map(|s| s.to_string()).collect(),
-            project: project.into(),
-            eta_s: 1800,
-        }
-    }
-
-    /// Same shape as `conflicts`, minus the network. Identity is the pubkey,
-    /// matching the real code — `agent` is only a display label.
-    fn matches(p: &Plan, rel: &str, here: &str, me: &str) -> bool {
-        if p.pubkey == format!("pk-{me}") || p.project != here || !p.live(now()) {
-            return false;
-        }
-        p.touching.iter().any(|g| {
-            glob::Pattern::new(g).map(|pat| pat.matches(rel)).unwrap_or(false)
-        })
-    }
-
-    #[test]
-    fn glob_and_exact_paths_match() {
-        let p = plan("peer", "demo", &["src/auth/**", "src/middleware.ts"], "working", 0);
-        assert!(matches(&p, "src/auth/session.ts", "demo", "me"), "glob");
-        assert!(matches(&p, "src/auth/deep/x.ts", "demo", "me"), "nested glob");
-        assert!(matches(&p, "src/middleware.ts", "demo", "me"), "exact");
-        assert!(!matches(&p, "README.md", "demo", "me"), "unclaimed is clean");
-    }
-
-    #[test]
-    fn other_project_never_conflicts() {
-        let p = plan("peer", "demo", &["src/auth/**"], "working", 0);
-        assert!(!matches(&p, "src/auth/session.ts", "otherproj", "me"));
-    }
-
-    #[test]
-    fn own_claim_is_not_a_conflict() {
-        let p = plan("me", "demo", &["src/auth/**"], "working", 0);
-        assert!(!matches(&p, "src/auth/session.ts", "demo", "me"));
-    }
-
-    #[test]
-    fn stale_and_done_claims_expire() {
-        let stale = plan("peer", "demo", &["src/auth/**"], "working", 7200);
-        assert!(!matches(&stale, "src/auth/session.ts", "demo", "me"), "stale");
-        let done = plan("peer", "demo", &["src/auth/**"], "done", 0);
-        assert!(!matches(&done, "src/auth/session.ts", "demo", "me"), "done");
-    }
-
-    /// Regression: the file usually does NOT exist yet (Write creates it), and
-    /// on macOS git says /private/tmp while the hook says /tmp. Both broke this.
-    #[test]
-    fn relative_paths_survive_private_prefix_and_missing_files() {
-        let norm = |p: &str| p.strip_prefix("/private").unwrap_or(p).to_string();
-        let strip = |abs: &str, root: &str| -> String {
-            let (a, r) = (norm(abs), norm(root));
-            a.strip_prefix(&format!("{r}/")).unwrap_or(&a).to_string()
-        };
-        assert_eq!(strip("/tmp/demo/src/a.ts", "/private/tmp/demo"), "src/a.ts");
-        assert_eq!(strip("/private/tmp/demo/src/a.ts", "/tmp/demo"), "src/a.ts");
-        assert_eq!(strip("/home/x/repo/src/a.ts", "/home/x/repo"), "src/a.ts");
-    }
-
-    #[test]
-    fn plans_with_missing_fields_still_parse() {
-        let p: Plan = serde_json::from_str(r#"{"agent":"a"}"#).unwrap();
-        assert_eq!(p.eta_s, DEFAULT_ETA);
-        assert!(p.touching.is_empty());
-    }
-}
-
 /// Long-lived WebSocket subscription. For humans and /loop, not for hooks —
 /// a per-invocation hook can't hold a socket open.
 fn watch(c: &Cfg, k: &Keys) {
@@ -673,16 +643,25 @@ fn watch(c: &Cfg, k: &Keys) {
     // Verify signature, then decrypt. Anything that fails either step is not
     // shown — an unverified plan is worse than no plan.
     let show = |v: &serde_json::Value| {
-        let Ok(e) = serde_json::from_value::<Envelope>(v.clone()) else { return };
+        let Ok(e) = serde_json::from_value::<Envelope>(v.clone()) else {
+            return;
+        };
         if e.pubkey != k.pubkey() && !subs.iter().any(|p| p.pubkey == e.pubkey) {
             return; // not subscribed
         }
         if !crypto::verify(&e.pubkey, &e.sig, &e.signed_message()) {
-            eprintln!("dropped envelope with bad signature from {}...", &e.pubkey[..8]);
+            eprintln!(
+                "dropped envelope with bad signature from {}...",
+                &e.pubkey[..8]
+            );
             return;
         }
-        let Ok(plain) = crypto::decrypt(&e.body, &k.age_secret) else { return };
-        let Ok(p) = serde_json::from_slice::<Plan>(&plain) else { return };
+        let Ok(plain) = crypto::decrypt(&e.body, &k.age_secret) else {
+            return;
+        };
+        let Ok(p) = serde_json::from_slice::<Plan>(&plain) else {
+            return;
+        };
         println!(
             "{} [{}] {} -> {}",
             p.agent,
@@ -716,5 +695,102 @@ fn watch(c: &Cfg, k: &Keys) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plan(agent: &str, project: &str, touching: &[&str], status: &str, age: i64) -> Plan {
+        Plan {
+            agent: agent.into(),
+            pubkey: format!("pk-{agent}"),
+            seq: 1,
+            epoch: now() - age,
+            status: status.into(),
+            task: "t".into(),
+            touching: touching.iter().map(|s| s.to_string()).collect(),
+            project: project.into(),
+            eta_s: 1800,
+        }
+    }
+
+    /// Same shape as `conflicts`, minus the network. Identity is the pubkey,
+    /// matching the real code — `agent` is only a display label.
+    fn matches(p: &Plan, rel: &str, here: &str, me: &str) -> bool {
+        if p.pubkey == format!("pk-{me}") || p.project != here || !p.live(now()) {
+            return false;
+        }
+        p.touching.iter().any(|g| {
+            glob::Pattern::new(g)
+                .map(|pat| pat.matches(rel))
+                .unwrap_or(false)
+        })
+    }
+
+    #[test]
+    fn glob_and_exact_paths_match() {
+        let p = plan(
+            "peer",
+            "demo",
+            &["src/auth/**", "src/middleware.ts"],
+            "working",
+            0,
+        );
+        assert!(matches(&p, "src/auth/session.ts", "demo", "me"), "glob");
+        assert!(
+            matches(&p, "src/auth/deep/x.ts", "demo", "me"),
+            "nested glob"
+        );
+        assert!(matches(&p, "src/middleware.ts", "demo", "me"), "exact");
+        assert!(
+            !matches(&p, "README.md", "demo", "me"),
+            "unclaimed is clean"
+        );
+    }
+
+    #[test]
+    fn other_project_never_conflicts() {
+        let p = plan("peer", "demo", &["src/auth/**"], "working", 0);
+        assert!(!matches(&p, "src/auth/session.ts", "otherproj", "me"));
+    }
+
+    #[test]
+    fn own_claim_is_not_a_conflict() {
+        let p = plan("me", "demo", &["src/auth/**"], "working", 0);
+        assert!(!matches(&p, "src/auth/session.ts", "demo", "me"));
+    }
+
+    #[test]
+    fn stale_and_done_claims_expire() {
+        let stale = plan("peer", "demo", &["src/auth/**"], "working", 7200);
+        assert!(
+            !matches(&stale, "src/auth/session.ts", "demo", "me"),
+            "stale"
+        );
+        let done = plan("peer", "demo", &["src/auth/**"], "done", 0);
+        assert!(!matches(&done, "src/auth/session.ts", "demo", "me"), "done");
+    }
+
+    /// Regression: the file usually does NOT exist yet (Write creates it), and
+    /// on macOS git says /private/tmp while the hook says /tmp. Both broke this.
+    #[test]
+    fn relative_paths_survive_private_prefix_and_missing_files() {
+        let norm = |p: &str| p.strip_prefix("/private").unwrap_or(p).to_string();
+        let strip = |abs: &str, root: &str| -> String {
+            let (a, r) = (norm(abs), norm(root));
+            a.strip_prefix(&format!("{r}/")).unwrap_or(&a).to_string()
+        };
+        assert_eq!(strip("/tmp/demo/src/a.ts", "/private/tmp/demo"), "src/a.ts");
+        assert_eq!(strip("/private/tmp/demo/src/a.ts", "/tmp/demo"), "src/a.ts");
+        assert_eq!(strip("/home/x/repo/src/a.ts", "/home/x/repo"), "src/a.ts");
+    }
+
+    #[test]
+    fn plans_with_missing_fields_still_parse() {
+        let p: Plan = serde_json::from_str(r#"{"agent":"a"}"#).unwrap();
+        assert_eq!(p.eta_s, DEFAULT_ETA);
+        assert!(p.touching.is_empty());
     }
 }

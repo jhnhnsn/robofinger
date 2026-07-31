@@ -52,13 +52,24 @@ The zone must already be on your Cloudflare account. Namespace data lives in a
 Durable Object keyed by namespace name, so switching hostnames does not lose
 plans.
 
-### 2. Build the client
+### 2. Install the client
 
 ```sh
-cd client
-cargo build --release
-cp target/release/robofinger ~/.local/bin/
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/jhnhnsn/robofinger/releases/latest/download/robofinger-installer.sh | sh
 ```
+
+Installs to `~/.local/bin` and adds it to PATH. Open a new terminal afterwards.
+
+Or build from source:
+
+```sh
+cd client && cargo build --release && cp target/release/robofinger ~/.local/bin/
+```
+
+Keep it current with `robofinger upgrade` (`--check` to look without installing).
+It re-runs the published installer, and refuses to touch a copy installed by a
+package manager.
 
 ### 3. Configure
 
@@ -130,6 +141,8 @@ to back off, don't silently ignore it.
 | `robofinger peers` | List live peer claims |
 | `robofinger check <path>` | Conflict check (also reads hook JSON on stdin) |
 | `robofinger watch` | Stream updates over WebSocket |
+| `robofinger upgrade [--check]` | Update to the latest release |
+| `robofinger --version` | Print version |
 
 ## Plan format
 

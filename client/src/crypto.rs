@@ -7,7 +7,7 @@
 //! Both public halves travel together in one `rf1...` blob so adding a peer is
 //! a single paste.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -48,7 +48,7 @@ impl Keys {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
 
         let sk_path = dir.join("signing.key");
@@ -81,14 +81,16 @@ impl Keys {
                 .map_err(|_| "age.key is corrupt".to_string())?,
             Err(_) => {
                 let id = age::x25519::Identity::generate();
-                let secret =
-                    age::secrecy::ExposeSecret::expose_secret(&id.to_string()).to_string();
+                let secret = age::secrecy::ExposeSecret::expose_secret(&id.to_string()).to_string();
                 write_private(&age_path, &secret).map_err(|e| format!("write age.key: {e}"))?;
                 id
             }
         };
 
-        Ok(Keys { signing, age_secret })
+        Ok(Keys {
+            signing,
+            age_secret,
+        })
     }
 
     /// Base64url Ed25519 public key — this agent's identity on the relay.
@@ -189,8 +191,9 @@ pub fn encrypt(plaintext: &[u8], recipients: &[age::x25519::Recipient]) -> Resul
         .iter()
         .map(|r| Box::new(r.clone()) as Box<dyn age::Recipient + Send>)
         .collect();
-    let enc = age::Encryptor::with_recipients(boxed.iter().map(|b| b.as_ref() as &dyn age::Recipient))
-        .map_err(|e| e.to_string())?;
+    let enc =
+        age::Encryptor::with_recipients(boxed.iter().map(|b| b.as_ref() as &dyn age::Recipient))
+            .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     let mut w = enc.wrap_output(&mut out).map_err(|e| e.to_string())?;
     w.write_all(plaintext).map_err(|e| e.to_string())?;
@@ -227,7 +230,10 @@ mod tests {
         let k = keys_in("sig");
         let sig = k.sign("hello");
         assert!(verify(&k.pubkey(), &sig, "hello"));
-        assert!(!verify(&k.pubkey(), &sig, "hello!"), "tampered msg must fail");
+        assert!(
+            !verify(&k.pubkey(), &sig, "hello!"),
+            "tampered msg must fail"
+        );
     }
 
     #[test]
@@ -235,7 +241,10 @@ mod tests {
         let a = keys_in("forge");
         let sig = a.sign("msg");
         let b = keys_in("forge2");
-        assert!(!verify(&b.pubkey(), &sig, "msg"), "other key must not verify");
+        assert!(
+            !verify(&b.pubkey(), &sig, "msg"),
+            "other key must not verify"
+        );
     }
 
     #[test]
@@ -252,7 +261,10 @@ mod tests {
         .unwrap();
         assert_eq!(decrypt(&ct, &a.age_secret).unwrap(), b"secret plan");
         assert_eq!(decrypt(&ct, &b.age_secret).unwrap(), b"secret plan");
-        assert!(decrypt(&ct, &c.age_secret).is_err(), "non-recipient must fail");
+        assert!(
+            decrypt(&ct, &c.age_secret).is_err(),
+            "non-recipient must fail"
+        );
     }
 
     #[test]

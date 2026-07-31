@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  client:
+    name: client (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test
+      - name: build (release)
+        run: cargo build --release
+
+      # The hooks must never break a Claude Code session, so every hook-mode
+      # command has to exit 0 even with no config, no keys, and garbage on stdin.
+      # A regression here is silent and only shows up as a broken session.
+      - name: hook safety (never breaks a session)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          BIN=../target/release/robofinger
+          export ROBOFINGER_HOME="$RUNNER_TEMP/rf-ci"
+          fail=0
+          for cmd in check start end; do
+            for payload in '' 'not json' '{"tool_input":{"command":"ls"}}'; do
+              printf '%s' "$payload" | env -u ROBOFINGER_URL -u ROBOFINGER_NS "$BIN" "$cmd" >/dev/null 2>&1
+              rc=$?
+              [ $rc -eq 0 ] || { echo "FAIL: $cmd with payload '$payload' exited $rc"; fail=1; }
+            done
+          done
+          [ $fail -eq 0 ] && echo "hook safety: OK"
+          exit $fail
+
+      # Keys must round-trip and identities must be stable across loads —
+      # a regenerated key silently breaks every peer relationship.
+      - name: identity is stable
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          BIN=../target/release/robofinger
+          export ROBOFINGER_HOME="$RUNNER_TEMP/rf-id"
+          A=$("$BIN" id ci-agent)
+          B=$("$BIN" id ci-agent)
+          [ "$A" = "$B" ] || { echo "FAIL: identity changed between invocations"; exit 1; }
+          case "$A" in rf1.ci-agent.*) ;; *) echo "FAIL: bad blob format: $A"; exit 1 ;; esac
+          echo "identity: OK"
+
+  relay:
+    name: relay
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - name: wrangler dry-run (config + bindings valid)
+        run: npx wrangler deploy --dry-run
