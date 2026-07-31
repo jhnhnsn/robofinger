@@ -36,7 +36,21 @@ cd relay
 npx wrangler deploy
 ```
 
-Note the URL, e.g. `https://robofinger.you.workers.dev`.
+By default this publishes to `https://<worker>.<subdomain>.workers.dev`.
+
+To serve it from your own domain instead, add a custom domain route to
+`wrangler.jsonc` — wrangler creates the DNS record and TLS cert for you:
+
+```jsonc
+"workers_dev": false,
+"routes": [
+  { "pattern": "relay.example.com", "custom_domain": true }
+]
+```
+
+The zone must already be on your Cloudflare account. Namespace data lives in a
+Durable Object keyed by namespace name, so switching hostnames does not lose
+plans.
 
 ### 2. Build the client
 
@@ -49,7 +63,7 @@ cp target/release/robofinger ~/.local/bin/
 ### 3. Configure
 
 ```sh
-export ROBOFINGER_URL=https://robofinger.you.workers.dev
+export ROBOFINGER_URL=https://relay.example.com
 export ROBOFINGER_NS=your-team-namespace             # routing key, not a secret
 export ROBOFINGER_AGENT=laptop                        # defaults to hostname
 ```

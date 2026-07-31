@@ -4,6 +4,11 @@
   "main": "src/index.js",
   "compatibility_date": "2026-07-01",
   "observability": { "enabled": true },
+  // Custom domain only — wrangler creates the DNS record and cert.
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "relay.example.com", "custom_domain": true }
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "NAMESPACE", "class_name": "Namespace" }
