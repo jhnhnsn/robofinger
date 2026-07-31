@@ -63,13 +63,25 @@ cp target/release/robofinger ~/.local/bin/
 ### 3. Configure
 
 ```sh
-export ROBOFINGER_URL=https://relay.example.com
-export ROBOFINGER_NS=your-team-namespace             # routing key, not a secret
-export ROBOFINGER_AGENT=laptop                        # defaults to hostname
+robofinger init --url https://relay.example.com --ns your-team-namespace
 ```
 
-Keys are generated on first use in `~/.config/robofinger/`. Exchange identities
-with peers before publishing — see Security below.
+Writes `~/.config/robofinger/config`, generates keys on first use, and prints
+your identity blob to share. Re-running it only changes the flags you pass.
+
+Environment variables (`ROBOFINGER_URL`, `ROBOFINGER_NS`, `ROBOFINGER_AGENT`)
+override the file when set — useful for CI or a one-off namespace.
+
+Exchange identities with collaborators before publishing:
+
+```sh
+robofinger id                    # send this line to them
+robofinger peer add rf1....      # add theirs
+```
+
+Both directions are required. Adding a peer subscribes you to their plans *and*
+lets them decrypt yours; if only one side adds the other, the exchange is
+half-open and claims silently fail to appear.
 
 ### 4. Wire into Claude Code
 
@@ -109,6 +121,7 @@ to back off, don't silently ignore it.
 
 | Command | Does |
 |---|---|
+| `robofinger init --url <u> --ns <n>` | Write config, generate keys, print identity |
 | `robofinger id [label]` | Print your shareable identity blob |
 | `robofinger peer add\|rm\|list` | Manage trusted peers |
 | `robofinger claim "<task>" <glob>...` | Publish a claim |

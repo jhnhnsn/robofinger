@@ -26,6 +26,27 @@ use std::io::Read;
 const STALE_MULT: i64 = 2;
 const DEFAULT_ETA: i64 = 1800;
 
+const USAGE: &str = "\
+robofinger — tell other agents what you're working on, before you collide.
+
+setup
+  init --url <url> --ns <namespace>   write config + print your identity
+  id [label]                          print your shareable identity blob
+  peer add <rf1...>                   trust a peer (subscribe + let them decrypt)
+  peer rm <label>                     revoke; your next plan is opaque to them
+  peer list                           show trusted peers
+
+use
+  claim \"<task>\" <glob>...            announce what you're touching
+  release                             drop claims, keep working
+  done                                mark finished
+  peers                               live peer claims
+  check <path>                        conflict check (hook JSON on stdin)
+  watch                               stream updates over WebSocket
+
+config is read from ~/.config/robofinger/config; environment variables
+(ROBOFINGER_URL, ROBOFINGER_NS, ROBOFINGER_AGENT) override it.";
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Plan {
     agent: String,
@@ -66,11 +87,29 @@ struct Cfg {
     agent: String,
 }
 
+/// `key=value` lines from ~/.config/robofinger/config. Written by `init`.
+fn config_file() -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(crypto::config_dir().join("config"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect()
+}
+
+/// Env wins over the config file, so hooks and CI can override without editing it.
 fn cfg() -> Option<Cfg> {
-    let url = std::env::var("ROBOFINGER_URL").ok()?;
-    let ns = std::env::var("ROBOFINGER_NS").ok()?;
-    let agent = std::env::var("ROBOFINGER_AGENT")
-        .ok()
+    let file = config_file();
+    let get = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| file.get(k).cloned())
+    };
+    let url = get("ROBOFINGER_URL")?;
+    let ns = get("ROBOFINGER_NS")?;
+    let agent = get("ROBOFINGER_AGENT")
         .or_else(hostname)
         .unwrap_or_else(|| "unknown".into());
     Some(Cfg { url: url.trim_end_matches('/').to_string(), ns, agent })
@@ -269,8 +308,55 @@ fn main() {
         }
     };
 
-    // Identity and peer management work without a relay configured.
+    // These work without a relay configured.
     match cmd {
+        "" | "help" | "-h" | "--help" => {
+            println!("{USAGE}");
+            return;
+        }
+        "init" => {
+            let mut url = None;
+            let mut ns = None;
+            let mut agent = None;
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--url" => url = it.next().cloned(),
+                    "--ns" => ns = it.next().cloned(),
+                    "--agent" => agent = it.next().cloned(),
+                    other => {
+                        eprintln!("unknown flag {other}\n\n{USAGE}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            // Keep values already configured so re-running init is not destructive.
+            let existing = config_file();
+            let url = url.or_else(|| existing.get("ROBOFINGER_URL").cloned());
+            let ns = ns.or_else(|| existing.get("ROBOFINGER_NS").cloned());
+            let (Some(url), Some(ns)) = (url, ns) else {
+                eprintln!("usage: robofinger init --url <relay url> --ns <namespace> [--agent <label>]");
+                std::process::exit(1);
+            };
+
+            let mut body = format!("ROBOFINGER_URL={url}\nROBOFINGER_NS={ns}\n");
+            if let Some(a) = agent.or_else(|| existing.get("ROBOFINGER_AGENT").cloned()) {
+                body.push_str(&format!("ROBOFINGER_AGENT={a}\n"));
+            }
+            let path = crypto::config_dir().join("config");
+            if let Err(e) = std::fs::write(&path, body) {
+                eprintln!("write {}: {e}", path.display());
+                std::process::exit(1);
+            }
+            println!("wrote {}", path.display());
+            println!("\nyour identity — share this line with collaborators:");
+            println!("  {}", k.identity_blob(&hostname().unwrap_or_else(|| "agent".into())));
+            println!("\nthey run:  robofinger peer add <your blob>");
+            println!("you run:   robofinger peer add <their blob>");
+            println!("\nboth directions are required — adding a peer both subscribes to");
+            println!("them and lets them decrypt your plans.");
+            return;
+        }
         "id" => {
             let label = args
                 .get(1)
@@ -349,7 +435,7 @@ fn main() {
         if matches!(cmd, "check" | "start" | "end") {
             std::process::exit(0);
         }
-        eprintln!("set ROBOFINGER_URL and ROBOFINGER_NS");
+        eprintln!("not configured yet — run:\n  robofinger init --url <relay url> --ns <namespace>");
         std::process::exit(1);
     };
 
@@ -464,7 +550,7 @@ fn main() {
         }
         "watch" => watch(&c, &k),
         _ => {
-            eprintln!("usage: robofinger id|peer|claim|release|done|peers|check|watch");
+            eprintln!("unknown command: {cmd}\n\n{USAGE}");
             std::process::exit(1);
         }
     }
