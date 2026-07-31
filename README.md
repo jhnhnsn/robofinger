@@ -1,4 +1,4 @@
-# planrelay
+# robofinger
 
 Real-time plan sync for coding agents. Each agent publishes what it is working
 on and which paths it is touching; peers get pushed the update and are warned
@@ -36,22 +36,22 @@ cd relay
 npx wrangler deploy
 ```
 
-Note the URL, e.g. `https://planrelay.you.workers.dev`.
+Note the URL, e.g. `https://robofinger.you.workers.dev`.
 
 ### 2. Build the client
 
 ```sh
 cd client
 cargo build --release
-cp target/release/planrelay ~/.local/bin/
+cp target/release/robofinger ~/.local/bin/
 ```
 
 ### 3. Configure
 
 ```sh
-export PLANRELAY_URL=https://planrelay.you.workers.dev
-export PLANRELAY_NS=your-team-shared-secret-string   # 8-128 chars
-export PLANRELAY_AGENT=laptop                        # defaults to hostname
+export ROBOFINGER_URL=https://robofinger.you.workers.dev
+export ROBOFINGER_NS=your-team-shared-secret-string   # 8-128 chars
+export ROBOFINGER_AGENT=laptop                        # defaults to hostname
 ```
 
 The namespace **is** the access control right now — anyone who knows it can
@@ -65,15 +65,15 @@ Merge into `~/.claude/settings.json`:
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "planrelay start" }] }
+      { "hooks": [{ "type": "command", "command": "robofinger start" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "planrelay end" }] }
+      { "hooks": [{ "type": "command", "command": "robofinger end" }] }
     ],
     "PreToolUse": [
       {
         "matcher": "Edit|Write|NotebookEdit",
-        "hooks": [{ "type": "command", "command": "planrelay check" }]
+        "hooks": [{ "type": "command", "command": "robofinger check" }]
       }
     ]
   }
@@ -85,8 +85,8 @@ Add to `~/.claude/CLAUDE.md` so the agent actually publishes claims:
 ```markdown
 ## Agent Plan Sync
 Before editing files, claim the paths:
-`planrelay claim "<task>" '<glob>' '<glob>'`
-Release when done: `planrelay release`
+`robofinger claim "<task>" '<glob>' '<glob>'`
+Release when done: `robofinger release`
 A CLAIM CONFLICT warning means another agent is working there — decide whether
 to back off, don't silently ignore it.
 ```
@@ -95,12 +95,12 @@ to back off, don't silently ignore it.
 
 | Command | Does |
 |---|---|
-| `planrelay claim "<task>" <glob>...` | Publish a claim |
-| `planrelay release` | Drop claims, stay working |
-| `planrelay done` | Mark finished |
-| `planrelay peers` | List live peer claims |
-| `planrelay check <path>` | Conflict check (also reads hook JSON on stdin) |
-| `planrelay watch` | Stream updates over WebSocket |
+| `robofinger claim "<task>" <glob>...` | Publish a claim |
+| `robofinger release` | Drop claims, stay working |
+| `robofinger done` | Mark finished |
+| `robofinger peers` | List live peer claims |
+| `robofinger check <path>` | Conflict check (also reads hook JSON on stdin) |
+| `robofinger watch` | Stream updates over WebSocket |
 
 ## Plan format
 

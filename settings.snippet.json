@@ -1,15 +1,15 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "planrelay start" }] }
+      { "hooks": [{ "type": "command", "command": "robofinger start" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "planrelay end" }] }
+      { "hooks": [{ "type": "command", "command": "robofinger end" }] }
     ],
     "PreToolUse": [
       {
         "matcher": "Edit|Write|NotebookEdit",
-        "hooks": [{ "type": "command", "command": "planrelay check" }]
+        "hooks": [{ "type": "command", "command": "robofinger check" }]
       }
     ]
   }

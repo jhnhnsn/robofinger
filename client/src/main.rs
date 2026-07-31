@@ -1,15 +1,15 @@
-//! planrelay — agent plan sync over a Cloudflare relay.
+//! robofinger — agent plan sync over a Cloudflare relay.
 //!
-//!   planrelay claim "<task>" <glob>...   publish a claim
-//!   planrelay release                    drop claims (status stays working)
-//!   planrelay done                       mark finished
-//!   planrelay peers                      list live peer claims
-//!   planrelay check <path>               exit 0 clean, 0 + hook JSON on conflict
-//!   planrelay watch                      stream updates over WebSocket
+//!   robofinger claim "<task>" <glob>...   publish a claim
+//!   robofinger release                    drop claims (status stays working)
+//!   robofinger done                       mark finished
+//!   robofinger peers                      list live peer claims
+//!   robofinger check <path>               exit 0 clean, 0 + hook JSON on conflict
+//!   robofinger watch                      stream updates over WebSocket
 //!
-//! Env: PLANRELAY_URL (e.g. https://planrelay.you.workers.dev)
-//!      PLANRELAY_NS  (shared namespace, acts as the team secret)
-//!      PLANRELAY_AGENT (defaults to hostname)
+//! Env: ROBOFINGER_URL (e.g. https://robofinger.you.workers.dev)
+//!      ROBOFINGER_NS  (shared namespace, acts as the team secret)
+//!      ROBOFINGER_AGENT (defaults to hostname)
 
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -55,9 +55,9 @@ struct Cfg {
 }
 
 fn cfg() -> Option<Cfg> {
-    let url = std::env::var("PLANRELAY_URL").ok()?;
-    let ns = std::env::var("PLANRELAY_NS").ok()?;
-    let agent = std::env::var("PLANRELAY_AGENT")
+    let url = std::env::var("ROBOFINGER_URL").ok()?;
+    let ns = std::env::var("ROBOFINGER_NS").ok()?;
+    let agent = std::env::var("ROBOFINGER_AGENT")
         .ok()
         .or_else(hostname)
         .unwrap_or_else(|| "unknown".into());
@@ -130,7 +130,7 @@ fn publish(c: &Cfg, status: &str, task: &str, touching: Vec<String>) -> Result<(
         task: task.into(),
         touching,
         project: project(),
-        eta_s: std::env::var("PLANRELAY_ETA")
+        eta_s: std::env::var("ROBOFINGER_ETA")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_ETA),
@@ -190,7 +190,7 @@ fn main() {
         if matches!(cmd, "check" | "start" | "end") {
             std::process::exit(0);
         }
-        eprintln!("set PLANRELAY_URL and PLANRELAY_NS");
+        eprintln!("set ROBOFINGER_URL and ROBOFINGER_NS");
         std::process::exit(1);
     };
 
@@ -305,7 +305,7 @@ fn main() {
         }
         "watch" => watch(&c),
         _ => {
-            eprintln!("usage: planrelay claim|release|done|peers|check|watch");
+            eprintln!("usage: robofinger claim|release|done|peers|check|watch");
             std::process::exit(1);
         }
     }
