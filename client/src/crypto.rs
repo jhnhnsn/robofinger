@@ -105,7 +105,9 @@ impl Keys {
     /// unconfigured — an identity is still shareable before `init`.
     pub fn identity_blob(&self, label: &str, home: Option<Home>) -> String {
         Peer {
-            label: label.to_string(),
+            // Dots and pipes are field separators in a blob; a hostname like
+            // "my.laptop" would otherwise silently corrupt every later field.
+            label: label.replace(['.', '|'], "-"),
             pubkey: self.pubkey(),
             age_pub: self.age_secret.to_public().to_string(),
             home,
@@ -137,24 +139,34 @@ pub struct Peer {
 
 impl Peer {
     /// Accepts both blob versions:
-    ///   rf1.<label>.<signkey>.<agekey>                     — same relay as you
-    ///   rf2.<label>.<signkey>.<agekey>.<b64(url|ns)>       — carries its home
+    ///   rf1.<label>.<signkey>.<agekey>                       — same relay as you
+    ///   rf2.<label>.<signkey>.<agekey>.<url>|<namespace>     — carries its home
     ///
-    /// The home field is base64url-encoded because a URL contains `/` and `:`,
-    /// which would otherwise collide with the `.` separator and make the blob
-    /// ambiguous to split.
+    /// The home field is left as readable text so you can see at a glance where
+    /// a peer publishes. It may contain dots (every URL does), so the blob is
+    /// split on the first four separators only and the remainder is the home —
+    /// splitting on every dot would shred `relay.example.com`.
     pub fn parse(blob: &str) -> Result<Peer, String> {
-        let p: Vec<&str> = blob.trim().split('.').collect();
-        let (version, expected) = match p.first() {
-            Some(&"rf1") => ("rf1", 4),
-            Some(&"rf2") => ("rf2", 5),
+        let blob = blob.trim();
+        // A label with a dot would shift every later field, so reject it at the
+        // source: `id` sanitizes labels, but a hand-edited peers file might not.
+        let p: Vec<&str> = blob.splitn(5, '.').collect();
+        let version = match p.first() {
+            Some(&"rf1") => "rf1",
+            Some(&"rf2") => "rf2",
             _ => return Err("expected an rf1... or rf2... identity blob".into()),
         };
+        let expected = if version == "rf1" { 4 } else { 5 };
         if p.len() != expected {
             return Err(format!(
-                "malformed {version} blob: expected {expected} dot-separated parts, got {}",
+                "malformed {version} blob: expected {expected} parts, got {}",
                 p.len()
             ));
+        }
+        // rf1 has no home, so a 4th segment containing a dot means the caller
+        // pasted an rf2 blob under an rf1 tag (or truncated one).
+        if version == "rf1" && p[3].contains('.') {
+            return Err("rf1 blob has trailing data — did you mean rf2?".into());
         }
         if B64.decode(p[2]).map(|v| v.len()) != Ok(32) {
             return Err("bad ed25519 key".into());
@@ -164,15 +176,14 @@ impl Peer {
         }
 
         let home = if version == "rf2" {
-            let raw = B64
-                .decode(p[4])
-                .map_err(|_| "bad home field".to_string())
-                .and_then(|b| String::from_utf8(b).map_err(|_| "home is not utf-8".to_string()))?;
-            let (url, ns) = raw
+            let (url, ns) = p[4]
                 .split_once('|')
                 .ok_or_else(|| "home must be <url>|<namespace>".to_string())?;
             if url.is_empty() || ns.is_empty() {
                 return Err("home url and namespace must both be set".into());
+            }
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(format!("home url must be http(s): got {url}"));
             }
             Some(Home {
                 url: url.trim_end_matches('/').to_string(),
@@ -194,11 +205,8 @@ impl Peer {
         match &self.home {
             None => format!("rf1.{}.{}.{}", self.label, self.pubkey, self.age_pub),
             Some(h) => format!(
-                "rf2.{}.{}.{}.{}",
-                self.label,
-                self.pubkey,
-                self.age_pub,
-                B64.encode(format!("{}|{}", h.url, h.ns))
+                "rf2.{}.{}.{}.{}|{}",
+                self.label, self.pubkey, self.age_pub, h.url, h.ns
             ),
         }
     }
@@ -336,6 +344,50 @@ mod tests {
     }
 
     #[test]
+    fn home_is_readable_not_encoded() {
+        let k = keys_in("readable");
+        let home = Home {
+            url: "https://relay.example.com".into(),
+            ns: "team-ns".into(),
+        };
+        let blob = k.identity_blob("box", Some(home));
+        // The whole point: you can see where a peer publishes by looking.
+        assert!(
+            blob.ends_with(".https://relay.example.com|team-ns"),
+            "home should be plain text, got {blob}"
+        );
+    }
+
+    #[test]
+    fn dotted_urls_and_labels_survive() {
+        let k = keys_in("dots");
+        // A URL is full of dots — splitting on every dot would shred it.
+        let home = Home {
+            url: "https://a.b.c.example.com".into(),
+            ns: "n.s".into(),
+        };
+        let p = Peer::parse(&k.identity_blob("my.laptop", Some(home))).unwrap();
+        assert_eq!(p.label, "my-laptop", "dots in a label are sanitized");
+        let h = p.home.unwrap();
+        assert_eq!(h.url, "https://a.b.c.example.com");
+        assert_eq!(h.ns, "n.s", "dots in a namespace survive too");
+    }
+
+    #[test]
+    fn home_url_must_be_http() {
+        let k = keys_in("scheme");
+        let bad = format!(
+            "rf2.x.{}.{}.ftp://nope.example|ns",
+            k.pubkey(),
+            k.age_secret.to_public()
+        );
+        assert!(
+            Peer::parse(&bad).is_err(),
+            "non-http scheme must be rejected"
+        );
+    }
+
+    #[test]
     fn rf2_blob_carries_home_relay() {
         let k = keys_in("rf2");
         let home = Home {
@@ -388,8 +440,12 @@ mod tests {
         assert!(Peer::parse("rf9.a.b.c.d").is_err(), "unknown version");
         let k = keys_in("malformed");
         // rf2 with an unparseable home field
-        let bad = format!("rf2.x.{}.{}.!!!", k.pubkey(), k.age_secret.to_public());
-        assert!(Peer::parse(&bad).is_err(), "bad base64 home");
+        let bad = format!(
+            "rf2.x.{}.{}.no-pipe-here",
+            k.pubkey(),
+            k.age_secret.to_public()
+        );
+        assert!(Peer::parse(&bad).is_err(), "home needs url|ns");
     }
 
     #[test]

@@ -202,9 +202,20 @@ An identity blob carries where its owner publishes, so you can follow someone
 who runs their own relay:
 
 ```
-rf1.<label>.<signkey>.<agekey>                  — same relay as you
-rf2.<label>.<signkey>.<agekey>.<b64(url|ns)>    — carries its own relay + namespace
+rf1.<label>.<signkey>.<agekey>                     — same relay as you
+rf2.<label>.<signkey>.<agekey>.<url>|<namespace>   — carries its own relay
 ```
+
+The home field is plain text so you can see where a peer publishes just by
+looking at their blob, or at your `peers` file:
+
+```
+rf2.laptop.fHC-SO9S….age1tj2wx….https://relay.example.com|team-ns
+```
+
+Blobs are split on the first four dots only, so dotted URLs and namespaces
+survive intact. Labels have `.` and `|` replaced with `-`, since a hostname
+like `my.laptop` would otherwise shift every later field.
 
 `robofinger id` emits `rf2` once configured; `peer add` accepts either. The
 client groups peers by endpoint and queries each relay it needs, so a mixed
