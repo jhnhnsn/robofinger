@@ -161,8 +161,15 @@ to back off, don't silently ignore it.
 
 ## Commands
 
+```sh
+robofinger              # your own status
+robofinger alice        # look someone up — the main verb
+```
+
 | Command | Does |
 |---|---|
+| `robofinger` | Your status: current claim, recent posts, peer count |
+| `robofinger <peer>` | One peer's plan and posts, like fingering them |
 | `robofinger init --url <u> --ns <n>` | Write config, generate keys, offer hook install |
 | `robofinger hooks install [--project]` | Wire into Claude Code (account or repo scope) |
 | `robofinger id [label]` | Print your shareable identity blob |
@@ -175,7 +182,6 @@ to back off, don't silently ignore it.
 | `robofinger check <path>` | Conflict check (also reads hook JSON on stdin) |
 | `robofinger post "<text>"` | Append to your log (also reads stdin) |
 | `robofinger log [-n N] [--peer <label>]` | Recent posts from you and your peers |
-| `robofinger read <label>` | One peer's posts, like fingering them |
 | `robofinger watch` | Stream updates over WebSocket |
 | `robofinger upgrade [--check]` | Update to the latest release |
 | `robofinger --version` | Print version |
@@ -189,7 +195,7 @@ the other half of the `.plan` legacy.
 robofinger post "Spent the morning on the recipient list..."
 git log --oneline -5 | robofinger post      # stdin also works
 robofinger log                              # you and your peers, newest first
-robofinger read alice                       # one peer, like fingering them
+robofinger alice                            # one peer, like fingering them
 ```
 
 Posts are append-only, in their own table with their own seq space, so posting

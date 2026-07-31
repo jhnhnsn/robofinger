@@ -33,6 +33,9 @@ const MAX_FROM: usize = 100;
 const USAGE: &str = "\
 robofinger — tell other agents what you're working on, before you collide.
 
+  robofinger                          your own status
+  robofinger <peer>                   look someone up
+
 setup
   init --url <url> --ns <namespace>   write config + print your identity
   id [label]                          print your shareable identity blob
@@ -54,7 +57,6 @@ use
 write
   post \"<text>\"                       append to your log (also reads stdin)
   log [-n N] [--peer <label>]         recent posts from you and your peers
-  read <label>                        one peer\'s posts, like fingering them
   watch                               stream updates over WebSocket
 
 maintenance
@@ -518,7 +520,7 @@ fn main() {
 
     // These work without a relay configured.
     match cmd {
-        "" | "help" | "-h" | "--help" => {
+        "help" | "-h" | "--help" => {
             println!("{USAGE}");
             return;
         }
@@ -817,9 +819,16 @@ fn main() {
         if matches!(cmd, "check" | "start" | "end") {
             std::process::exit(0);
         }
-        eprintln!(
-            "not configured yet — run:\n  robofinger init --url <relay url> --ns <namespace>"
-        );
+        // A first run should orient you, not just fail. Bare invocation is the
+        // most likely way someone arrives here.
+        if cmd.is_empty() {
+            println!("robofinger — not set up yet.\n");
+            println!("  robofinger init --url <relay url>");
+            println!("      e.g. --url https://example.com/plan   (the path is your namespace)\n");
+            println!("  robofinger --help    all commands");
+            return;
+        }
+        eprintln!("not configured yet — run: robofinger init --url <relay url>");
         std::process::exit(1);
     };
 
@@ -988,54 +997,136 @@ fn main() {
                 println!("no posts yet — write one with: robofinger post \"...\"");
             }
         }
-        "read" => {
-            let Some(who) = args.get(1) else {
-                eprintln!("usage: robofinger read <peer label>");
-                std::process::exit(1);
-            };
-            let subs = crypto::load_peers();
-            let Some(peer) = subs.iter().find(|p| &p.label == who) else {
-                eprintln!("no peer named {who} — see: robofinger peer list");
-                std::process::exit(1);
-            };
-            let mut found = false;
-            for p in fetch_posts(&c, &k, 50) {
-                if p.pubkey != peer.pubkey {
-                    continue;
-                }
-                println!("{} {}\n{}\n", stamp(p.epoch), p.agent, p.task);
-                found = true;
-            }
-            if !found {
-                println!("nothing from {who} yet (or their posts predate your key exchange)");
-            }
-        }
-        "moved" => {
-            let Some(new_addr) = args.get(1) else {
-                eprintln!("usage: robofinger moved <your new address>");
-                eprintln!("  publishes a signed pointer so peers can find you");
-                std::process::exit(1);
-            };
-            if let Err(e) = crypto::Peer::parse(new_addr) {
-                eprintln!("that does not look like an address: {e}");
-                std::process::exit(1);
-            }
-            match publish_forward(&c, &k, new_addr) {
-                Ok(_) => {
-                    println!("published forwarding pointer -> {new_addr}");
-                    println!("peers will see it next time they check; it expires in a year.");
-                }
-                Err(e) => {
-                    eprintln!("failed: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
         "watch" => watch(&c, &k),
-        _ => {
-            eprintln!("unknown command: {cmd}\n\n{USAGE}");
-            std::process::exit(1);
+        // `robofinger` alone is your own status; `robofinger alice` is a peer.
+        // Falling through to a peer lookup keeps the main verb short, the way
+        // `finger alice` was the whole interface.
+        "" => show_self(&c, &k),
+        other => match finger(&c, &k, other) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        },
+    }
+}
+
+/// `robofinger` with no arguments: your own status, the way `finger` with no
+/// arguments showed the local machine.
+fn show_self(c: &Cfg, k: &Keys) {
+    let t = now();
+    let mine: Vec<Plan> = fetch_plans(c, k)
+        .into_iter()
+        .filter(|p| p.pubkey == k.pubkey())
+        .collect();
+
+    println!("{} @ {}", c.agent, c.url);
+    println!("{}", k.pubkey());
+
+    match mine.iter().find(|p| p.live(t)) {
+        Some(p) if !p.touching.is_empty() => {
+            println!("\nworking: {}", p.task);
+            for g in &p.touching {
+                println!("  claiming {}/{}", p.project, g);
+            }
         }
+        Some(p) => println!("\nworking: {}", p.task),
+        None => println!("\nno active claim"),
+    }
+
+    let posts: Vec<Plan> = fetch_posts(c, k, 3)
+        .into_iter()
+        .filter(|p| p.pubkey == k.pubkey())
+        .collect();
+    if !posts.is_empty() {
+        println!("\nrecent posts:");
+        for p in posts {
+            println!("  {} {}", stamp(p.epoch), first_line(&p.task));
+        }
+    }
+
+    let peers = crypto::load_peers();
+    let live = fetch_plans(c, k)
+        .iter()
+        .filter(|p| p.pubkey != k.pubkey() && p.live(t))
+        .count();
+    println!("\n{} peer(s), {live} with active claims", peers.len());
+    println!("\nrobofinger <peer>   look someone up");
+    println!("robofinger --help   all commands");
+}
+
+/// `robofinger alice` — one peer's plan and posts, like fingering them.
+fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
+    let peers = crypto::load_peers();
+    let peer = peers
+        .iter()
+        .find(|p| p.label == who || p.pubkey.starts_with(who))
+        .ok_or_else(|| {
+            // A typo should not dump the usage screen; suggest the nearest
+            // label instead, or explain the two ways to get here.
+            let near: Vec<&str> = peers
+                .iter()
+                .map(|p| p.label.as_str())
+                .filter(|l| l.starts_with(&who[..who.len().min(2)]))
+                .collect();
+            if near.is_empty() {
+                format!(
+                    "no peer named {who:?} and no such command\n  robofinger --help    all commands\n  robofinger peer list  who you follow"
+                )
+            } else {
+                format!("no peer named {who:?} — did you mean: {}", near.join(", "))
+            }
+        })?;
+
+    let t = now();
+    println!("{} @ {}", peer.label, peer.endpoint(&c.url));
+    println!("{}", peer.pubkey);
+
+    if let Some(dest) = fetch_forward(peer.endpoint(&c.url), &peer.pubkey, k, &peers) {
+        println!("\n↳ moved to {dest}");
+        println!("  accept with: robofinger peer update {}", peer.label);
+    }
+
+    match fetch_plans(c, k)
+        .into_iter()
+        .find(|p| p.pubkey == peer.pubkey)
+    {
+        Some(p) if p.live(t) && !p.touching.is_empty() => {
+            println!("\nworking: {}", p.task);
+            for g in &p.touching {
+                println!("  claiming {}/{}", p.project, g);
+            }
+            println!("  since {}", ago(t - p.epoch));
+        }
+        Some(p) if p.live(t) => println!("\nworking: {} ({})", p.task, ago(t - p.epoch)),
+        Some(_) => println!("\nno active claim"),
+        None => println!("\nno plan visible"),
+    }
+
+    let posts: Vec<Plan> = fetch_posts(c, k, 20)
+        .into_iter()
+        .filter(|p| p.pubkey == peer.pubkey)
+        .collect();
+    if posts.is_empty() {
+        println!("\nno posts (or they predate your key exchange)");
+    } else {
+        println!();
+        for p in posts {
+            println!("{} {}", stamp(p.epoch), p.agent);
+            println!("{}\n", p.task);
+        }
+    }
+    Ok(())
+}
+
+/// First line of a possibly multi-line post, for compact listings.
+fn first_line(s: &str) -> String {
+    let line = s.lines().next().unwrap_or("");
+    if line.chars().count() > 60 {
+        format!("{}…", line.chars().take(60).collect::<String>())
+    } else {
+        line.to_string()
     }
 }
 
