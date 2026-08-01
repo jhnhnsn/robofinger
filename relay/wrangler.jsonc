@@ -4,11 +4,17 @@
   "main": "src/index.js",
   "compatibility_date": "2026-07-01",
   "observability": { "enabled": true },
-  // Custom domain only — wrangler creates the DNS record and cert.
-  "workers_dev": false,
-  "routes": [
-    { "pattern": "relay.example.com", "custom_domain": true }
-  ],
+  // Deploys to <name>.<your-subdomain>.workers.dev by default, so this works
+  // unmodified. To serve it from your own domain instead, drop a
+  // wrangler.local.jsonc beside this file (gitignored) and deploy with
+  // `wrangler deploy -c wrangler.local.jsonc`:
+  //
+  //   { "workers_dev": false,
+  //     "routes": [{ "pattern": "relay.example.com", "custom_domain": true }] }
+  //
+  // The zone must already be on your Cloudflare account; wrangler creates the
+  // DNS record and certificate.
+  "workers_dev": true,
   // Edge rate limit, evaluated before any Durable Object is instantiated —
   // the point is to reject namespace-spraying without paying for a DO per
   // sprayed name. Keyed by client IP.
