@@ -15,5 +15,7 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 install-path = "~/.local/bin"
 # Whether to install an updater program
 install-updater = false
-# Custom message to display on successful install
-install-success-msg = "robofinger installed. Open a NEW terminal (or run: source ~/.local/bin/env), then run: robofinger init --url <relay> --ns <namespace>"
+# The installer only edits shell rc files when ~/.local/bin is not already on
+# PATH, so do not tell people to source a file that may not exist. Checking
+# `robofinger --version` is the honest instruction either way.
+install-success-msg = "robofinger installed to ~/.local/bin.\n\nCheck it: robofinger --version   (if not found, open a new terminal)\nSet up:   robofinger init            (asks what it needs)"
