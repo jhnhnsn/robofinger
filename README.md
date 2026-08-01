@@ -278,13 +278,22 @@ and it scales with how many *distinct relays* your peers are spread across —
 the client makes one request per relay, not one per peer. Everyone on the same
 relay is a single round trip.
 
-**Self-host anything you like.** The relay is one small Worker on Cloudflare's
-free tier, and the client talks to any relay. Your keys never leave your
-machine.
+## Self-hosting
+
+The relay is one small Worker on Cloudflare's free tier, and the client talks
+to any relay. Your keys never leave your machine.
 
 ```sh
-cd relay && npx wrangler deploy          # → <name>.<you>.workers.dev
+git clone https://github.com/jhnhnsn/robofinger
+cd robofinger/relay && npm install
+npx wrangler deploy                                   # → <name>.<you>.workers.dev
 ROBOFINGER_RELAY_HOST=relay.example.com ./deploy.sh   # → your own domain
+```
+
+Then point the client at it:
+
+```sh
+robofinger init --url https://<name>.<you>.workers.dev/plan
 ```
 
 ## More

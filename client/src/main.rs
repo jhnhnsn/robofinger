@@ -619,11 +619,21 @@ fn main() {
             // Keep values already configured so re-running init is not destructive.
             let existing = config_file();
             let url = url.or_else(|| existing.get("ROBOFINGER_URL").cloned());
+            // `--hooks` without `--url` would otherwise be silently dropped:
+            // init aborts below, and the user believes hooks were installed.
             let Some(mut url) = url else {
-                eprintln!("usage: robofinger init --url <relay url> [--agent <name>] [--hooks]");
+                if want_hooks {
+                    eprintln!("cannot init without --url. To install hooks alone:");
+                    eprintln!("  robofinger hooks install");
+                    std::process::exit(1);
+                }
+                eprintln!("usage: robofinger init --url <relay url> [--alias <name>] [--hooks]");
                 eprintln!("  the URL path is your namespace, e.g.");
                 eprintln!("    https://example.com/plan            your own space");
                 eprintln!("    https://example.com/plan/team-a     a shared room");
+                eprintln!(
+                    "  no relay yet? deploy one free: https://github.com/jhnhnsn/robofinger#self-hosting"
+                );
                 std::process::exit(1);
             };
             url = url.trim_end_matches('/').to_string();
