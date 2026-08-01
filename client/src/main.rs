@@ -9,6 +9,7 @@
 //!   robofinger watch                      stream updates over WebSocket
 //!   robofinger id [label]                 print your shareable identity blob
 //!   robofinger add|rm|list                manage who you follow
+//!   robofinger --upgrade                  update robofinger itself
 //!
 //! Plans are signed (Ed25519) and encrypted (age) client-side. The relay
 //! stores opaque ciphertext and can verify signatures but never read contents.
@@ -88,6 +89,7 @@ SETUP
   init --url <relay url>        write config, make keys, print your address
       robofinger init --url https://relay.example.com/plan
       robofinger init --url https://relay.example.com/plan --hooks
+      robofinger init --url https://relay.example.com/plan --hooks-project
       robofinger init --url https://example.com/plan/team-a
       (the URL path is the namespace — /plan/team-a is a separate room)
 
@@ -96,7 +98,9 @@ SETUP
       robofinger hooks install --project    just this repo, commit to share
   hooks uninstall [--project]   remove them again
 
-  upgrade [--check] [--yes]     update robofinger itself
+  --upgrade [--check] [--yes]   update robofinger itself
+      robofinger --upgrade --check    is there a newer version?
+      robofinger --upgrade            install it
   --version                     print version
 
 Config lives in ~/.config/robofinger/config. ROBOFINGER_URL and
@@ -564,7 +568,7 @@ fn main() {
             println!("robofinger {}", env!("CARGO_PKG_VERSION"));
             return;
         }
-        "upgrade" => {
+        "--upgrade" | "upgrade" => {
             if let Err(e) = selfupdate::cmd_upgrade(&args[1..]) {
                 eprintln!("{e}");
                 std::process::exit(1);
@@ -752,7 +756,7 @@ fn main() {
                     let Some(which) = args.get(1) else {
                         eprintln!("usage: robofinger update <label>");
                         eprintln!(
-                            "  accepts a peer's published move (see: robofinger upgrade for the tool itself)"
+                            "  accepts a peer's published move (robofinger --upgrade updates the tool itself)"
                         );
                         std::process::exit(1);
                     };

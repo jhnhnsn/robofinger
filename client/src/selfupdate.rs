@@ -1,4 +1,4 @@
-//! Self-update: `robofinger upgrade` and its `--check`.
+//! Self-update: `robofinger --upgrade` and its `--check`.
 //!
 //! Deliberately dependency-free — the version check follows the
 //! `/releases/latest` redirect via `curl` (no HTTP crate, no JSON parsing) and
@@ -109,7 +109,7 @@ fn install_receipt() -> Option<String> {
     }
 }
 
-/// `robofinger upgrade [--check] [--yes]`.
+/// `robofinger --upgrade [--check] [--yes]`.
 ///
 /// Refuses to self-update an install we didn't perform: overwriting a
 /// Homebrew-managed binary desynchronizes it from the package database, or
@@ -123,7 +123,7 @@ pub fn cmd_upgrade(args: &[String]) -> Result<(), String> {
             "--yes" | "-y" => yes = true,
             s => {
                 return Err(format!(
-                    "unknown argument '{s}'\nusage: robofinger upgrade [--check] [--yes]"
+                    "unknown argument '{s}'\nusage: robofinger --upgrade [--check] [--yes]"
                 ));
             }
         }
@@ -145,7 +145,7 @@ pub fn cmd_upgrade(args: &[String]) -> Result<(), String> {
 
     if install_receipt().as_deref() != Some("cargo-dist") {
         return Err(format!(
-            "this copy wasn't installed by the robofinger installer, so `upgrade` won't touch it.\n\
+            "this copy wasn't installed by the robofinger installer, so `--upgrade` won't touch it.\n\
              \x20  Update it with whatever installed it — e.g. `brew upgrade`, your distro's\n\
              \x20  package manager, or `cargo install --path client` from a fresh checkout of\n\
              \x20  {REPO_URL}."
@@ -160,7 +160,7 @@ pub fn cmd_upgrade(args: &[String]) -> Result<(), String> {
         if !io::stdin().is_terminal() {
             return Err(
                 "refusing to upgrade non-interactively — pass `--yes` to confirm:\n\
-                 \x20  robofinger upgrade --yes"
+                 \x20  robofinger --upgrade --yes"
                     .to_string(),
             );
         }
