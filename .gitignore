@@ -3,3 +3,4 @@ node_modules/
 .wrangler/
 .dev.vars
 wrangler.local.jsonc
+relay/.wrangler-deploy.jsonc

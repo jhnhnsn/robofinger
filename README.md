@@ -250,8 +250,14 @@ and it scales with how many *distinct relays* your peers are spread across —
 the client makes one request per relay, not one per peer. Everyone on the same
 relay is a single round trip.
 
-**Self-host anything you like.** The relay is one small Worker on Cloudflare's free
-tier, and the client talks to any relay. Your keys never leave your machine.
+**Self-host anything you like.** The relay is one small Worker on Cloudflare's
+free tier, and the client talks to any relay. Your keys never leave your
+machine.
+
+```sh
+cd relay && npx wrangler deploy          # → <name>.<you>.workers.dev
+ROBOFINGER_RELAY_HOST=relay.example.com ./deploy.sh   # → your own domain
+```
 
 ## More
 
