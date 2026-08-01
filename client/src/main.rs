@@ -93,16 +93,16 @@ SETUP
       robofinger init --url https://relay.example.com
       robofinger init --url <url> --alias laptop     name this machine
       robofinger init --url <url> --hooks            wire into Claude Code now
-      robofinger init --url <url> --hooks-project    ... for this repo only
+      robofinger init --url <url> --hooks-user       ... for every repo
 
       A relay hosted under a path keeps that path as its namespace, so
       https://example.com/plan and .../plan/team-a are separate rooms. You
       rarely need one; --ns <room> appends it if you do.
 
-  hooks install [--project]     let your coding agent use robofinger
-      robofinger hooks install              every project on this machine
-      robofinger hooks install --project    just this repo, commit to share
-  hooks uninstall [--project]   remove them again
+  hooks install [--user]        let your coding agent use robofinger
+      robofinger hooks install              just this repo, commit to share
+      robofinger hooks install --user       every project on this machine
+  hooks uninstall [--user]      remove them again
 
   --upgrade [--check] [--yes]   update robofinger itself
       robofinger --upgrade --check    is there a newer version?
@@ -629,7 +629,7 @@ fn main() {
             let mut ns = None;
             let mut alias = None;
             let mut want_hooks = false;
-            let mut hook_scope = hooks::Scope::Account;
+            let mut hook_scope = hooks::Scope::Project;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -637,9 +637,9 @@ fn main() {
                     "--ns" => ns = it.next().cloned(),
                     "--alias" | "--agent" => alias = it.next().cloned(),
                     "--hooks" => want_hooks = true,
-                    "--hooks-project" => {
+                    "--hooks-user" => {
                         want_hooks = true;
-                        hook_scope = hooks::Scope::Project;
+                        hook_scope = hooks::Scope::Account;
                     }
                     other => {
                         eprintln!("unknown flag {other}\n\n{USAGE}");
@@ -773,8 +773,8 @@ fn main() {
 
             if !installed {
                 println!("\nTo let your coding agent use this later:");
-                println!("  robofinger hooks install              this machine");
-                println!("  robofinger hooks install --project    just this repo");
+                println!("  robofinger hooks install           just this repo");
+                println!("  robofinger hooks install --user    every repo on this machine");
             }
 
             // Hooks give you conflict warnings; this makes the agent actually
@@ -788,10 +788,10 @@ fn main() {
         }
         "hooks" => {
             let sub = args.get(1).map(String::as_str).unwrap_or("");
-            let scope = if args.iter().any(|a| a == "--project") {
-                hooks::Scope::Project
-            } else {
+            let scope = if args.iter().any(|a| a == "--user") {
                 hooks::Scope::Account
+            } else {
+                hooks::Scope::Project
             };
             let r = match sub {
                 "install" => hooks::install(true, scope),

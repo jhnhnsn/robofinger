@@ -135,10 +135,10 @@ pub fn prompt_install() -> bool {
     let account = settings_path_for(Scope::Account);
     let project = settings_path_for(Scope::Project);
     eprintln!("\nLet your coding agent read and write your plan?");
-    eprintln!("  [a] account — {} (every project here)", account.display());
     eprintln!("  [p] project — {} (this repo only)", project.display());
+    eprintln!("  [a] account — {} (every project here)", account.display());
     eprintln!("  [N] not now");
-    eprint!("Choice [a/p/N]: ");
+    eprint!("Choice [p/a/N]: ");
     let _ = io::stderr().flush();
 
     let mut input = String::new();
@@ -146,8 +146,8 @@ pub fn prompt_install() -> bool {
         return false;
     }
     let scope = match input.trim().to_ascii_lowercase().as_str() {
-        "a" | "account" | "y" | "yes" => Scope::Account,
-        "p" | "project" => Scope::Project,
+        "p" | "project" | "y" | "yes" => Scope::Project,
+        "a" | "account" => Scope::Account,
         _ => return false,
     };
 

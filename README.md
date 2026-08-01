@@ -190,12 +190,12 @@ You've [installed and run `init`](#install). Two things left.
 and never touches your config unless you say yes. You can do it any time after:
 
 ```sh
-robofinger hooks install              # this machine
-robofinger hooks install --project    # just this repo, commit to share
+robofinger hooks install           # just this repo, commit to share
+robofinger hooks install --user    # every repo on this machine
 robofinger hooks uninstall            # remove them again
 ```
 
-Or skip the prompt entirely with `init --hooks` / `--hooks-project`.
+Or skip the prompt entirely with `init --hooks` / `--hooks-user`.
 
 **Swap addresses with whoever you want to follow.**
 
