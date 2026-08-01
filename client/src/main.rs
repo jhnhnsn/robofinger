@@ -31,39 +31,76 @@ const DEFAULT_ETA: i64 = 1800;
 const MAX_FROM: usize = 100;
 
 const USAGE: &str = "\
-robofinger — tell other agents what you're working on, before you collide.
+robofinger — a .plan file for a world with agents.
 
-  robofinger                          your own status
-  robofinger <peer>                   look someone up
+  robofinger                    your own plan
+  robofinger sam                read someone else's
 
-setup
-  init --url <relay url> [--hooks]    write config + print your address
-  id [label]                          print your shareable address
-  hooks install [--project]           wire into Claude Code
-  hooks uninstall [--project]         remove the hooks
-  add <address>                       follow a peer (and let them read you)
-  rm <label>                          unfollow; your next plan is opaque to them
-  list [-v]                           who you follow, where, and what they hold
-  update <label>                      accept a peer's move to a new relay
-  moved <new address>                 tell peers you have moved relay
+READING AND WRITING
 
-use
-  claim \"<task>\" <glob>...            announce what you're touching
-  release                             drop claims, keep working
-  done                                mark finished
-  check <path>                        conflict check (hook JSON on stdin)
+  post \"<text>\"                 append to your plan
+      robofinger post \"Rewrote the parser. Third time. This one's right.\"
+      git log --oneline -5 | robofinger post
 
-write
-  post \"<text>\"                       append to your log (also reads stdin)
-  log [-n N] [--peer <label>]         recent posts from you and your peers
-  watch                               stream updates over WebSocket
+  log [-n N] [--peer <label>]   recent posts from you and everyone you follow
+      robofinger log
+      robofinger log -n 50
+      robofinger log --peer sam
 
-maintenance
-  upgrade [--check] [--yes]           update robofinger itself
-  --version                           print version
+  watch                         stream peer updates as they happen
 
-config is read from ~/.config/robofinger/config; environment variables
-(ROBOFINGER_URL, ROBOFINGER_AGENT) override it.";
+PEOPLE
+
+  id [label]                    print your address, to share with someone
+      robofinger id
+      robofinger id laptop
+
+  add <address>                 follow them (and let them read you)
+      robofinger add https://relay.example.com/plan/u/kWJQ…#age1x3h…
+
+  list [-v]                     who you follow, where, and what they hold
+      robofinger list
+      robofinger list -v        also print each full address
+
+  rm <label>                    unfollow; your next post is opaque to them
+      robofinger rm sam
+
+  update <label>                accept a peer's move to a new relay
+      robofinger update sam
+
+  moved <new address>           tell your peers you have moved
+      robofinger moved https://newhost.example.com/plan/u/fHC…#age1tj2…
+
+AGENTS
+
+  claim \"<task>\" <glob>...      announce what you are touching
+      robofinger claim \"migrate session store\" 'src/auth/**'
+      robofinger claim \"fix retry backoff\" 'src/http/**' 'src/net/*.rs'
+
+  release                       drop your claims, stay working
+  done                          mark finished
+  check <path>                  conflict check; reads hook JSON on stdin
+
+  Your agent runs these through the hooks. You rarely type them.
+
+SETUP
+
+  init --url <relay url>        write config, make keys, print your address
+      robofinger init --url https://relay.example.com/plan
+      robofinger init --url https://relay.example.com/plan --hooks
+      robofinger init --url https://example.com/plan/team-a
+      (the URL path is the namespace — /plan/team-a is a separate room)
+
+  hooks install [--project]     let your coding agent use robofinger
+      robofinger hooks install              every project on this machine
+      robofinger hooks install --project    just this repo, commit to share
+  hooks uninstall [--project]   remove them again
+
+  upgrade [--check] [--yes]     update robofinger itself
+  --version                     print version
+
+Config lives in ~/.config/robofinger/config. ROBOFINGER_URL and
+ROBOFINGER_AGENT override it. Keys never leave this machine.";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Plan {
