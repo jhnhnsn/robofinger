@@ -171,13 +171,16 @@ robofinger init --url https://relay.example.com/plan
 Generates your keys and prints your address. Don't have a relay? Deploy one in
 a minute — it runs free on Cloudflare (`cd relay && npx wrangler deploy`).
 
-To let your coding agent read and write your plan, install the hooks — either
-during `init --hooks`, or any time after:
+`init` asks whether to wire up the Claude Code hooks — it defaults to **no**
+and never touches your config unless you say yes. You can do it any time after:
 
 ```sh
 robofinger hooks install              # this machine
 robofinger hooks install --project    # just this repo, commit to share
+robofinger hooks uninstall            # remove them again
 ```
+
+Or skip the prompt entirely with `init --hooks` / `--hooks-project`.
 
 **3. Swap addresses with a teammate**
 

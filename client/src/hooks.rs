@@ -9,6 +9,7 @@
 //! config the user already owns, so it backs up first, never clobbers unrelated
 //! keys, and is idempotent.
 
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 /// Printed after install — without this the agent never publishes claims, so
@@ -18,7 +19,7 @@ When starting a task that will edit files, claim the paths first:
 `robofinger claim "<short task description>" '<glob>' '<glob>'`
 
 Release when done: `robofinger release`
-See live peer claims: `robofinger peers`
+See who is working on what: `robofinger list`
 
 Globs are relative to the repo you're working in. Claims are advisory — a
 CLAIM CONFLICT warning means another agent is working there; decide whether to
@@ -102,6 +103,49 @@ fn already_installed(settings: &serde_json::Value) -> bool {
                     })
                 })
         })
+}
+
+/// Ask whether to install the hooks, defaulting to NO.
+///
+/// This edits `~/.claude/settings.json`, a file the user owns and that other
+/// tools also write to, so silence must mean "don't touch it". A non-TTY does
+/// nothing at all — a scripted `init` should never rewrite someone's config.
+///
+/// Returns true if hooks were installed.
+pub fn prompt_install() -> bool {
+    if !io::stdin().is_terminal() {
+        return false;
+    }
+
+    let account = settings_path_for(Scope::Account);
+    let project = settings_path_for(Scope::Project);
+    eprintln!("\nLet your coding agent read and write your plan?");
+    eprintln!("  [a] account — {} (every project here)", account.display());
+    eprintln!("  [p] project — {} (this repo only)", project.display());
+    eprintln!("  [N] not now");
+    eprint!("Choice [a/p/N]: ");
+    let _ = io::stderr().flush();
+
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    let scope = match input.trim().to_ascii_lowercase().as_str() {
+        "a" | "account" | "y" | "yes" => Scope::Account,
+        "p" | "project" => Scope::Project,
+        _ => return false,
+    };
+
+    match install(true, scope) {
+        Ok(m) => {
+            eprintln!("{m}");
+            true
+        }
+        Err(e) => {
+            eprintln!("hook install failed: {e}");
+            false
+        }
+    }
 }
 
 /// Merge the hooks into settings.json. Backs up any existing file first.

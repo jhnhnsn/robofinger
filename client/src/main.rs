@@ -2,9 +2,9 @@
 //!
 //!   robofinger <peer>                     look someone up
 //!   robofinger claim "<task>" <glob>...   publish a claim
+//!   robofinger list                       who you follow and what they hold
 //!   robofinger release                    drop claims (status stays working)
 //!   robofinger done                       mark finished
-//!   robofinger peers                      list live peer claims
 //!   robofinger check <path>               exit 0 clean, 0 + hook JSON on conflict
 //!   robofinger watch                      stream updates over WebSocket
 //!   robofinger id [label]                 print your shareable identity blob
@@ -601,15 +601,26 @@ fn main() {
             println!("\nboth directions are required — adding a peer both subscribes to");
             println!("them and lets them decrypt your plans.");
 
-            // Editing ~/.claude/settings.json is not something a setup command
-            // should do uninvited, so hooks are opt-in.
-            if want_hooks {
+            // Editing ~/.claude/settings.json is the user's call, so this is
+            // opt-in: an explicit flag, or a prompt that defaults to no. A
+            // non-TTY (scripted init) never touches the file.
+            let installed = if want_hooks {
                 match hooks::install(true, hook_scope) {
-                    Ok(m) => println!("\n{m}"),
-                    Err(e) => eprintln!("\nhook install failed: {e}"),
+                    Ok(m) => {
+                        println!("\n{m}");
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("\nhook install failed: {e}");
+                        false
+                    }
                 }
             } else {
-                println!("\nTo let your coding agent use this, install the hooks:");
+                hooks::prompt_install()
+            };
+
+            if !installed {
+                println!("\nTo let your coding agent use this later:");
                 println!("  robofinger hooks install              this machine");
                 println!("  robofinger hooks install --project    just this repo");
             }
@@ -617,7 +628,7 @@ fn main() {
             // Hooks give you conflict warnings; this makes the agent actually
             // publish claims. Without it `touching` stays empty and every
             // check passes trivially.
-            if want_hooks {
+            if installed {
                 println!("\nAdd this to ~/.claude/CLAUDE.md so your agent publishes claims:\n");
                 println!("{}", hooks::CLAUDE_MD);
             }
