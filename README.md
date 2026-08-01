@@ -209,7 +209,7 @@ robofinger                      read your own
 robofinger post "…"             write to it (or pipe stdin)
 robofinger log                  everyone you follow, newest first
 robofinger add <address>        follow someone
-robofinger peers                who you follow, and what they hold
+robofinger list                 who you follow, and what they hold
 robofinger --help               everything else
 ```
 

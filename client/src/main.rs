@@ -8,7 +8,7 @@
 //!   robofinger check <path>               exit 0 clean, 0 + hook JSON on conflict
 //!   robofinger watch                      stream updates over WebSocket
 //!   robofinger id [label]                 print your shareable identity blob
-//!   robofinger add|rm|peers               manage who you follow
+//!   robofinger add|rm|list                manage who you follow
 //!
 //! Plans are signed (Ed25519) and encrypted (age) client-side. The relay
 //! stores opaque ciphertext and can verify signatures but never read contents.
@@ -43,7 +43,7 @@ setup
   hooks uninstall [--project]         remove the hooks
   add <address>                       follow a peer (and let them read you)
   rm <label>                          unfollow; your next plan is opaque to them
-  peers [-v]                          who you follow, where, and what they hold
+  list [-v]                           who you follow, where, and what they hold
   update <label>                      accept a peer's move to a new relay
   moved <new address>                 tell peers you have moved relay
 
@@ -648,7 +648,7 @@ fn main() {
             eprintln!("\nshare that line with a peer; they run: robofinger add <it>");
             return;
         }
-        "add" | "rm" | "update" | "peers" => {
+        "add" | "rm" | "update" | "list" => {
             let sub = cmd;
             let mut peers = crypto::load_peers();
             match sub {
@@ -748,7 +748,7 @@ fn main() {
                     let _ = crypto::save_peers(&peers);
                     println!("removed {which}; future plans will not be readable by them");
                 }
-                "peers" | "list" | "" => {
+                "list" => {
                     if peers.is_empty() {
                         println!(
                             "no peers yet — share `robofinger id`, then `robofinger add <theirs>`"
@@ -1024,7 +1024,7 @@ fn main() {
             match publish_forward(&c, &k, new_addr) {
                 Ok(_) => {
                     println!("published forwarding pointer -> {new_addr}");
-                    println!("peers see it in `peer list`; it expires in a year.");
+                    println!("peers see it in `robofinger list`; it expires in a year.");
                 }
                 Err(e) => {
                     eprintln!("failed: {e}");
@@ -1120,7 +1120,7 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
                 .collect();
             if near.is_empty() {
                 format!(
-                    "no peer named {who:?} and no such command\n  robofinger --help    all commands\n  robofinger peers      who you follow"
+                    "no peer named {who:?} and no such command\n  robofinger --help    all commands\n  robofinger list       who you follow"
                 )
             } else {
                 format!("no peer named {who:?} — did you mean: {}", near.join(", "))
