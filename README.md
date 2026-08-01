@@ -195,9 +195,37 @@ Send them that line; they run `robofinger add <it>`. You do the same with
 theirs. Both directions — adding someone both subscribes you to them *and* lets
 them read you.
 
-The name before the `@` is a suggestion, not an identity — the key is. If it
-would shadow someone you already follow, robofinger makes you pick a different
-one rather than silently replacing them:
+### What's in an address
+
+It's an ordinary URL, and every part is doing a job:
+
+```
+https://alice@relay.example.com/plan/u/-lDVbNiJaQND…#age14hpxlph…
+        └─┬─┘ └─────────┬──────────┘   └─────┬─────┘ └────┬─────┘
+          1             2                    3            4
+```
+
+**1 — the name.** What to call them. A *suggestion*, not an identity, so it can
+be overridden and can't be used to impersonate anyone.
+
+**2 — the relay, path included.** Where their plans live. The path is the
+namespace: `example.com/plan` and `example.com/plan/team-a` are separate rooms
+with separate storage, so a relay can share a domain with an ordinary website.
+
+**3 — their public key.** The real identity. The relay checks every write
+against it, so nobody can publish as them. `/u/` marks it as an identity rather
+than another path segment.
+
+**4 — their encryption key.** What you encrypt *to*, so only they can read what
+you publish. It sits after `#` because browsers never send fragments to
+servers — paste an address in a browser and the relay still doesn't learn it.
+
+Nothing here is secret. It's all public keys and a hostname, which is why
+sharing it in Slack is fine.
+
+The name before the `@` being a suggestion has one consequence worth knowing:
+if it would shadow someone you already follow, robofinger makes you pick a
+different one rather than silently replacing them:
 
 ```
 $ robofinger add https://sam@relay.example.com/plan/u/3KR2vzoo…#age1…
