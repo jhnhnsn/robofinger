@@ -26,13 +26,59 @@ pub fn config_dir() -> PathBuf {
         })
 }
 
+/// Write a private key with 0600 set *at creation*.
+///
+/// Writing first and chmod-ing after leaves a window where the key is on disk
+/// world-readable, and does nothing at all if the file already existed with
+/// loose permissions — `fs::write` truncates but keeps the old mode.
 fn write_private(path: &PathBuf, contents: &str) -> std::io::Result<()> {
-    std::fs::write(path, contents)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(contents.as_bytes())?;
+        // `mode()` only applies when the file is newly created, so an existing
+        // file keeps whatever it had — tighten it explicitly.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        f.sync_all()?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(path, contents)?;
+    Ok(())
+}
+
+/// Refuse to load a key that others can read.
+///
+/// Keys arrive by means we do not control — restored from a backup, copied
+/// with `cp`, synced between machines — and any of those can land 0644. A
+/// silent load would leave the identity readable by every process on the box.
+#[cfg(unix)]
+fn check_private_mode(path: &PathBuf) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)
+        .map_err(|e| format!("stat {}: {e}", path.display()))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "{} is mode {:o} — group/other can read your private key.\n  fix it with: chmod 600 {}",
+            path.display(),
+            mode,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_private_mode(_path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
@@ -54,13 +100,20 @@ impl Keys {
         let sk_path = dir.join("signing.key");
         let signing = match std::fs::read_to_string(&sk_path) {
             Ok(s) => {
-                let raw = B64
-                    .decode(s.trim())
-                    .map_err(|_| "signing.key is corrupt".to_string())?;
-                let arr: [u8; 32] = raw
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| "signing.key wrong length".to_string())?;
+                check_private_mode(&sk_path)?;
+                let raw = B64.decode(s.trim()).map_err(|_| {
+                    format!(
+                        "{} is not valid base64 — restore it from a backup, or delete it to generate a new identity (you will have to re-exchange with every peer)",
+                        sk_path.display()
+                    )
+                })?;
+                let arr: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
+                    format!(
+                        "{} is {} bytes, expected 32 — restore it from a backup, or delete it to generate a new identity (you will have to re-exchange with every peer)",
+                        sk_path.display(),
+                        raw.len()
+                    )
+                })?;
                 SigningKey::from_bytes(&arr)
             }
             Err(_) => {
@@ -75,10 +128,15 @@ impl Keys {
 
         let age_path = dir.join("age.key");
         let age_secret = match std::fs::read_to_string(&age_path) {
-            Ok(s) => s
-                .trim()
-                .parse::<age::x25519::Identity>()
-                .map_err(|_| "age.key is corrupt".to_string())?,
+            Ok(s) => {
+                check_private_mode(&age_path)?;
+                s.trim().parse::<age::x25519::Identity>().map_err(|_| {
+                    format!(
+                        "{} is not a valid age key — restore it from a backup, or delete it to generate a new one (peers will need to re-add you)",
+                        age_path.display()
+                    )
+                })?
+            }
             Err(_) => {
                 let id = age::x25519::Identity::generate();
                 let secret = age::secrecy::ExposeSecret::expose_secret(&id.to_string()).to_string();
@@ -516,6 +574,61 @@ mod tests {
         // nowhere to fetch from. Better to fail loudly than emit a broken URL.
         let addr = k.identity_blob("nowhere", None);
         assert!(Peer::parse(&addr).is_err(), "got {addr}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keys_are_created_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join("rf-test-mode-create");
+        let _ = std::fs::remove_dir_all(&d);
+        Keys::load_from(&d).unwrap();
+        for f in ["signing.key", "age.key"] {
+            let mode = std::fs::metadata(d.join(f)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{f} should be 0600, got {mode:o}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_world_readable_key_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join("rf-test-mode-loose");
+        let _ = std::fs::remove_dir_all(&d);
+        Keys::load_from(&d).unwrap();
+
+        // A key can arrive 0644 from a backup, `cp`, or a sync tool. Loading it
+        // silently would leave the identity readable by any local process.
+        let sk = d.join("signing.key");
+        std::fs::set_permissions(&sk, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // Not unwrap_err() — Keys deliberately has no Debug impl, since it
+        // holds private key material.
+        let err = match Keys::load_from(&d) {
+            Err(e) => e,
+            Ok(_) => panic!("a 0644 key should be refused"),
+        };
+        assert!(err.contains("644"), "should name the mode: {err}");
+        assert!(err.contains("chmod 600"), "should say how to fix it: {err}");
+
+        // And it loads again once tightened.
+        std::fs::set_permissions(&sk, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(Keys::load_from(&d).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rewriting_a_key_tightens_a_loose_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join("rf-test-mode-rewrite");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("signing.key");
+        std::fs::write(&p, "placeholder").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+        write_private(&p, "replacement").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "write_private must tighten an existing file");
     }
 
     #[test]

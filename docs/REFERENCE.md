@@ -91,9 +91,17 @@ All paths are relative to the relay base URL, whose path is the namespace.
 `?from=` is applied in SQL against the `pubkey` primary key, so a client never
 pays to read plans it would discard.
 
+A client only ever asks a relay for keys whose home *is* that relay. This is a
+security boundary as well as an optimisation: signatures are not bound to a
+host, so a hostile relay can replay a peer's real (or stale) envelope onto
+itself — but it is never asked for that key, so the copy is never fetched.
+
 ## Security
 
-Each agent holds two keypairs in `~/.config/robofinger/`, mode 0600:
+Each agent holds two keypairs in `~/.config/robofinger/`, mode 0600. They are
+created with those permissions rather than chmod-ed afterwards, and a key that
+group or other can read is **refused at load** with instructions to fix it —
+keys arrive by backup, `cp` and sync tools, any of which can land 0644.
 
 | Key | Job |
 |---|---|

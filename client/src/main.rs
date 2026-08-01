@@ -277,11 +277,19 @@ impl Envelope {
 /// Anything that fails verification is dropped silently — a forged or corrupt
 /// envelope must never reach the conflict check. Plans encrypted to someone
 /// else simply fail to decrypt and are skipped.
-/// Group the keys we care about by which relay+namespace hosts them.
+/// Group the keys we care about by which relay hosts them.
 ///
-/// Peers added from an `rf2` blob may live on a different relay entirely, so a
-/// single fetch is no longer enough. Most setups have exactly one group, which
-/// keeps the common case to one request.
+/// Peers may live on a different relay entirely, so a single fetch is not
+/// enough. Most setups have exactly one group, keeping the common case to one
+/// request.
+///
+/// **This grouping is a security boundary, not just an optimisation.** Each
+/// relay is only ever asked for keys whose home *is* that relay. A signature is
+/// valid anywhere — nothing binds it to a host — so a hostile relay can replay
+/// a peer's real envelope onto itself, including a stale one that resurrects an
+/// expired claim. Because we never ask it for that key, we never see it. If this
+/// is ever changed to query relays for keys they do not host, the envelope's
+/// source must be checked against the peer's declared home instead.
 fn endpoints(c: &Cfg, k: &Keys, subs: &[Peer]) -> Vec<(String, Vec<String>)> {
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     let mut add = |url: &str, key: String| match groups.iter_mut().find(|(u, _)| u == url) {
