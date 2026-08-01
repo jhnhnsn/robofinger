@@ -8,7 +8,7 @@
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/jhnhnsn/robofinger/releases/latest/download/robofinger-installer.sh | sh
 
-robofinger init --url https://your-relay.example.com/plan
+robofinger init --url https://your-relay.example.com
 ```
 
 Installs to `~/.local/bin` — open a new terminal afterwards. `init` generates
@@ -23,7 +23,7 @@ Already have it? `robofinger --upgrade`.
 
 ```
 $ robofinger alice
-alice @ https://relay.example.com/plan
+alice @ https://relay.example.com
 
 working: migrate session store to redis
   claiming repo/src/auth/**
@@ -188,7 +188,7 @@ Or skip the prompt entirely with `init --hooks` / `--hooks-project`.
 
 ```sh
 $ robofinger id
-https://alice@relay.example.com/plan/u/-lDVbNiJaQND…#age14hpxlph520v9…
+https://alice@relay.example.com/u/-lDVbNiJaQND…#age14hpxlph520v9…
 ```
 
 Send them that line; they run `robofinger add <it>`. You do the same with
@@ -200,17 +200,18 @@ them read you.
 It's an ordinary URL, and every part is doing a job:
 
 ```
-https://alice@relay.example.com/plan/u/-lDVbNiJaQND…#age14hpxlph…
-        └─┬─┘ └─────────┬──────────┘   └─────┬─────┘ └────┬─────┘
-          1             2                    3            4
+https://alice@relay.example.com/u/-lDVbNiJaQND…#age14hpxlph…
+        └─┬─┘ └───────┬───────┘   └─────┬─────┘ └────┬─────┘
+          1           2                 3            4
 ```
 
 **1 — the name.** What to call them. A *suggestion*, not an identity, so it can
 be overridden and can't be used to impersonate anyone.
 
-**2 — the relay, path included.** Where their plans live. The path is the
-namespace: `example.com/plan` and `example.com/plan/team-a` are separate rooms
-with separate storage, so a relay can share a domain with an ordinary website.
+**2 — the relay.** Where their plans live. Usually just a hostname. A path may
+follow it if the relay is hosted under one — `example.com/plan` and
+`example.com/plan/team-a` are separate rooms with separate storage, which lets
+a relay share a domain with an ordinary website. You rarely need one.
 
 **3 — their public key.** The real identity. The relay checks every write
 against it, so nobody can publish as them. `/u/` marks it as an identity rather
@@ -228,7 +229,7 @@ if it would shadow someone you already follow, robofinger makes you pick a
 different one rather than silently replacing them:
 
 ```
-$ robofinger add https://sam@relay.example.com/plan/u/3KR2vzoo…#age1…
+$ robofinger add https://sam@relay.example.com/u/3KR2vzoo…#age1…
 You already follow a different key as "sam" (cWRI_P8y…).
 What should this one be called instead? (blank to cancel) sam-two
 added peer sam-two (3KR2vzoo...)

@@ -7,15 +7,20 @@ how to use it, see the [README](../README.md); for the command surface, run
 ## Addresses
 
 ```
-https://sam@relay.example.com/plan/u/<pubkey>#<agekey>
-       │    └────── base = namespace ──┘   │       │
-  suggested label                      identity  encryption key
+https://sam@relay.example.com/u/<pubkey>#<agekey>
+       │    └─────── relay ──────┘  │        │
+  suggested label              identity  encryption key
 ```
 
-**The base path is the namespace.** A relay can live at `example.com/plan`
-alongside the rest of the site, and `example.com/plan/team-a` is a separate
-room with separate storage. There is no namespace field — one URL says where
-and who.
+**Usually there is no path.** One URL says where and who.
+
+If the relay is hosted under a path, that path is the namespace: a relay at
+`example.com/plan` coexists with the rest of a site, and
+`example.com/plan/team-a` is a separate room with separate storage. This is
+mostly useful for self-hosting under an existing domain — it buys little
+otherwise, because the client always requests an explicit key list and never
+enumerates a namespace. Peers spread across several namespaces also cost one
+request each on every `check`.
 
 **The age key sits in the fragment**, which browsers never send to servers.
 That is a convention rather than a guarantee — only well-behaved relays are
@@ -169,7 +174,7 @@ Verify a backup by restoring to a throwaway `ROBOFINGER_HOME` and checking
 Publish a signed pointer at the old address before leaving:
 
 ```sh
-robofinger moved https://newhost.example.com/plan/u/<pubkey>#<agekey>
+robofinger moved https://newhost.example.com/u/<pubkey>#<agekey>
 ```
 
 Peers see it in `robofinger list` but are **never redirected automatically** —

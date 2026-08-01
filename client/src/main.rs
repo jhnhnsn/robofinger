@@ -86,13 +86,14 @@ SETUP
 
   init --url <url> [--alias <name>] [--hooks]
                                 write config, make keys, print your address
-      robofinger init --url https://relay.example.com/plan
-      robofinger init --url https://example.com/plan/team-a
-      (the URL path is the namespace — /plan/team-a is a separate room;
-       --ns team-a appends it for you if you prefer)
+      robofinger init --url https://relay.example.com
       robofinger init --url <url> --alias laptop     name this machine
       robofinger init --url <url> --hooks            wire into Claude Code now
       robofinger init --url <url> --hooks-project    ... for this repo only
+
+      A relay hosted under a path keeps that path as its namespace, so
+      https://example.com/plan and .../plan/team-a are separate rooms. You
+      rarely need one; --ns <room> appends it if you do.
 
   hooks install [--project]     let your coding agent use robofinger
       robofinger hooks install              every project on this machine
@@ -631,9 +632,7 @@ fn main() {
                     std::process::exit(1);
                 }
                 eprintln!("usage: robofinger init --url <relay url> [--alias <name>] [--hooks]");
-                eprintln!("  the URL path is your namespace, e.g.");
-                eprintln!("    https://example.com/plan            your own space");
-                eprintln!("    https://example.com/plan/team-a     a shared room");
+                eprintln!("    e.g. https://relay.example.com");
                 eprintln!(
                     "  no relay yet? deploy one free: https://github.com/jhnhnsn/robofinger#self-hosting"
                 );

@@ -12,9 +12,10 @@ has one subdirectory per platform.
 
 ## The contract
 
-All paths are relative to a base URL whose **path is the namespace** — a relay
-at `example.com/plan` coexists with the rest of a site, and
-`example.com/plan/team-a` is a separate room.
+All paths are relative to the relay's base URL. Usually that is just a
+hostname. If the relay is hosted under a path, that path becomes the namespace:
+`example.com/plan` coexists with the rest of a site, and
+`example.com/plan/team-a` is a separate room with separate storage.
 
 | Method | Path | Does |
 |---|---|---|
