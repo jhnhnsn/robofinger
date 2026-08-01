@@ -6,7 +6,6 @@
 //!   robofinger release                    drop claims (status stays working)
 //!   robofinger done                       mark finished
 //!   robofinger check <path>               exit 0 clean, 0 + hook JSON on conflict
-//!   robofinger watch                      stream updates over WebSocket
 //!   robofinger id [label]                 print your shareable identity blob
 //!   robofinger add|rm|list                manage who you follow
 //!   robofinger --upgrade                  update robofinger itself
@@ -47,8 +46,6 @@ READING AND WRITING
       robofinger log
       robofinger log -n 50
       robofinger log --peer sam
-
-  watch                         stream peer updates as they happen
 
 PEOPLE
 
@@ -1188,7 +1185,6 @@ fn main() {
                 }
             }
         }
-        "watch" => watch(&c, &k),
         // `robofinger` alone is your own status; `robofinger alice` is a peer.
         // Falling through to a peer lookup keeps the main verb short, the way
         // `finger alice` was the whole interface.
@@ -1369,99 +1365,6 @@ fn first_line(s: &str) -> String {
         format!("{}…", line.chars().take(60).collect::<String>())
     } else {
         line.to_string()
-    }
-}
-
-/// Long-lived WebSocket subscription. For humans and /loop, not for hooks —
-/// a per-invocation hook can't hold a socket open.
-fn watch(c: &Cfg, k: &Keys) {
-    let ws_url = c
-        .url
-        .replacen("https://", "wss://", 1)
-        .replacen("http://", "ws://", 1);
-    let subs = crypto::load_peers();
-    let mut want: Vec<String> = subs.iter().map(|p| p.pubkey.clone()).collect();
-    want.push(k.pubkey());
-    let url = if want.len() <= MAX_FROM {
-        format!("{ws_url}/subscribe?from={}", want.join(","))
-    } else {
-        format!("{ws_url}/subscribe")
-    };
-    let (mut sock, _) = match tungstenite::connect(&url) {
-        Ok(x) => x,
-        Err(e) => {
-            eprintln!("connect failed: {e}");
-            std::process::exit(1);
-        }
-    };
-    eprintln!("watching {} as {} ({} peer(s))", c.url, c.alias, subs.len());
-
-    // Verify signature, then decrypt. Anything that fails either step is not
-    // shown — an unverified plan is worse than no plan.
-    let show = |v: &serde_json::Value, kind: &str| {
-        let Ok(e) = serde_json::from_value::<Envelope>(v.clone()) else {
-            return;
-        };
-        if e.pubkey != k.pubkey() && !subs.iter().any(|p| p.pubkey == e.pubkey) {
-            return; // not subscribed
-        }
-        if !crypto::verify(&e.pubkey, &e.sig, &e.signed_message()) {
-            eprintln!(
-                "dropped envelope with bad signature from {}...",
-                &e.pubkey[..8]
-            );
-            return;
-        }
-        let Ok(plain) = crypto::decrypt(&e.body, &k.age_secret) else {
-            return;
-        };
-        let Ok(p) = serde_json::from_slice::<Plan>(&plain) else {
-            return;
-        };
-        // A post is prose and deserves its own lines; a claim is a status
-        // line. Rendering both the same way buried the interesting one.
-        if kind == "post" || p.status == "post" {
-            println!("\n{} {}\n{}", stamp(p.epoch), p.alias, p.task);
-        } else if p.touching.is_empty() {
-            println!("{} [{}] {}", p.alias, p.status, p.task);
-        } else {
-            println!(
-                "{} [{}] {} -> {}",
-                p.alias,
-                p.status,
-                p.task,
-                p.touching.join(",")
-            );
-        }
-    };
-
-    loop {
-        match sock.read() {
-            Ok(tungstenite::Message::Text(t)) => {
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
-                    continue;
-                };
-                match v["type"].as_str() {
-                    Some("snapshot") => {
-                        let plans = v["plans"].as_array().cloned().unwrap_or_default();
-                        eprintln!("snapshot: {} plan(s)", plans.len());
-                        for p in &plans {
-                            show(p, "plan");
-                        }
-                    }
-                    Some("plan") => show(&v["plan"], "plan"),
-                    // The relay broadcasts posts too; ignoring them meant a
-                    // peer could write while you watched and you saw nothing.
-                    Some("post") => show(&v["plan"], "post"),
-                    _ => {}
-                }
-            }
-            Ok(tungstenite::Message::Close(_)) | Err(_) => {
-                eprintln!("disconnected");
-                std::process::exit(1);
-            }
-            _ => {}
-        }
     }
 }
 

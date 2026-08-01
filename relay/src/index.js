@@ -100,7 +100,6 @@ export class Namespace extends DurableObject {
     const verb = request.headers.get("x-rf-verb");
     const key = request.headers.get("x-rf-key");
 
-    if (verb === "subscribe") return this.subscribe(url);
     if (verb === "plans") return json(this.all(url.searchParams.get("from")));
     if (verb === "posts") {
       return json(this.posts(
@@ -168,16 +167,6 @@ export class Namespace extends DurableObject {
       return null;
     }
     try { return JSON.parse(row.body); } catch { return null; }
-  }
-
-  subscribe(url) {
-    const [client, server] = Object.values(new WebSocketPair());
-    this.ctx.acceptWebSocket(server);
-    const from = url.searchParams.get("from");
-    // Remember the filter across hibernation so pushes stay scoped.
-    server.serializeAttachment({ from });
-    server.send(JSON.stringify({ type: "snapshot", plans: this.all(from) }));
-    return new Response(null, { status: 101, webSocket: client });
   }
 
   /// Read, size-check, parse and signature-verify an incoming envelope.
@@ -291,7 +280,6 @@ export class Namespace extends DurableObject {
       pubkey, seq, Math.floor(Date.now() / 1000), JSON.stringify(env)
     );
 
-    this.broadcast(env, "post");
     return json({ ok: true, seq });
   }
 
@@ -364,7 +352,6 @@ export class Namespace extends DurableObject {
       pubkey, seq, Math.floor(Date.now() / 1000), row
     );
 
-    this.broadcast(env);
     return json({ ok: true, seq });
   }
 
@@ -394,24 +381,6 @@ export class Namespace extends DurableObject {
       .filter(r => r && typeof r.pubkey === "string");
   }
 
-  broadcast(env, kind = "plan") {
-    const msg = JSON.stringify({ type: kind, plan: env });
-    for (const ws of this.ctx.getWebSockets()) {
-      try {
-        const { from } = ws.deserializeAttachment() ?? {};
-        if (from && !from.split(",").includes(env.pubkey)) continue;
-        ws.send(msg);
-      } catch { /* dead socket, cleaned up on close */ }
-    }
-  }
-
-  async webSocketMessage(ws, msg) {
-    if (msg === "ping") ws.send("pong");
-  }
-
-  async webSocketClose(ws, code, reason) {
-    try { ws.close(code, reason); } catch { /* already closed */ }
-  }
 }
 
 const b64u = s => {
@@ -454,7 +423,7 @@ function route(pathname) {
   const m2 = pathname.match(two);
   if (m2) return { base: m2[1] || "/", verb: m2[2], key: m2[3] };
 
-  const m1 = pathname.match(/^(.*)\/(plans|posts|subscribe)$/);
+  const m1 = pathname.match(/^(.*)\/(plans|posts)$/);
   if (m1) return { base: m1[1] || "/", verb: m1[2], key: null };
 
   return null;

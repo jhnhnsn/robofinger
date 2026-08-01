@@ -86,7 +86,6 @@ All paths are relative to the relay base URL, whose path is the namespace.
 | PUT | `/plan/<pubkey>` | publish a claim |
 | PUT | `/post/<pubkey>` | append a post |
 | PUT | `/forward/<pubkey>` | publish a forwarding pointer |
-| GET | `/subscribe?from=<keys>` | WebSocket: snapshot, then live `plan` and `post` pushes |
 
 `?from=` is applied in SQL against the `pubkey` primary key, so a client never
 pays to read plans it would discard.
@@ -179,13 +178,18 @@ a stolen key would otherwise silently repoint them at an attacker's relay.
 owns the old address, and refuses a forward naming a *different* key, which
 would be an identity swap rather than a move. Pointers expire after a year.
 
-## Why hooks poll instead of subscribing
+## Everything is request/response
 
-`check` runs per tool call and exits, so it cannot hold a WebSocket open. It
-does one HTTP GET per distinct relay — roughly 100–300ms — and `watch` is the
-WebSocket path for humans and `/loop`, where a persistent connection is
-possible. Cost scales with distinct *relays*, not peers: a whole team on one
-relay is a single round trip.
+There are no long-lived connections. `check` runs per tool call and exits,
+doing one HTTP GET per distinct relay — roughly 100–300ms. Humans read with
+`robofinger <peer>` or `log` when they want to know.
+
+An earlier `watch` command held a WebSocket open for live pushes. It was
+removed: it is easy to start and forget, and it was the only feature that
+needed a Durable Object's in-memory state, which made the relay harder to host
+and vulnerable to the free tier's duration budget. Cost now scales with
+distinct *relays*, not peers — a whole team on one relay is a single round
+trip.
 
 ## Abuse limits
 
