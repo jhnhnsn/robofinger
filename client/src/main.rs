@@ -622,6 +622,12 @@ fn main() {
             // `--hooks` without `--url` would otherwise be silently dropped:
             // init aborts below, and the user believes hooks were installed.
             let Some(mut url) = url else {
+                if k.freshly_generated {
+                    eprintln!(
+                        "note: keys were generated in {} — rerun with --url to finish setup\n",
+                        crypto::config_dir().display()
+                    );
+                }
                 if want_hooks {
                     eprintln!("cannot init without --url. To install hooks alone:");
                     eprintln!("  robofinger hooks install");
@@ -656,6 +662,18 @@ fn main() {
             if let Err(e) = std::fs::write(&path, body) {
                 eprintln!("write {}: {e}", path.display());
                 std::process::exit(1);
+            }
+            if k.freshly_generated {
+                println!(
+                    "generated a new identity in {}",
+                    crypto::config_dir().display()
+                );
+                println!("  signing.key  proves it is you — nobody can publish as you without it");
+                println!("  age.key      decrypts what peers send you");
+                println!(
+                    "  back these up; losing them means a new identity and re-adding every peer"
+                );
+                println!();
             }
             println!("wrote {}", path.display());
             println!("\nyour identity — share this line with collaborators:");

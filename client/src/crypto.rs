@@ -15,6 +15,10 @@ use std::path::PathBuf;
 pub struct Keys {
     pub signing: SigningKey,
     pub age_secret: age::x25519::Identity,
+    /// True when this load generated a new identity rather than reading one.
+    /// Callers surface it — silently minting keys leaves people unaware that
+    /// something irreplaceable now exists on disk.
+    pub freshly_generated: bool,
 }
 
 pub fn config_dir() -> PathBuf {
@@ -97,6 +101,7 @@ impl Keys {
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
 
+        let mut freshly_generated = false;
         let sk_path = dir.join("signing.key");
         let signing = match std::fs::read_to_string(&sk_path) {
             Ok(s) => {
@@ -117,6 +122,7 @@ impl Keys {
                 SigningKey::from_bytes(&arr)
             }
             Err(_) => {
+                freshly_generated = true;
                 let mut seed = [0u8; 32];
                 getrandom::fill(&mut seed).map_err(|e| format!("rng: {e}"))?;
                 let k = SigningKey::from_bytes(&seed);
@@ -138,6 +144,7 @@ impl Keys {
                 })?
             }
             Err(_) => {
+                freshly_generated = true;
                 let id = age::x25519::Identity::generate();
                 let secret = age::secrecy::ExposeSecret::expose_secret(&id.to_string()).to_string();
                 write_private(&age_path, &secret).map_err(|e| format!("write age.key: {e}"))?;
@@ -148,6 +155,7 @@ impl Keys {
         Ok(Keys {
             signing,
             age_secret,
+            freshly_generated,
         })
     }
 
@@ -629,6 +637,20 @@ mod tests {
         write_private(&p, "replacement").unwrap();
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "write_private must tighten an existing file");
+    }
+
+    #[test]
+    fn generation_is_reported_only_the_first_time() {
+        let d = std::env::temp_dir().join("rf-test-fresh-flag");
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(
+            Keys::load_from(&d).unwrap().freshly_generated,
+            "first load mints an identity and must say so"
+        );
+        assert!(
+            !Keys::load_from(&d).unwrap().freshly_generated,
+            "a subsequent load reads the same keys and must stay quiet"
+        );
     }
 
     #[test]

@@ -12,7 +12,9 @@ robofinger init --url https://your-relay.example.com/plan
 ```
 
 Installs to `~/.local/bin` — open a new terminal afterwards. `init` generates
-your keys and prints the address you share with people. No relay yet? Deploy
+two keypairs in `~/.config/robofinger/` and prints the address you share with
+people. Those keys *are* your identity — [back them up](docs/REFERENCE.md#backing-up-keys),
+because losing them means a new identity and re-adding every peer. No relay yet? Deploy
 one in a minute; it runs free on Cloudflare ([details](#self-hosting)).
 
 Already have it? `robofinger --upgrade`.
