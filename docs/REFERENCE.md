@@ -133,8 +133,12 @@ recipient. So `robofinger rm bob` is unilateral revocation: the next publish is
 unreadable to Bob, with no relay cooperation. He keeps what he already
 decrypted; that is inherent to encryption.
 
-**The namespace is a routing key, not a secret.** Unrelated users can share one
-relay.
+**The namespace is a routing key, not a secret, and not an access control.**
+It decides where data is stored, never who can read it. Anyone may query any
+namespace, and anyone in your recipient list can decrypt whatever they find
+there — posting to a different namespace hides nothing from them. Unrelated
+users can share one relay safely because of encryption, not because of
+namespaces.
 
 ### What this does not protect against
 

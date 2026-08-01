@@ -211,8 +211,10 @@ be overridden and can't be used to impersonate anyone.
 
 **2 — the relay.** Where their plans live. Usually just a hostname. A path may
 follow it if the relay is hosted under one — `example.com/plan` and
-`example.com/plan/team-a` are separate rooms with separate storage, which lets
-a relay share a domain with an ordinary website. You rarely need one.
+`example.com/plan/team-a` are separate stores, which lets a relay share a
+domain with an ordinary website. You rarely need one. A namespace is not
+privacy: anyone can query any namespace, and anyone in your peer list can
+decrypt what they find. Who can read you is decided by that list alone.
 
 **3 — their public key.** The real identity. The relay checks every write
 against it, so nobody can publish as them. `/u/` marks it as an identity rather
