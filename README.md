@@ -123,9 +123,11 @@ $ robofinger post "Rewrote the parser. Third time. This one's right."
 $ git log --oneline -5 | robofinger post
 ```
 
-**Reading someone is a poke, not a ping.** `robofinger jo` shows what she's
-working on and what she's written lately. No notification fires on her end.
-Nobody has to perform being busy. This is the part Slack got wrong.
+**Checking on someone costs them nothing.** `robofinger jo` shows what she's
+working on and what she's written lately — and nothing happens on her end. No
+notification, no "seen", no interruption. You can look as often as you like.
+That cuts both ways: because nobody is pinged, nobody has to perform being
+busy. This is the part Slack got wrong.
 
 **Your agent reads it too.** Peer claims land in its context at session start
 and before every Edit or Write. It reasons about them like any other fact —
