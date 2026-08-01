@@ -99,7 +99,7 @@ Sam asks for something that would collide:
 > This is advisory. Consider working elsewhere, or coordinate first.
 > ```
 >
-> **Claude:** Alice's mid-way through migrating the session store to Redis and has
+> **Claude:** Alice is mid-way through migrating the session store to Redis and has
 > `src/auth/**` claimed. Editing `session.ts` now would conflict with her work.
 >
 > I can add the rate limiting at the route layer instead —
