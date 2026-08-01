@@ -753,15 +753,22 @@ fn main() {
                                 .iter()
                                 .find(|x| x.label == p.label && x.pubkey != p.pubkey)
                             {
+                                let taken = clash.pubkey[..8].to_string();
                                 eprintln!(
-                                    "you already follow a different key as {:?} ({}…)",
-                                    p.label,
-                                    &clash.pubkey[..8]
+                                    "You already follow a different key as {:?} ({taken}…).",
+                                    p.label
                                 );
-                                eprintln!(
-                                    "  pick another name: robofinger add <address> --as <name>"
-                                );
-                                std::process::exit(1);
+                                // On a terminal, resolve it here rather than
+                                // making them re-run with a flag.
+                                match prompt_for_label(&p.label, &peers) {
+                                    Some(name) => p.label = name,
+                                    None => {
+                                        eprintln!(
+                                            "  pick another: robofinger add <address> --as <name>"
+                                        );
+                                        std::process::exit(1);
+                                    }
+                                }
                             }
                             peers.retain(|x| x.pubkey != p.pubkey);
                             peers.push(p.clone());
@@ -1143,6 +1150,34 @@ fn main() {
                 std::process::exit(1);
             }
         },
+    }
+}
+
+/// Ask for a different label when a suggested one is already taken.
+///
+/// Returns None on a non-TTY or an empty answer, so a scripted `add` still
+/// fails loudly rather than silently picking a name for you.
+fn prompt_for_label(suggested: &str, peers: &[Peer]) -> Option<String> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    loop {
+        eprint!("What should this one be called instead? (blank to cancel) ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            return None;
+        }
+        let name = line.trim();
+        if name.is_empty() {
+            return None;
+        }
+        if name == suggested || peers.iter().any(|x| x.label == name) {
+            eprintln!("  {name:?} is taken too.");
+            continue;
+        }
+        return Some(name.to_string());
     }
 }
 
