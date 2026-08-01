@@ -38,9 +38,12 @@ robofinger — a .plan file for a world with agents.
 
 READING AND WRITING
 
-  post \"<text>\"                 append to your plan
+  post [--group <name>] \"<text>\"   append to your plan
       robofinger post \"Rewrote the parser. Third time. This one's right.\"
       git log --oneline -5 | robofinger post
+      robofinger post --group work \"shipping the auth migration\"
+      (no --group means everyone you follow; a group encrypts to just those
+       peers, so the rest cannot decrypt it at all)
 
   log [-n N] [--peer <label>]   recent posts from you and everyone you follow
       robofinger log
@@ -53,7 +56,8 @@ PEOPLE
       robofinger id
       robofinger id laptop
 
-  add <address> [--as <name>]   follow them (and let them read you)
+  add <address> [--as <name>] [--group <a,b>]
+                                follow them (and let them read you)
       robofinger add https://sam@relay.example.com/plan/u/kWJQ…#age1x3h…
       robofinger add <address> --as samantha    ignore their suggested name
 
@@ -448,9 +452,11 @@ fn publish(
             .unwrap_or(DEFAULT_ETA),
     };
 
+    // Claims deliberately ignore groups: a claim some peers cannot see is a
+    // conflict warning that silently does not fire.
     let body = crypto::encrypt(
         &serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
-        &recipients(k),
+        &recipients(k, None),
     )?;
 
     send(c, k, "plan", plan.seq, body)
@@ -458,9 +464,20 @@ fn publish(
 
 /// Encrypt to self + every peer. Always includes self, or you cannot read your
 /// own writes back.
-fn recipients(k: &Keys) -> Vec<age::x25519::Recipient> {
+/// Age recipients for a publish. Always includes self — omitting it means you
+/// cannot read your own writes back, which breaks the seq lookup.
+///
+/// `group` restricts the list. Excluded peers cannot decrypt the result at all;
+/// this is cryptographic, not a display filter. They can still see *that* you
+/// published, since the envelope is cleartext for the relay.
+fn recipients(k: &Keys, group: Option<&str>) -> Vec<age::x25519::Recipient> {
     let mut recips = vec![k.age_secret.to_public()];
     for p in crypto::load_peers() {
+        if let Some(g) = group
+            && !p.groups.iter().any(|pg| pg == g)
+        {
+            continue;
+        }
         match p.age_pub.parse::<age::x25519::Recipient>() {
             Ok(r) => recips.push(r),
             Err(_) => eprintln!("warning: peer {} has an unusable age key", p.label),
@@ -500,14 +517,14 @@ fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
     };
     let body = crypto::encrypt(
         &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
-        &recipients(k),
+        &recipients(k, None),
     )?;
     send(c, k, "forward", entry.seq, body)
 }
 
 /// Append a post. Posts carry their own seq space, so posting never disturbs
 /// claim ordering.
-fn post(c: &Cfg, k: &Keys, text: &str) -> Result<(), String> {
+fn post(c: &Cfg, k: &Keys, text: &str, group: Option<&str>) -> Result<(), String> {
     let subs = crypto::load_peers();
     let prev = fetch_envelopes(c, k, &subs, "posts", "limit=1")
         .iter()
@@ -529,7 +546,7 @@ fn post(c: &Cfg, k: &Keys, text: &str) -> Result<(), String> {
     };
     let body = crypto::encrypt(
         &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
-        &recipients(k),
+        &recipients(k, group),
     )?;
     send(c, k, "post", entry.seq, body)
 }
@@ -840,6 +857,16 @@ fn main() {
                             {
                                 p.label = name.clone();
                             }
+                            if let Some(i) = args.iter().position(|a| a == "--group" || a == "-g")
+                                && let Some(g) = args.get(i + 1)
+                            {
+                                p.groups = g
+                                    .split(',')
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string)
+                                    .collect();
+                            }
                             if p.label.is_empty() {
                                 p.label = p.pubkey[..8].to_string();
                             }
@@ -1006,12 +1033,18 @@ fn main() {
                             Some(e) => ago(t - e),
                             None => "—".into(),
                         };
+                        let groups = if p.groups.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  [{}]", p.groups.join(","))
+                        };
                         println!(
-                            "{:<14} {:<14} {:<38} {}",
+                            "{:<14} {:<14} {:<38} {}{}",
                             p.label,
                             &p.pubkey[..12],
                             where_,
-                            last
+                            last,
+                            groups
                         );
                         // What they are actively holding — the thing you most
                         // often opened this list to find out.
@@ -1178,7 +1211,32 @@ fn main() {
                 eprintln!("nothing to post (pass text, or pipe it on stdin)");
                 std::process::exit(1);
             }
-            match post(&c, &k, &text) {
+            let group = args
+                .iter()
+                .position(|a| a == "--group" || a == "-g")
+                .and_then(|i| args.get(i + 1).cloned());
+            // Strip the flag and its value out of the message text.
+            let text = if let Some(g) = &group {
+                text.replace(&format!("--group {g}"), "")
+                    .replace(&format!("-g {g}"), "")
+                    .trim()
+                    .to_string()
+            } else {
+                text
+            };
+            if let Some(g) = &group {
+                let known: Vec<String> = crypto::load_peers()
+                    .iter()
+                    .flat_map(|p| p.groups.clone())
+                    .collect();
+                if !known.iter().any(|x| x == g) {
+                    eprintln!("no peer is in group {g:?} — this would go to nobody but you.");
+                    eprintln!("  tag someone first: robofinger add <address> --group {g}");
+                    eprintln!("  or see who is where: robofinger list");
+                    std::process::exit(1);
+                }
+            }
+            match post(&c, &k, &text, group.as_deref()) {
                 Ok(_) => println!("posted ({} chars)", text.chars().count()),
                 Err(e) => {
                     eprintln!("post failed: {e}");

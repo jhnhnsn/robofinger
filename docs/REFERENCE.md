@@ -128,6 +128,12 @@ work:
 | `robofinger add` | you | whose plans you fetch and verify |
 | recipient list (same file) | the publisher | who *can decrypt* what you publish |
 
+Peers may be tagged with groups, and `post --group <name>` encrypts to only
+those peers. This is cryptographic: excluded peers hold the ciphertext and
+cannot open it. They can still see *that* you published and when, because the
+envelope is cleartext. Claims ignore groups deliberately — a claim some peers
+cannot read is a conflict warning that silently does not fire.
+
 Following someone does not let you read them — they must also have you as a
 recipient. So `robofinger rm bob` is unilateral revocation: the next publish is
 unreadable to Bob, with no relay cooperation. He keeps what he already

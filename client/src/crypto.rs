@@ -175,6 +175,7 @@ impl Keys {
             pubkey: self.pubkey(),
             age_pub: self.age_secret.to_public().to_string(),
             home,
+            groups: Vec::new(),
         }
         .to_blob()
     }
@@ -219,6 +220,10 @@ pub struct Peer {
     pub age_pub: String,
     /// Set when the peer publishes to a different relay or namespace than you.
     pub home: Option<Home>,
+    /// Local tags, never part of the shared address — who you consider this
+    /// peer to be is your business, not theirs. Empty means they receive
+    /// everything you publish.
+    pub groups: Vec<String>,
 }
 
 impl Peer {
@@ -301,6 +306,7 @@ impl Peer {
             home: Some(Home {
                 url: base.trim_end_matches('/').to_string(),
             }),
+            groups: Vec::new(),
         })
     }
 
@@ -334,19 +340,44 @@ pub fn peers_path() -> PathBuf {
     config_dir().join("peers")
 }
 
+/// One peer per line: the address, then optional whitespace-separated groups.
+///
+///   https://alice@relay.example.com/u/…#age1…   work,friends
 pub fn load_peers() -> Vec<Peer> {
     std::fs::read_to_string(peers_path())
         .unwrap_or_default()
         .lines()
         .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .filter_map(|l| Peer::parse(l).ok())
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let addr = parts.next()?;
+            let groups: Vec<String> = parts
+                .next()
+                .map(|g| {
+                    g.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut p = Peer::parse(addr).ok()?;
+            p.groups = groups;
+            Some(p)
+        })
         .collect()
 }
 
 pub fn save_peers(peers: &[Peer]) -> Result<(), String> {
     let body: String = peers
         .iter()
-        .map(|p| p.to_blob() + "\n")
+        .map(|p| {
+            if p.groups.is_empty() {
+                format!("{}\n", p.to_blob())
+            } else {
+                format!("{}  {}\n", p.to_blob(), p.groups.join(","))
+            }
+        })
         .collect::<Vec<_>>()
         .concat();
     std::fs::write(peers_path(), body).map_err(|e| format!("write peers: {e}"))

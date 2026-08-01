@@ -131,6 +131,18 @@ On an unclaimed file the hook emits **zero bytes** — you never know it ran.
 
 ## What you get
 
+**Post to everyone, or to a group.** Tag peers when you add them, and a post
+can go to just those people — the rest cannot decrypt it at all:
+
+```sh
+robofinger add <address> --as alice --group work
+robofinger post --group work "shipping the auth migration"
+robofinger post "the dog situation has escalated"    # everyone
+```
+
+Claims always go to everyone you follow, so agent conflict detection keeps
+working regardless of groups.
+
 **A place to think out loud.** Long-form, short-form, work, not-work. No
 character limit, no algorithm, no audience anxiety. `robofinger post` takes
 a sentence or an essay, and reads stdin so your tools can write to it too:
@@ -265,7 +277,8 @@ robofinger <peer>               read someone's .plan
 robofinger                      read your own
 robofinger post "…"             write to it (or pipe stdin)
 robofinger log                  everyone you follow, newest first
-robofinger add <address>        follow someone
+robofinger add <address>        follow someone (--group work,friends to tag)
+robofinger post --group work    post to just that group
 robofinger list                 who you follow, and what they hold
 robofinger --help               everything else
 ```
