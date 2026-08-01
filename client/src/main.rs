@@ -391,6 +391,22 @@ fn fetch_forward(url: &str, pubkey: &str, k: &Keys, subs: &[Peer]) -> Option<Str
     Some(plan.task)
 }
 
+/// Does the relay hold an envelope for this key that we cannot read?
+///
+/// Distinguishes "they have published nothing" from "they published but did
+/// not encrypt it to me" — the same empty output otherwise, but only the
+/// second is something the user can act on.
+fn has_unreadable(c: &Cfg, k: &Keys, pubkey: &str, path: &str) -> bool {
+    let subs = crypto::load_peers();
+    let raw = fetch_envelopes(c, k, &subs, path, "");
+    let any = raw.iter().any(|e| e.pubkey == pubkey);
+    let readable = raw
+        .iter()
+        .filter(|e| e.pubkey == pubkey)
+        .any(|e| decrypt_plan(e, k).is_some());
+    any && !readable
+}
+
 /// Newest-first posts from you and everyone you trust.
 fn fetch_posts(c: &Cfg, k: &Keys, limit: usize) -> Vec<Plan> {
     let subs = crypto::load_peers();
@@ -1404,8 +1420,13 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
             println!("  since {}", ago(t - p.epoch));
         }
         Some(p) if p.live(t) => println!("\nworking: {} ({})", p.task, ago(t - p.epoch)),
-        Some(_) => println!("\nno active claim"),
-        None => println!("\nno plan visible"),
+        Some(_) => println!("\nnot working on anything right now"),
+        None if has_unreadable(c, k, &peer.pubkey, "plans") => {
+            println!("\nthey have published, but not to you —");
+            println!("  they need to run: robofinger add <your address>");
+            println!("  yours is: robofinger id");
+        }
+        None => println!("\nnot working on anything right now"),
     }
 
     let posts: Vec<Plan> = fetch_posts(c, k, 20)
@@ -1413,7 +1434,12 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
         .filter(|p| p.pubkey == peer.pubkey)
         .collect();
     if posts.is_empty() {
-        println!("\nno posts (or they predate your key exchange)");
+        if has_unreadable(c, k, &peer.pubkey, "posts") {
+            println!("\nposts exist but you cannot read them — they have not added you,");
+            println!("  or they were written before they did. A new post will be readable.");
+        } else {
+            println!("\nno posts yet");
+        }
     } else {
         println!();
         for p in posts {
