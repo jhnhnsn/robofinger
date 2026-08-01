@@ -723,9 +723,13 @@ fn main() {
             return;
         }
         "id" => {
+            // An explicit argument wins, then the configured alias, then the
+            // hostname. Skipping the configured alias meant `--alias` set at
+            // init was silently ignored here while still appearing in plans.
             let label = args
                 .get(1)
                 .cloned()
+                .or_else(|| cfg().map(|c| c.alias))
                 .or_else(hostname)
                 .unwrap_or_else(|| "agent".into());
             // Without a relay there is nowhere to fetch from, so an address
