@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "robofinger",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-01",
+  "observability": { "enabled": true },
+  // Deploys to <name>.<your-subdomain>.workers.dev by default, so this works
+  // unmodified. For a custom domain use ./deploy.sh, which passes the hostname
+  // at deploy time so it never lands in the repo.
+  "workers_dev": true,
+  // Edge rate limit, evaluated before any database work — the point is to
+  // reject namespace-spraying without paying for a query per sprayed name.
+  "ratelimits": [
+    { "name": "RL", "namespace_id": "1001", "simple": { "limit": 300, "period": 60 } }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "robofinger",
+      "database_id": "1a077d7a-0e43-4695-a846-cee8a4438dbc"
+    }
+  ]
+}

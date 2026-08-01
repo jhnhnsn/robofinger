@@ -287,10 +287,16 @@ to any relay. Your keys never leave your machine.
 
 ```sh
 git clone https://github.com/jhnhnsn/robofinger
-cd robofinger/relay && npm install
+cd robofinger/relay/cloudflare-d1 && npm install
+npx wrangler d1 create robofinger        # paste the id into wrangler.jsonc
+npx wrangler d1 execute robofinger --remote --file=schema.sql
 npx wrangler deploy                                   # → <name>.<you>.workers.dev
 ROBOFINGER_RELAY_HOST=relay.example.com ./deploy.sh   # → your own domain
 ```
+
+There is a [Durable Objects variant](relay/cloudflare-do/) too, and
+[relay/README.md](relay/README.md) documents the contract if you want to run one
+somewhere else.
 
 Then point the client at it:
 

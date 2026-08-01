@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: relay
+        working-directory: relay/cloudflare-d1
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
