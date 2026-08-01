@@ -86,7 +86,7 @@ All paths are relative to the relay base URL, whose path is the namespace.
 | PUT | `/plan/<pubkey>` | publish a claim |
 | PUT | `/post/<pubkey>` | append a post |
 | PUT | `/forward/<pubkey>` | publish a forwarding pointer |
-| GET | `/subscribe?from=<keys>` | WebSocket: snapshot then live pushes |
+| GET | `/subscribe?from=<keys>` | WebSocket: snapshot, then live `plan` and `post` pushes |
 
 `?from=` is applied in SQL against the `pubkey` primary key, so a client never
 pays to read plans it would discard.

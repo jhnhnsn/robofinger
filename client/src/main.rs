@@ -1398,7 +1398,7 @@ fn watch(c: &Cfg, k: &Keys) {
 
     // Verify signature, then decrypt. Anything that fails either step is not
     // shown — an unverified plan is worse than no plan.
-    let show = |v: &serde_json::Value| {
+    let show = |v: &serde_json::Value, kind: &str| {
         let Ok(e) = serde_json::from_value::<Envelope>(v.clone()) else {
             return;
         };
@@ -1418,13 +1418,21 @@ fn watch(c: &Cfg, k: &Keys) {
         let Ok(p) = serde_json::from_slice::<Plan>(&plain) else {
             return;
         };
-        println!(
-            "{} [{}] {} -> {}",
-            p.alias,
-            p.status,
-            p.task,
-            p.touching.join(",")
-        );
+        // A post is prose and deserves its own lines; a claim is a status
+        // line. Rendering both the same way buried the interesting one.
+        if kind == "post" || p.status == "post" {
+            println!("\n{} {}\n{}", stamp(p.epoch), p.alias, p.task);
+        } else if p.touching.is_empty() {
+            println!("{} [{}] {}", p.alias, p.status, p.task);
+        } else {
+            println!(
+                "{} [{}] {} -> {}",
+                p.alias,
+                p.status,
+                p.task,
+                p.touching.join(",")
+            );
+        }
     };
 
     loop {
@@ -1438,10 +1446,13 @@ fn watch(c: &Cfg, k: &Keys) {
                         let plans = v["plans"].as_array().cloned().unwrap_or_default();
                         eprintln!("snapshot: {} plan(s)", plans.len());
                         for p in &plans {
-                            show(p);
+                            show(p, "plan");
                         }
                     }
-                    Some("plan") => show(&v["plan"]),
+                    Some("plan") => show(&v["plan"], "plan"),
+                    // The relay broadcasts posts too; ignoring them meant a
+                    // peer could write while you watched and you saw nothing.
+                    Some("post") => show(&v["plan"], "post"),
                     _ => {}
                 }
             }
