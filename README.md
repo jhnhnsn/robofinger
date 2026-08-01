@@ -37,9 +37,6 @@ what they were stuck on, what they were reading, where they'd be Thursday.
 It was a low-cost way to ping someone and see what they were up to —
 **no notification, no reply expected, no performance.**
 
-Then it died, and we replaced it with Slack statuses nobody reads and
-standups everybody dreads.
-
 ## What robofinger is
 
 The same idea, with two things added: **your agents can read it too**, and
