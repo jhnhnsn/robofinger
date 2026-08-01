@@ -87,12 +87,15 @@ AGENTS
 
 SETUP
 
-  init --url <relay url>        write config, make keys, print your address
+  init --url <url> [--agent <name>] [--hooks]
+                                write config, make keys, print your address
       robofinger init --url https://relay.example.com/plan
-      robofinger init --url https://relay.example.com/plan --hooks
-      robofinger init --url https://relay.example.com/plan --hooks-project
       robofinger init --url https://example.com/plan/team-a
-      (the URL path is the namespace — /plan/team-a is a separate room)
+      (the URL path is the namespace — /plan/team-a is a separate room;
+       --ns team-a appends it for you if you prefer)
+      robofinger init --url <url> --agent laptop     name this machine
+      robofinger init --url <url> --hooks            wire into Claude Code now
+      robofinger init --url <url> --hooks-project    ... for this repo only
 
   hooks install [--project]     let your coding agent use robofinger
       robofinger hooks install              every project on this machine
@@ -611,10 +614,8 @@ fn main() {
             let existing = config_file();
             let url = url.or_else(|| existing.get("ROBOFINGER_URL").cloned());
             let Some(mut url) = url else {
-                eprintln!(
-                    "usage: robofinger init --url <relay url> [--ns <room>] [--agent <label>]"
-                );
-                eprintln!("  the relay URL's path is the namespace, e.g.");
+                eprintln!("usage: robofinger init --url <relay url> [--agent <name>] [--hooks]");
+                eprintln!("  the URL path is your namespace, e.g.");
                 eprintln!("    https://example.com/plan            your own space");
                 eprintln!("    https://example.com/plan/team-a     a shared room");
                 std::process::exit(1);
