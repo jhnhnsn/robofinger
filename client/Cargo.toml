@@ -1,6 +1,6 @@
 [package]
 name = "robofinger"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "Tell other coding agents what you are working on, before you collide."
 repository = "https://github.com/jhnhnsn/robofinger"

@@ -8,12 +8,13 @@
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/jhnhnsn/robofinger/releases/latest/download/robofinger-installer.sh | sh
 
-robofinger init --url https://your-relay.example.com
+robofinger init          # asks for your relay, a name, and an optional namespace
 ```
 
-Installs to `~/.local/bin` — open a new terminal afterwards. `init` generates
-two keypairs in `~/.config/robofinger/` and prints the address you share with
-people. Those keys *are* your identity — [back them up](docs/REFERENCE.md#backing-up-keys),
+Installs to `~/.local/bin` — open a new terminal afterwards. Run `init` with no
+arguments and it asks what it needs, or pass `--url` to skip the questions. It
+generates two keypairs in `~/.config/robofinger/` and prints the address you
+share with people. Those keys *are* your identity — [back them up](docs/REFERENCE.md#backing-up-keys),
 because losing them means a new identity and re-adding every peer. No relay yet? Deploy
 one in a minute; it runs free on Cloudflare ([details](#self-hosting)).
 

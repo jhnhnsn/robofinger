@@ -619,6 +619,35 @@ fn main() {
             let url = url.or_else(|| existing.get("ROBOFINGER_URL").cloned());
             // `--hooks` without `--url` would otherwise be silently dropped:
             // init aborts below, and the user believes hooks were installed.
+            // Bare `init` on a terminal asks rather than failing: it is the
+            // most likely way someone arrives here, and an error teaches them
+            // nothing about what a relay URL even is.
+            let url = url.or_else(|| {
+                eprintln!("Setting up robofinger.\n");
+                eprintln!("  A relay is where your plans are stored. It is a small Worker you");
+                eprintln!(
+                    "  or your team deploys — see the README to run one free on Cloudflare.\n"
+                );
+                let u = ask("Relay URL", Some("https://relay.example.com"))?;
+                let u = u.trim_end_matches('/').to_string();
+
+                if let Some(a) = ask("Name for this machine", hostname().as_deref())
+                    && !a.is_empty()
+                {
+                    alias = Some(a);
+                }
+
+                eprintln!("\n  A namespace splits one relay into separate rooms. Most people");
+                eprintln!("  do not need one — leave it blank.");
+                if let Some(n) = ask("Namespace (optional)", None)
+                    && !n.is_empty()
+                {
+                    ns = Some(n);
+                }
+                eprintln!();
+                Some(u)
+            });
+
             let Some(mut url) = url else {
                 if k.freshly_generated {
                     eprintln!(
@@ -646,6 +675,13 @@ fn main() {
             {
                 url = format!("{url}/{ns}");
             }
+
+            let saved_alias = alias
+                .clone()
+                .or_else(|| existing.get("ROBOFINGER_ALIAS").cloned())
+                .or_else(|| existing.get("ROBOFINGER_AGENT").cloned())
+                .or_else(hostname)
+                .unwrap_or_else(|| "agent".into());
 
             let mut body = format!("ROBOFINGER_URL={url}\n");
             if let Some(a) = alias
@@ -675,10 +711,9 @@ fn main() {
             println!("\nyour identity — share this line with collaborators:");
             println!(
                 "  {}",
-                k.identity_blob(
-                    &hostname().unwrap_or_else(|| "agent".into()),
-                    Some(crypto::Home { url: url.clone() })
-                )
+                // Use the alias we just wrote, not the hostname — otherwise
+                // init prints a different address than `robofinger id` does.
+                k.identity_blob(&saved_alias, Some(crypto::Home { url: url.clone() }))
             );
             println!("\nthey run:  robofinger add <your address>");
             println!("you run:   robofinger add <their address>");
@@ -1233,6 +1268,38 @@ fn prompt_for_label(suggested: &str, peers: &[Peer]) -> Option<String> {
             continue;
         }
         return Some(name.to_string());
+    }
+}
+
+/// Ask one question on the controlling terminal.
+///
+/// Reads from /dev/tty rather than stdin so a redirected stdin — a setup
+/// script, `ssh host "robofinger init"` — does not silently skip the prompt.
+/// Returns None when there is no terminal, so non-interactive callers fall
+/// through to the usage error instead of hanging.
+fn ask(question: &str, default: Option<&str>) -> Option<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stderr().is_terminal() {
+        return None;
+    }
+    let tty = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let mut tty = std::io::BufReader::new(tty);
+    match default {
+        Some(d) => eprint!("{question} [{d}]: "),
+        None => eprint!("{question}: "),
+    }
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    tty.read_line(&mut line).ok()?;
+    let answer = line.trim();
+    if answer.is_empty() {
+        default.map(str::to_string)
+    } else {
+        Some(answer.to_string())
     }
 }
 
