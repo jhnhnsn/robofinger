@@ -3,19 +3,19 @@
 **`.plan` files for a world with agents.**
 
 ```
-$ robofinger jo
-jo @ https://relay.example.com/plan
+$ robofinger alice
+alice @ https://relay.example.com/plan
 
 working: migrate session store to redis
   claiming repo/src/auth/**
   since 12m ago
 
-2026-07-31 12:30 jo
+2026-07-31 12:30 alice
 Session migration is uglier than expected. The old store keyed on
 (user_id, device_id) and Redis wants a flat key, so every lookup path
 needs touching. Rollback: dual-write for a week.
 
-2026-07-30 18:04 jo
+2026-07-30 18:04 alice
 Finally got the dog to stop barking at the mail carrier. Six weeks of
 treats. Unclear who trained whom.
 ```
@@ -77,12 +77,12 @@ that claim before it edits anything under `src/auth/`.
 ## What it looks like in a session
 
 Sam opens Claude Code. Before he types anything, his agent already knows what
-Jo is doing:
+Alice is doing:
 
 > **SessionStart hook**
 > ```
 > Peer agent claims currently active:
->   jo claims repo/src/auth/** (migrate session store to redis)
+>   alice claims repo/src/auth/** (migrate session store to redis)
 > Before editing a claimed path, consider whether to coordinate.
 > ```
 
@@ -95,11 +95,11 @@ Sam asks for something that would collide:
 > *— PreToolUse hook fires before the edit —*
 > ```
 > CLAIM CONFLICT on src/auth/session.ts:
-> jo (migrate session store to redis) claims src/auth/**
+> alice (migrate session store to redis) claims src/auth/**
 > This is advisory. Consider working elsewhere, or coordinate first.
 > ```
 >
-> **Claude:** Jo's mid-way through migrating the session store to Redis and has
+> **Claude:** Alice's mid-way through migrating the session store to Redis and has
 > `src/auth/**` claimed. Editing `session.ts` now would conflict with her work.
 >
 > I can add the rate limiting at the route layer instead —
@@ -123,7 +123,7 @@ $ robofinger post "Rewrote the parser. Third time. This one's right."
 $ git log --oneline -5 | robofinger post
 ```
 
-**Reading doesn't interrupt anyone.** `robofinger jo` shows what she's working
+**Reading doesn't interrupt anyone.** `robofinger alice` shows what she's working
 on and what she's written lately — and nothing happens on her end. No
 notification, no "seen", nothing to answer. You can look as often as you like.
 That cuts both ways: because nobody is interrupted, nobody has to perform being
@@ -188,7 +188,7 @@ Or skip the prompt entirely with `init --hooks` / `--hooks-project`.
 
 ```sh
 $ robofinger id
-https://jo@relay.example.com/plan/u/-lDVbNiJaQND…#age14hpxlph520v9…
+https://alice@relay.example.com/plan/u/-lDVbNiJaQND…#age14hpxlph520v9…
 ```
 
 Send them that line; they run `robofinger add <it>`. You do the same with
@@ -217,11 +217,11 @@ releases them when it's done; peers get warned automatically.
 
 | | | |
 |---|---|---|
-| **09:15** | Jo's agent claims `src/auth/**` for a session-store migration | agent |
+| **09:15** | Alice's agent claims `src/auth/**` for a session-store migration | agent |
 | **09:45** | Sam's agent hits the claim, proposes the API layer instead | agent |
-| **12:30** | Jo posts what she learned, and that she's out Thursday | Jo |
+| **12:30** | Alice posts what she learned, and that she's out Thursday | Alice |
 | **14:00** | Sam reads it over lunch. Doesn't reply. Doesn't need to. | Sam |
-| **17:30** | Jo's agent releases the claim; auth is free again | agent |
+| **17:30** | Alice's agent releases the claim; auth is free again | agent |
 
 Two humans, one shared repo, zero "hey is anyone in auth?" messages and zero
 notifications.
