@@ -1078,9 +1078,22 @@ fn show_self(c: &Cfg, k: &Keys) {
         .iter()
         .filter(|p| p.pubkey != k.pubkey() && p.live(t))
         .count();
-    println!("\n{} peer(s), {live} with active claims", peers.len());
-    println!("\nrobofinger <peer>   look someone up");
-    println!("robofinger --help   all commands");
+    // With no peers, "look someone up" is advertising something that cannot
+    // work yet. Point at the exchange instead — that is the actual next step.
+    if peers.is_empty() {
+        println!("\nNo peers yet. To follow someone, swap addresses:");
+        println!("  1. send them yours:   robofinger id");
+        println!("  2. add theirs:        robofinger peer add <their address>");
+        println!("  3. they add yours too — both directions are required");
+        println!("\nrobofinger --help   all commands");
+    } else {
+        let example = peers[0].label.as_str();
+        let w = example.len().max(6); // widest of the example label and "--help"
+        println!("\n{} peer(s), {live} with active claims", peers.len());
+        println!("\nrobofinger {example:<w$}   read their plan");
+        println!("robofinger {:<w$}   everyone, newest first", "log");
+        println!("robofinger {:<w$}   all commands", "--help");
+    }
 }
 
 /// `robofinger alice` — one peer's plan and posts, like fingering them.
