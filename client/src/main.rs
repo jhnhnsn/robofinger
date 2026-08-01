@@ -15,7 +15,7 @@
 //! stores opaque ciphertext and can verify signatures but never read contents.
 //!
 //! Env: ROBOFINGER_URL (e.g. https://example.com/plan — path is the namespace)
-//!      ROBOFINGER_AGENT (display label, defaults to hostname)
+//!      ROBOFINGER_ALIAS (display name for this machine, defaults to hostname)
 //!      ROBOFINGER_HOME (key dir, defaults to ~/.config/robofinger)
 
 mod crypto;
@@ -87,13 +87,13 @@ AGENTS
 
 SETUP
 
-  init --url <url> [--agent <name>] [--hooks]
+  init --url <url> [--alias <name>] [--hooks]
                                 write config, make keys, print your address
       robofinger init --url https://relay.example.com/plan
       robofinger init --url https://example.com/plan/team-a
       (the URL path is the namespace — /plan/team-a is a separate room;
        --ns team-a appends it for you if you prefer)
-      robofinger init --url <url> --agent laptop     name this machine
+      robofinger init --url <url> --alias laptop     name this machine
       robofinger init --url <url> --hooks            wire into Claude Code now
       robofinger init --url <url> --hooks-project    ... for this repo only
 
@@ -108,11 +108,14 @@ SETUP
   --version                     print version
 
 Config lives in ~/.config/robofinger/config. ROBOFINGER_URL and
-ROBOFINGER_AGENT override it. Keys never leave this machine.";
+ROBOFINGER_ALIAS override it. Keys never leave this machine.";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Plan {
-    agent: String,
+    /// Human label for this machine. Serialised as "agent" for compatibility
+    /// with plans already published; `alias` is what users type.
+    #[serde(rename = "agent")]
+    alias: String,
     /// Publisher's Ed25519 public key — the real identity. `agent` is a label.
     #[serde(default)]
     pubkey: String,
@@ -149,7 +152,7 @@ struct Cfg {
     /// `https://example.com/plan` and `https://example.com/plan/team-a` are
     /// separate rooms with separate storage.
     url: String,
-    agent: String,
+    alias: String,
 }
 
 /// `key=value` lines from ~/.config/robofinger/config. Written by `init`.
@@ -178,10 +181,13 @@ fn cfg() -> Option<Cfg> {
     if let Some(ns) = get("ROBOFINGER_NS").filter(|s| !s.is_empty()) {
         url = format!("{url}/{ns}");
     }
-    let agent = get("ROBOFINGER_AGENT")
+    // ROBOFINGER_AGENT still works; "agent" was confusing in a tool that also
+    // coordinates AI agents.
+    let alias = get("ROBOFINGER_ALIAS")
+        .or_else(|| get("ROBOFINGER_AGENT"))
         .or_else(hostname)
         .unwrap_or_else(|| "unknown".into());
-    Some(Cfg { url, agent })
+    Some(Cfg { url, alias })
 }
 
 fn hostname() -> Option<String> {
@@ -414,7 +420,7 @@ fn publish(
         .map(|p| p.seq)
         .unwrap_or(0);
     let plan = Plan {
-        agent: c.agent.clone(),
+        alias: c.alias.clone(),
         pubkey: k.pubkey(),
         seq: prev_seq + 1,
         epoch: now(),
@@ -468,7 +474,7 @@ fn send(c: &Cfg, k: &Keys, kind: &str, seq: u64, body: String) -> Result<(), Str
 /// Publish a signed forwarding pointer at the OLD address.
 fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
     let entry = Plan {
-        agent: c.agent.clone(),
+        alias: c.alias.clone(),
         pubkey: k.pubkey(),
         seq: now() as u64,
         epoch: now(),
@@ -497,7 +503,7 @@ fn post(c: &Cfg, k: &Keys, text: &str) -> Result<(), String> {
         .unwrap_or(0);
 
     let entry = Plan {
-        agent: c.agent.clone(),
+        alias: c.alias.clone(),
         pubkey: k.pubkey(),
         seq: prev + 1,
         epoch: now(),
@@ -590,7 +596,7 @@ fn main() {
         "init" => {
             let mut url = None;
             let mut ns = None;
-            let mut agent = None;
+            let mut alias = None;
             let mut want_hooks = false;
             let mut hook_scope = hooks::Scope::Account;
             let mut it = args[1..].iter();
@@ -598,7 +604,7 @@ fn main() {
                 match a.as_str() {
                     "--url" => url = it.next().cloned(),
                     "--ns" => ns = it.next().cloned(),
-                    "--agent" => agent = it.next().cloned(),
+                    "--alias" | "--agent" => alias = it.next().cloned(),
                     "--hooks" => want_hooks = true,
                     "--hooks-project" => {
                         want_hooks = true;
@@ -630,8 +636,11 @@ fn main() {
             }
 
             let mut body = format!("ROBOFINGER_URL={url}\n");
-            if let Some(a) = agent.or_else(|| existing.get("ROBOFINGER_AGENT").cloned()) {
-                body.push_str(&format!("ROBOFINGER_AGENT={a}\n"));
+            if let Some(a) = alias
+                .or_else(|| existing.get("ROBOFINGER_ALIAS").cloned())
+                .or_else(|| existing.get("ROBOFINGER_AGENT").cloned())
+            {
+                body.push_str(&format!("ROBOFINGER_ALIAS={a}\n"));
             }
             let path = crypto::config_dir().join("config");
             if let Err(e) = std::fs::write(&path, body) {
@@ -1025,7 +1034,7 @@ fn main() {
             if !hits.is_empty() {
                 let detail: Vec<String> = hits
                     .iter()
-                    .map(|(p, g)| format!("{} ({}) claims {}", p.agent, p.task, g))
+                    .map(|(p, g)| format!("{} ({}) claims {}", p.alias, p.task, g))
                     .collect();
                 let msg = format!(
                     "CLAIM CONFLICT on {}:\n{}\nThis is advisory. Consider working elsewhere, or coordinate first.",
@@ -1053,7 +1062,7 @@ fn main() {
                 .flat_map(|p| {
                     p.touching
                         .iter()
-                        .map(|g| format!("  {} claims {}/{} ({})", p.agent, p.project, g, p.task))
+                        .map(|g| format!("  {} claims {}/{} ({})", p.alias, p.project, g, p.task))
                         .collect::<Vec<_>>()
                 })
                 .collect();
@@ -1114,12 +1123,12 @@ fn main() {
             for p in fetch_posts(&c, &k, limit) {
                 if let Some(w) = &who {
                     let matches =
-                        p.agent == *w || subs.iter().any(|s| &s.label == w && s.pubkey == p.pubkey);
+                        p.alias == *w || subs.iter().any(|s| &s.label == w && s.pubkey == p.pubkey);
                     if !matches {
                         continue;
                     }
                 }
-                println!("{} {}\n{}\n", stamp(p.epoch), p.agent, p.task);
+                println!("{} {}\n{}\n", stamp(p.epoch), p.alias, p.task);
                 any = true;
             }
             if !any {
@@ -1209,7 +1218,7 @@ fn show_self(c: &Cfg, k: &Keys) {
         .filter(|p| p.pubkey == k.pubkey())
         .collect();
 
-    println!("{} @ {}", c.agent, c.url);
+    println!("{} @ {}", c.alias, c.url);
     println!("{}", k.pubkey());
 
     match mine.iter().find(|p| p.live(t)) {
@@ -1314,7 +1323,7 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
     } else {
         println!();
         for p in posts {
-            println!("{} {}", stamp(p.epoch), p.agent);
+            println!("{} {}", stamp(p.epoch), p.alias);
             println!("{}\n", p.task);
         }
     }
@@ -1353,7 +1362,7 @@ fn watch(c: &Cfg, k: &Keys) {
             std::process::exit(1);
         }
     };
-    eprintln!("watching {} as {} ({} peer(s))", c.url, c.agent, subs.len());
+    eprintln!("watching {} as {} ({} peer(s))", c.url, c.alias, subs.len());
 
     // Verify signature, then decrypt. Anything that fails either step is not
     // shown — an unverified plan is worse than no plan.
@@ -1379,7 +1388,7 @@ fn watch(c: &Cfg, k: &Keys) {
         };
         println!(
             "{} [{}] {} -> {}",
-            p.agent,
+            p.alias,
             p.status,
             p.task,
             p.touching.join(",")
@@ -1419,7 +1428,7 @@ mod tests {
 
     fn plan(agent: &str, project: &str, touching: &[&str], status: &str, age: i64) -> Plan {
         Plan {
-            agent: agent.into(),
+            alias: agent.into(),
             pubkey: format!("pk-{agent}"),
             seq: 1,
             epoch: now() - age,

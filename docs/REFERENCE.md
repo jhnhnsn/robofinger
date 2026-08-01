@@ -61,7 +61,7 @@ from the `Plan` struct in `client/src/main.rs`, which is the only definition.
 
 | Field | Meaning |
 |---|---|
-| `agent` | display label only — not identity |
+| `agent` | display name for the machine — not identity. Set with `--alias`; the field keeps its old name for compatibility. |
 | `pubkey` | echoed inside; the client overwrites it from the signed envelope |
 | `seq`, `epoch` | ordering and publish time (unix seconds) |
 | `status` | `working` \| `done` \| `post` \| `moved` |
