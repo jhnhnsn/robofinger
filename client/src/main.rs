@@ -56,8 +56,9 @@ PEOPLE
       robofinger id
       robofinger id laptop
 
-  add <address>                 follow them (and let them read you)
-      robofinger add https://relay.example.com/plan/u/kWJQ…#age1x3h…
+  add <address> [--as <name>]   follow them (and let them read you)
+      robofinger add https://sam@relay.example.com/plan/u/kWJQ…#age1x3h…
+      robofinger add <address> --as samantha    ignore their suggested name
 
   list [-v]                     who you follow, where, and what they hold
       robofinger list
@@ -731,9 +732,35 @@ fn main() {
                         std::process::exit(1);
                     };
                     match Peer::parse(blob) {
-                        Ok(p) => {
+                        Ok(mut p) => {
                             if p.pubkey == k.pubkey() {
                                 eprintln!("that's your own identity");
+                                std::process::exit(1);
+                            }
+                            // `--as` overrides whatever they suggested.
+                            if let Some(i) = args.iter().position(|a| a == "--as")
+                                && let Some(name) = args.get(i + 1)
+                            {
+                                p.label = name.clone();
+                            }
+                            if p.label.is_empty() {
+                                p.label = p.pubkey[..8].to_string();
+                            }
+                            // The label is only a suggestion, so it must never
+                            // silently shadow someone you already follow —
+                            // that is how an impostor gets read as a friend.
+                            if let Some(clash) = peers
+                                .iter()
+                                .find(|x| x.label == p.label && x.pubkey != p.pubkey)
+                            {
+                                eprintln!(
+                                    "you already follow a different key as {:?} ({}…)",
+                                    p.label,
+                                    &clash.pubkey[..8]
+                                );
+                                eprintln!(
+                                    "  pick another name: robofinger add <address> --as <name>"
+                                );
                                 std::process::exit(1);
                             }
                             peers.retain(|x| x.pubkey != p.pubkey);

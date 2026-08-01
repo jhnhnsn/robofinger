@@ -186,12 +186,17 @@ Or skip the prompt entirely with `init --hooks` / `--hooks-project`.
 
 ```sh
 $ robofinger id
-https://relay.example.com/plan/u/-lDVbNiJaQND…#age14hpxlph520v9…
+https://jo@relay.example.com/plan/u/-lDVbNiJaQND…#age14hpxlph520v9…
 ```
 
 Send them that line; they run `robofinger add <it>`. You do the same with
 theirs. Both directions — adding someone both subscribes you to them *and* lets
 them read you.
+
+The name before the `@` is a suggestion, not an identity — the key is. Override
+it with `robofinger add <address> --as <name>`, and if a suggested name would
+shadow someone you already follow, the add is refused rather than silently
+replacing them.
 
 **4. Work normally**
 

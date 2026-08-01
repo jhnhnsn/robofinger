@@ -158,9 +158,14 @@ pub struct Peer {
 impl Peer {
     /// An address is a URL:
     ///
-    ///   https://relay.example.com/plan/u/<pubkey>?label=laptop#<agekey>
-    ///   └────────── base = namespace ──┘    │           │         │
-    ///                                    identity     label   encryption key
+    ///   https://sam@relay.example.com/plan/u/<pubkey>#<agekey>
+    ///          │    └───── base = namespace ──┘    │        │
+    ///     suggested label                      identity  encryption key
+    ///
+    /// The label is a *suggestion* the sender makes about what to call them.
+    /// It is not part of their identity — the public key is — so the receiver
+    /// can override it and must not let a suggestion shadow a peer they
+    /// already follow. `?label=` is still accepted for older addresses.
     ///
     /// The base path IS the namespace, so a relay can live at
     /// `example.com/plan` without colliding with the rest of the site.
@@ -188,12 +193,26 @@ impl Peer {
             Some((p, q)) => (p, Some(q)),
             None => (rest, None),
         };
-        let label = query
-            .and_then(|q| {
-                q.split('&')
-                    .find_map(|kv| kv.strip_prefix("label=").map(str::to_string))
-            })
-            .unwrap_or_default();
+        let query_label = query.and_then(|q| {
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix("label=").map(str::to_string))
+        });
+
+        // `scheme://label@host/...` — strip the userinfo before anything tries
+        // to treat it as part of the host.
+        let (path_part, user_label) = {
+            let (scheme, after) = path_part
+                .split_once("://")
+                .ok_or_else(|| "address must be an http(s) URL".to_string())?;
+            match after.split_once('@') {
+                Some((user, host)) if !user.contains('/') => {
+                    (format!("{scheme}://{host}"), Some(user.to_string()))
+                }
+                _ => (path_part.to_string(), None),
+            }
+        };
+        let label = user_label.or(query_label).unwrap_or_default();
+        let path_part = path_part.as_str();
 
         let (base, pubkey) = path_part
             .rsplit_once("/u/")
@@ -225,13 +244,15 @@ impl Peer {
             .as_ref()
             .map(|h| h.url.as_str())
             .unwrap_or_default();
-        format!(
-            "{}/u/{}?label={}#{}",
-            base,
-            self.pubkey,
-            encode_label(&self.label),
-            self.age_pub
-        )
+        // Suggest the label as userinfo: it reads as an address rather than a
+        // query, and puts the human-meaningful part first.
+        let with_label = match (self.label.as_str(), base.split_once("://")) {
+            ("", _) | (_, None) => base.to_string(),
+            (label, Some((scheme, host))) => {
+                format!("{scheme}://{}@{host}", encode_label(label))
+            }
+        };
+        format!("{with_label}/u/{}#{}", self.pubkey, self.age_pub)
     }
 
     /// Relay base URL to fetch this peer from, falling back to your own.
@@ -367,14 +388,57 @@ mod tests {
     }
 
     #[test]
+    fn label_travels_as_userinfo() {
+        let k = keys_in("userinfo");
+        let home = Home {
+            url: "https://relay.example.com/plan".into(),
+        };
+        let addr = k.identity_blob("sam", Some(home));
+        assert!(
+            addr.starts_with("https://sam@relay.example.com/plan/u/"),
+            "expected userinfo form, got {addr}"
+        );
+        let p = Peer::parse(&addr).unwrap();
+        assert_eq!(p.label, "sam");
+        assert_eq!(p.home.unwrap().url, "https://relay.example.com/plan");
+    }
+
+    #[test]
+    fn query_label_still_parses_for_older_addresses() {
+        let k = keys_in("oldlabel");
+        let old = format!(
+            "https://relay.example.com/plan/u/{}?label=laptop#{}",
+            k.pubkey(),
+            k.age_secret.to_public()
+        );
+        let p = Peer::parse(&old).unwrap();
+        assert_eq!(p.label, "laptop");
+        assert_eq!(p.home.unwrap().url, "https://relay.example.com/plan");
+    }
+
+    #[test]
+    fn an_at_in_the_path_is_not_userinfo() {
+        let k = keys_in("atpath");
+        // Only userinfo sits before the first '/', so a later '@' must not be
+        // mistaken for a label.
+        let addr = format!(
+            "https://relay.example.com/plan/@team/u/{}#{}",
+            k.pubkey(),
+            k.age_secret.to_public()
+        );
+        let p = Peer::parse(&addr).unwrap();
+        assert_eq!(p.home.unwrap().url, "https://relay.example.com/plan/@team");
+    }
+
+    #[test]
     fn address_is_a_url_with_key_in_the_fragment() {
         let k = keys_in("urlform");
         let home = Home {
             url: "https://relay.example.com/plan".into(),
         };
         let addr = k.identity_blob("laptop", Some(home));
-        assert!(addr.starts_with("https://relay.example.com/plan/u/"));
-        assert!(addr.contains("?label=laptop"));
+        assert!(addr.starts_with("https://laptop@relay.example.com/plan/u/"));
+        assert!(addr.contains("laptop@"), "label rides as userinfo: {addr}");
         // The age key must be in the fragment: browsers never send it to servers.
         let (_, frag) = addr.split_once('#').expect("needs a fragment");
         assert_eq!(frag, k.age_secret.to_public().to_string());
