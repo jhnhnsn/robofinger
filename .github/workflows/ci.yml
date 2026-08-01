@@ -63,7 +63,7 @@ jobs:
           B=$("$BIN" id ci-agent)
           [ "$A" = "$B" ] || { echo "FAIL: identity changed between invocations"; exit 1; }
           case "$A" in
-            https://relay.example.com/plan/u/*\?label=ci-agent\#age1*) ;;
+            https://ci-agent@relay.example.com/plan/u/*\#age1*) ;;
             *) echo "FAIL: bad address format: $A"; exit 1 ;;
           esac
           # Without a relay there is nowhere to fetch from, so `id` must refuse

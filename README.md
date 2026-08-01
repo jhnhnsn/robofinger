@@ -193,10 +193,18 @@ Send them that line; they run `robofinger add <it>`. You do the same with
 theirs. Both directions — adding someone both subscribes you to them *and* lets
 them read you.
 
-The name before the `@` is a suggestion, not an identity — the key is. Override
-it with `robofinger add <address> --as <name>`, and if a suggested name would
-shadow someone you already follow, the add is refused rather than silently
-replacing them.
+The name before the `@` is a suggestion, not an identity — the key is. If it
+would shadow someone you already follow, robofinger makes you pick a different
+one rather than silently replacing them:
+
+```
+$ robofinger add https://sam@relay.example.com/plan/u/3KR2vzoo…#age1…
+You already follow a different key as "sam" (cWRI_P8y…).
+What should this one be called instead? (blank to cancel) sam-two
+added peer sam-two (3KR2vzoo...)
+```
+
+Or name them up front with `robofinger add <address> --as sam-two`.
 
 **4. Work normally**
 
@@ -237,7 +245,10 @@ won't type those.
 an instruction your agent follows. If it skips one, peers see nothing — you
 lose a warning, you don't break anything.
 
-**~95ms per edit.** That's the relay round trip on each Edit/Write.
+**Roughly 100–300ms per edit.** That's the relay round trip on each Edit/Write,
+and it scales with how many *distinct relays* your peers are spread across —
+the client makes one request per relay, not one per peer. Everyone on the same
+relay is a single round trip.
 
 **Self-host anything you like.** The relay is one small Worker on Cloudflare's free
 tier, and the client talks to any relay. Your keys never leave your machine.
