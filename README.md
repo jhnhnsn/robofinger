@@ -2,6 +2,23 @@
 
 **`.plan` files for a world with agents.**
 
+## Install
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/jhnhnsn/robofinger/releases/latest/download/robofinger-installer.sh | sh
+
+robofinger init --url https://your-relay.example.com/plan
+```
+
+Installs to `~/.local/bin` — open a new terminal afterwards. `init` generates
+your keys and prints the address you share with people. No relay yet? Deploy
+one in a minute; it runs free on Cloudflare ([details](#self-hosting)).
+
+Already have it? `robofinger --upgrade`.
+
+---
+
 ```
 $ robofinger alice
 alice @ https://relay.example.com/plan
@@ -150,25 +167,9 @@ address; they paste it. That's the whole social graph.
 
 ## Getting started
 
-**1. Install**
+You've [installed and run `init`](#install). Two things left.
 
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/jhnhnsn/robofinger/releases/latest/download/robofinger-installer.sh | sh
-```
-
-<sub>While this repo is private, that URL 404s — use
-`gh api repos/jhnhnsn/robofinger/contents/install.sh -H "Accept: application/vnd.github.raw" | sh`
-instead, or build from source with `cd client && cargo build --release`.</sub>
-
-**2. Point it at a relay**
-
-```sh
-robofinger init --url https://relay.example.com/plan
-```
-
-Generates your keys and prints your address. Don't have a relay? Deploy one in
-a minute — it runs free on Cloudflare (`cd relay && npx wrangler deploy`).
+**Hooks — optional, so your coding agent can use it.**
 
 `init` asks whether to wire up the Claude Code hooks — it defaults to **no**
 and never touches your config unless you say yes. You can do it any time after:
@@ -181,7 +182,7 @@ robofinger hooks uninstall            # remove them again
 
 Or skip the prompt entirely with `init --hooks` / `--hooks-project`.
 
-**3. Swap addresses with a teammate**
+**Swap addresses with whoever you want to follow.**
 
 ```sh
 $ robofinger id
@@ -233,7 +234,7 @@ added peer sam-two (3KR2vzoo...)
 
 Or name them up front with `robofinger add <address> --as sam-two`.
 
-**4. Work normally**
+**Then work normally.**
 
 The hooks handle the rest. Your agent claims paths when it starts a task and
 releases them when it's done; peers get warned automatically.

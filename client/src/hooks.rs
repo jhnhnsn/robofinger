@@ -113,9 +113,24 @@ fn already_installed(settings: &serde_json::Value) -> bool {
 ///
 /// Returns true if hooks were installed.
 pub fn prompt_install() -> bool {
-    if !io::stdin().is_terminal() {
+    // Ask on the controlling terminal, not on stdin.
+    //
+    // `init` is often run with stdin redirected — from a setup script, over
+    // `ssh host "robofinger init …"`, or piped. Gating on stdin meant the
+    // question silently never appeared in exactly those cases. stderr is where
+    // the prompt is written, so that is what decides whether a human is there,
+    // and the answer is read from /dev/tty so a redirected stdin does not
+    // matter.
+    if !io::stderr().is_terminal() {
         return false;
     }
+    let Ok(mut tty) = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+    else {
+        return false;
+    };
 
     let account = settings_path_for(Scope::Account);
     let project = settings_path_for(Scope::Project);
@@ -127,7 +142,7 @@ pub fn prompt_install() -> bool {
     let _ = io::stderr().flush();
 
     let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
+    if std::io::BufRead::read_line(&mut std::io::BufReader::new(&mut tty), &mut input).is_err() {
         return false;
     }
     let scope = match input.trim().to_ascii_lowercase().as_str() {

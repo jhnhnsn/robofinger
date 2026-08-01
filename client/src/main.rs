@@ -1166,15 +1166,25 @@ fn main() {
 /// Returns None on a non-TTY or an empty answer, so a scripted `add` still
 /// fails loudly rather than silently picking a name for you.
 fn prompt_for_label(suggested: &str, peers: &[Peer]) -> Option<String> {
-    use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
+    use std::io::{BufRead, IsTerminal, Write};
+    // Ask on the controlling terminal, not stdin — `add` may well be run with
+    // stdin redirected, and the question must still reach a human.
+    if !std::io::stderr().is_terminal() {
         return None;
     }
+    let Ok(tty) = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+    else {
+        return None;
+    };
+    let mut tty = std::io::BufReader::new(tty);
     loop {
         eprint!("What should this one be called instead? (blank to cancel) ");
         let _ = std::io::stderr().flush();
         let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() {
+        if tty.read_line(&mut line).is_err() {
             return None;
         }
         let name = line.trim();
