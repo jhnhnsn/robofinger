@@ -1422,9 +1422,12 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
         Some(p) if p.live(t) => println!("\nworking: {} ({})", p.task, ago(t - p.epoch)),
         Some(_) => println!("\nnot working on anything right now"),
         None if has_unreadable(c, k, &peer.pubkey, "plans") => {
-            println!("\nthey have published, but not to you —");
-            println!("  they need to run: robofinger add <your address>");
-            println!("  yours is: robofinger id");
+            // Not "not to you" — publishing goes to a recipient list, not to
+            // individuals, so this is a missing key exchange rather than an
+            // exclusion.
+            println!("\nthey have published, but you are not in their peer list yet.");
+            println!("  send them your address (robofinger id) and ask them to run:");
+            println!("  robofinger add <it>");
         }
         None => println!("\nnot working on anything right now"),
     }
@@ -1435,8 +1438,11 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
         .collect();
     if posts.is_empty() {
         if has_unreadable(c, k, &peer.pubkey, "posts") {
-            println!("\nposts exist but you cannot read them — they have not added you,");
-            println!("  or they were written before they did. A new post will be readable.");
+            // Two causes, same symptom: never added, or added after these
+            // were written. Name both rather than guess.
+            println!("\nthey have posts you cannot read — either they have not added");
+            println!("  you yet, or these predate them adding you. Anything written");
+            println!("  after they add you will be readable.");
         } else {
             println!("\nno posts yet");
         }
