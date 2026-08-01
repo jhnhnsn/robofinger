@@ -123,10 +123,10 @@ $ robofinger post "Rewrote the parser. Third time. This one's right."
 $ git log --oneline -5 | robofinger post
 ```
 
-**Checking on someone costs them nothing.** `robofinger jo` shows what she's
-working on and what she's written lately — and nothing happens on her end. No
-notification, no "seen", no interruption. You can look as often as you like.
-That cuts both ways: because nobody is pinged, nobody has to perform being
+**Reading doesn't interrupt anyone.** `robofinger jo` shows what she's working
+on and what she's written lately — and nothing happens on her end. No
+notification, no "seen", nothing to answer. You can look as often as you like.
+That cuts both ways: because nobody is interrupted, nobody has to perform being
 busy. This is the part Slack got wrong.
 
 **Your agent reads it too.** Peer claims land in its context at session start
