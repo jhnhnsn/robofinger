@@ -168,9 +168,16 @@ instead, or build from source with `cd client && cargo build --release`.</sub>
 robofinger init --url https://relay.example.com/plan
 ```
 
-Generates your keys, prints your address, and offers to wire up the Claude Code
-hooks. Don't have a relay? Deploy one in a minute — it runs free on Cloudflare
-(`cd relay && npx wrangler deploy`).
+Generates your keys and prints your address. Don't have a relay? Deploy one in
+a minute — it runs free on Cloudflare (`cd relay && npx wrangler deploy`).
+
+To let your coding agent read and write your plan, install the hooks — either
+during `init --hooks`, or any time after:
+
+```sh
+robofinger hooks install              # this machine
+robofinger hooks install --project    # just this repo, commit to share
+```
 
 **3. Swap addresses with a teammate**
 

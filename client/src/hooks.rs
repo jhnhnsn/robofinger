@@ -9,7 +9,6 @@
 //! config the user already owns, so it backs up first, never clobbers unrelated
 //! keys, and is idempotent.
 
-use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 /// Printed after install — without this the agent never publishes claims, so
@@ -55,10 +54,6 @@ pub fn settings_path_for(scope: Scope) -> PathBuf {
             PathBuf::from(root).join(".claude/settings.json")
         }
     }
-}
-
-fn settings_path() -> PathBuf {
-    settings_path_for(Scope::Account)
 }
 
 /// The hook block, built against the binary's actual location so the installed
@@ -107,64 +102,6 @@ fn already_installed(settings: &serde_json::Value) -> bool {
                     })
                 })
         })
-}
-
-/// Offer to install the hooks. `[Y/n]` on a TTY, default yes; a non-TTY does
-/// nothing rather than silently editing a config nobody asked it to touch —
-/// the opposite of envstow's convention, because this writes to a shared file
-/// (~/.claude/settings.json) rather than creating a project-local one.
-pub fn maybe_install() {
-    let path = settings_path();
-
-    let existing: serde_json::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    if already_installed(&existing) {
-        eprintln!("Claude Code hooks already installed in {}", path.display());
-        return;
-    }
-
-    if !io::stdin().is_terminal() {
-        eprintln!(
-            "\nTo wire this into Claude Code, run: robofinger hooks install\n  (adds SessionStart/SessionEnd/PreToolUse to {})",
-            path.display()
-        );
-        return;
-    }
-
-    let project = settings_path_for(Scope::Project);
-    eprintln!("\nInstall Claude Code hooks?");
-    eprintln!(
-        "  [a] account — {} (every project on this machine)",
-        path.display()
-    );
-    eprintln!(
-        "  [p] project — {} (this repo only, commit to share)",
-        project.display()
-    );
-    eprintln!("  [n] skip");
-    eprint!("Choice [a/p/n]: ");
-    let _ = io::stderr().flush();
-    let mut input = String::new();
-    let scope = if io::stdin().read_line(&mut input).is_ok() {
-        match input.trim().to_ascii_lowercase().as_str() {
-            "p" | "project" => Scope::Project,
-            "n" | "no" | "skip" => {
-                eprintln!("   skipped. Install later with: robofinger hooks install [--project]");
-                return;
-            }
-            _ => Scope::Account,
-        }
-    } else {
-        Scope::Account
-    };
-
-    match install(false, scope) {
-        Ok(msg) => eprintln!("{msg}"),
-        Err(e) => eprintln!("robofinger: {e}"),
-    }
 }
 
 /// Merge the hooks into settings.json. Backs up any existing file first.

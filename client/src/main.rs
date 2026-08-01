@@ -37,7 +37,7 @@ robofinger — tell other agents what you're working on, before you collide.
   robofinger <peer>                   look someone up
 
 setup
-  init --url <relay url>              write config + print your address
+  init --url <relay url> [--hooks]    write config + print your address
   id [label]                          print your shareable address
   hooks install [--project]           wire into Claude Code
   hooks uninstall [--project]         remove the hooks
@@ -538,12 +538,19 @@ fn main() {
             let mut url = None;
             let mut ns = None;
             let mut agent = None;
+            let mut want_hooks = false;
+            let mut hook_scope = hooks::Scope::Account;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--url" => url = it.next().cloned(),
                     "--ns" => ns = it.next().cloned(),
                     "--agent" => agent = it.next().cloned(),
+                    "--hooks" => want_hooks = true,
+                    "--hooks-project" => {
+                        want_hooks = true;
+                        hook_scope = hooks::Scope::Project;
+                    }
                     other => {
                         eprintln!("unknown flag {other}\n\n{USAGE}");
                         std::process::exit(1);
@@ -594,13 +601,26 @@ fn main() {
             println!("\nboth directions are required — adding a peer both subscribes to");
             println!("them and lets them decrypt your plans.");
 
-            hooks::maybe_install();
+            // Editing ~/.claude/settings.json is not something a setup command
+            // should do uninvited, so hooks are opt-in.
+            if want_hooks {
+                match hooks::install(true, hook_scope) {
+                    Ok(m) => println!("\n{m}"),
+                    Err(e) => eprintln!("\nhook install failed: {e}"),
+                }
+            } else {
+                println!("\nTo let your coding agent use this, install the hooks:");
+                println!("  robofinger hooks install              this machine");
+                println!("  robofinger hooks install --project    just this repo");
+            }
 
             // Hooks give you conflict warnings; this makes the agent actually
             // publish claims. Without it `touching` stays empty and every
             // check passes trivially.
-            println!("\nAdd this to ~/.claude/CLAUDE.md so your agent publishes claims:\n");
-            println!("{}", hooks::CLAUDE_MD);
+            if want_hooks {
+                println!("\nAdd this to ~/.claude/CLAUDE.md so your agent publishes claims:\n");
+                println!("{}", hooks::CLAUDE_MD);
+            }
             return;
         }
         "hooks" => {
