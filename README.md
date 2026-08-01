@@ -261,7 +261,6 @@ ROBOFINGER_RELAY_HOST=relay.example.com ./deploy.sh   # → your own domain
 
 ## More
 
-- [Reference](docs/REFERENCE.md) — protocol, crypto, limits, operations
-- [Device registration](docs/DEVICE-REGISTRATION.md) — design notes for hosted access
+- [Reference](docs/REFERENCE.md) — wire format, security model, limits, self-hosting
 
 [MIT](LICENSE)
