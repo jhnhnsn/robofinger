@@ -179,7 +179,7 @@ $ robofinger id
 https://relay.example.com/plan/u/-lDVbNiJaQND…#age14hpxlph520v9…
 ```
 
-Send them that line; they run `robofinger peer add <it>`. You do the same with
+Send them that line; they run `robofinger add <it>`. You do the same with
 theirs. Both directions — adding someone both subscribes you to them *and* lets
 them read you.
 
@@ -208,7 +208,8 @@ robofinger <peer>               read someone's .plan
 robofinger                      read your own
 robofinger post "…"             write to it (or pipe stdin)
 robofinger log                  everyone you follow, newest first
-robofinger peer add|list|rm     manage who you follow
+robofinger add <address>        follow someone
+robofinger peers                who you follow, and what they hold
 robofinger --help               everything else
 ```
 

@@ -8,7 +8,7 @@
 //!   robofinger check <path>               exit 0 clean, 0 + hook JSON on conflict
 //!   robofinger watch                      stream updates over WebSocket
 //!   robofinger id [label]                 print your shareable identity blob
-//!   robofinger peer add|rm|list           manage trusted peers
+//!   robofinger add|rm|peers               manage who you follow
 //!
 //! Plans are signed (Ed25519) and encrypted (age) client-side. The relay
 //! stores opaque ciphertext and can verify signatures but never read contents.
@@ -41,17 +41,16 @@ setup
   id [label]                          print your shareable address
   hooks install [--project]           wire into Claude Code
   hooks uninstall [--project]         remove the hooks
-  peer add <address>                  trust a peer (subscribe + let them decrypt)
-  peer rm <label>                     revoke; your next plan is opaque to them
-  peer list [-v]                      show trusted peers, relay and last-seen
-  peer update <label>                 accept a peer's published move
+  add <address>                       follow a peer (and let them read you)
+  rm <label>                          unfollow; your next plan is opaque to them
+  peers [-v]                          who you follow, where, and what they hold
+  update <label>                      accept a peer's move to a new relay
   moved <new address>                 tell peers you have moved relay
 
 use
   claim \"<task>\" <glob>...            announce what you're touching
   release                             drop claims, keep working
   done                                mark finished
-  peers                               live peer claims
   check <path>                        conflict check (hook JSON on stdin)
 
 write
@@ -60,7 +59,7 @@ write
   watch                               stream updates over WebSocket
 
 maintenance
-  upgrade [--check] [--yes]           update to the latest release
+  upgrade [--check] [--yes]           update robofinger itself
   --version                           print version
 
 config is read from ~/.config/robofinger/config; environment variables
@@ -528,7 +527,7 @@ fn main() {
             println!("robofinger {}", env!("CARGO_PKG_VERSION"));
             return;
         }
-        "upgrade" | "update" => {
+        "upgrade" => {
             if let Err(e) = selfupdate::cmd_upgrade(&args[1..]) {
                 eprintln!("{e}");
                 std::process::exit(1);
@@ -590,8 +589,8 @@ fn main() {
                     Some(crypto::Home { url: url.clone() })
                 )
             );
-            println!("\nthey run:  robofinger peer add <your blob>");
-            println!("you run:   robofinger peer add <their blob>");
+            println!("\nthey run:  robofinger add <your address>");
+            println!("you run:   robofinger add <their address>");
             println!("\nboth directions are required — adding a peer both subscribes to");
             println!("them and lets them decrypt your plans.");
 
@@ -646,16 +645,17 @@ fn main() {
                 std::process::exit(1);
             };
             println!("{}", k.identity_blob(&label, Some(home)));
-            eprintln!("\nshare that line with a peer; they run: robofinger peer add <it>");
+            eprintln!("\nshare that line with a peer; they run: robofinger add <it>");
             return;
         }
-        "peer" => {
-            let sub = args.get(1).map(String::as_str).unwrap_or("");
+        "add" | "rm" | "update" | "peers" => {
+            let sub = cmd;
             let mut peers = crypto::load_peers();
             match sub {
                 "add" => {
-                    let Some(blob) = args.get(2) else {
-                        eprintln!("usage: robofinger peer add rf1....");
+                    let Some(blob) = args.get(1) else {
+                        eprintln!("usage: robofinger add <address>");
+                        eprintln!("  get theirs with: robofinger id  (on their machine)");
                         std::process::exit(1);
                     };
                     match Peer::parse(blob) {
@@ -681,8 +681,11 @@ fn main() {
                     }
                 }
                 "update" => {
-                    let Some(which) = args.get(2) else {
-                        eprintln!("usage: robofinger peer update <label>");
+                    let Some(which) = args.get(1) else {
+                        eprintln!("usage: robofinger update <label>");
+                        eprintln!(
+                            "  accepts a peer's published move (see: robofinger upgrade for the tool itself)"
+                        );
                         std::process::exit(1);
                     };
                     let Some(c) = cfg() else {
@@ -732,8 +735,8 @@ fn main() {
                     }
                 }
                 "rm" => {
-                    let Some(which) = args.get(2) else {
-                        eprintln!("usage: robofinger peer rm <label|pubkey>");
+                    let Some(which) = args.get(1) else {
+                        eprintln!("usage: robofinger rm <label|pubkey>");
                         std::process::exit(1);
                     };
                     let before = peers.len();
@@ -745,9 +748,11 @@ fn main() {
                     let _ = crypto::save_peers(&peers);
                     println!("removed {which}; future plans will not be readable by them");
                 }
-                "list" | "" => {
+                "peers" | "list" | "" => {
                     if peers.is_empty() {
-                        println!("no peers yet — share `robofinger id` and add theirs");
+                        println!(
+                            "no peers yet — share `robofinger id`, then `robofinger add <theirs>`"
+                        );
                         return;
                     }
                     let verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
@@ -773,6 +778,18 @@ fn main() {
                         None => Default::default(),
                     };
                     let t = now();
+                    // Live claims, indexed by key, so each peer can show what
+                    // it is holding right now.
+                    let claims: std::collections::HashMap<String, Plan> = match cfg() {
+                        Some(c) => fetch_plans(&c, &k)
+                            .into_iter()
+                            .filter(|p| {
+                                p.pubkey != k.pubkey() && p.live(t) && !p.touching.is_empty()
+                            })
+                            .map(|p| (p.pubkey.clone(), p))
+                            .collect(),
+                        None => Default::default(),
+                    };
                     for p in &peers {
                         let where_ = match &p.home {
                             Some(h) => h
@@ -793,6 +810,16 @@ fn main() {
                             where_,
                             last
                         );
+                        // What they are actively holding — the thing you most
+                        // often opened this list to find out.
+                        if let Some(pl) = claims.get(&p.pubkey) {
+                            for g in &pl.touching {
+                                println!(
+                                    "               claiming {}/{}  ({})",
+                                    pl.project, g, pl.task
+                                );
+                            }
+                        }
                         // Surface a move, but never follow it automatically: a
                         // stolen key could otherwise silently repoint you at an
                         // attacker's relay.
@@ -801,7 +828,7 @@ fn main() {
                         {
                             println!("               ↳ moved to {dest}");
                             println!(
-                                "                 accept with: robofinger peer update {}",
+                                "                 accept with: robofinger update {}",
                                 p.label
                             );
                         }
@@ -810,10 +837,7 @@ fn main() {
                         }
                     }
                 }
-                _ => {
-                    eprintln!("usage: robofinger peer add|rm|list|update [-v]");
-                    std::process::exit(1);
-                }
+                _ => unreachable!("outer match limits sub to known verbs"),
             }
             return;
         }
@@ -866,22 +890,6 @@ fn main() {
         "done" => {
             let _ = publish(&c, &k, "done", "", vec![]);
             println!("done");
-        }
-        "peers" => {
-            let t = now();
-            let mut any = false;
-            for p in fetch_plans(&c, &k) {
-                if p.pubkey == k.pubkey() || !p.live(t) {
-                    continue;
-                }
-                for g in &p.touching {
-                    println!("{:<14} {:<30} {}/{}", p.agent, p.task, p.project, g);
-                    any = true;
-                }
-            }
-            if !any {
-                println!("no live peer claims");
-            }
         }
         // PreToolUse hook: hook JSON on stdin, advisory warning on stdout.
         "check" => {
@@ -1083,7 +1091,7 @@ fn show_self(c: &Cfg, k: &Keys) {
     if peers.is_empty() {
         println!("\nNo peers yet. To follow someone, swap addresses:");
         println!("  1. send them yours:   robofinger id");
-        println!("  2. add theirs:        robofinger peer add <their address>");
+        println!("  2. add theirs:        robofinger add <their address>");
         println!("  3. they add yours too — both directions are required");
         println!("\nrobofinger --help   all commands");
     } else {
@@ -1112,7 +1120,7 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
                 .collect();
             if near.is_empty() {
                 format!(
-                    "no peer named {who:?} and no such command\n  robofinger --help    all commands\n  robofinger peer list  who you follow"
+                    "no peer named {who:?} and no such command\n  robofinger --help    all commands\n  robofinger peers      who you follow"
                 )
             } else {
                 format!("no peer named {who:?} — did you mean: {}", near.join(", "))
