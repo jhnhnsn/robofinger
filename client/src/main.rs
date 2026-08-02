@@ -1049,10 +1049,14 @@ fn main() {
                         // What they are actively holding — the thing you most
                         // often opened this list to find out.
                         if let Some(pl) = claims.get(&p.pubkey) {
+                            // Age the claim itself. The column above is when
+                            // they last published anything, which drifts far
+                            // from when they took the claim.
+                            let held = ago(t.saturating_sub(pl.epoch));
                             for g in &pl.touching {
                                 println!(
-                                    "               claiming {}/{}  ({})",
-                                    pl.project, g, pl.task
+                                    "               claiming {}/{}  ({})  since {}",
+                                    pl.project, g, pl.task, held
                                 );
                             }
                         }
@@ -1397,7 +1401,17 @@ fn show_self(c: &Cfg, k: &Keys) {
             }
         }
         Some(p) => println!("\nworking: {}", p.task),
-        None => println!("\nno active claim"),
+        None => match mine.iter().max_by_key(|p| p.epoch) {
+            Some(p) if !p.touching.is_empty() => {
+                println!("\nno active claim");
+                println!(
+                    "  {} expired {}",
+                    p.touching.join(", "),
+                    ago(t.saturating_sub(p.epoch + p.eta_s * STALE_MULT))
+                );
+            }
+            _ => println!("\nno active claim"),
+        },
     }
 
     let posts: Vec<Plan> = fetch_posts(c, k, 3)
@@ -1478,6 +1492,17 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
             println!("  since {}", ago(t - p.epoch));
         }
         Some(p) if p.live(t) => println!("\nworking: {} ({})", p.task, ago(t - p.epoch)),
+        // A claim that aged out reads as "never claimed" unless it is said
+        // out loud — which is exactly when someone wonders why a warning
+        // stopped firing.
+        Some(p) if !p.touching.is_empty() => {
+            println!("\nnot working on anything right now");
+            println!(
+                "  last claim {} expired {}",
+                p.touching.join(", "),
+                ago(t.saturating_sub(p.epoch + p.eta_s * STALE_MULT))
+            );
+        }
         Some(_) => println!("\nnot working on anything right now"),
         None if has_unreadable(c, k, &peer.pubkey, "plans") => {
             // Not "not to you" — publishing goes to a recipient list, not to
