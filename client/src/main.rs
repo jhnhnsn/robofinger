@@ -1013,9 +1013,11 @@ fn main() {
                     let claims: std::collections::HashMap<String, Plan> = match cfg() {
                         Some(c) => fetch_plans(&c, &k)
                             .into_iter()
-                            .filter(|p| {
-                                p.pubkey != k.pubkey() && p.live(t) && !p.touching.is_empty()
-                            })
+                            // Keep live plans holding nothing too: a peer who
+                            // released on purpose is worth a line, and dropping
+                            // them here made that indistinguishable from a
+                            // claim that quietly rotted.
+                            .filter(|p| p.pubkey != k.pubkey() && p.live(t))
                             .map(|p| (p.pubkey.clone(), p))
                             .collect(),
                         None => Default::default(),
@@ -1058,6 +1060,12 @@ fn main() {
                                     "               claiming {}/{}  ({})  since {}",
                                     pl.project, g, pl.task, held
                                 );
+                            }
+                            // Working but holding nothing is a handoff, and
+                            // worth a line — silence here looks like a peer
+                            // whose claim quietly rotted.
+                            if pl.touching.is_empty() && pl.live(t) && !pl.task.is_empty() {
+                                println!("               released — working on {}", pl.task);
                             }
                         }
                         // Surface a move, but never follow it automatically: a
@@ -1491,14 +1499,27 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
             }
             println!("  since {}", ago(t - p.epoch));
         }
-        Some(p) if p.live(t) => println!("\nworking: {} ({})", p.task, ago(t - p.epoch)),
+        // Live and working, holding nothing: they let go on purpose. Say so.
+        // A deliberate release means the files are safe to pick up; a claim
+        // that rotted because the session died means no such thing, and the
+        // two used to render identically.
+        Some(p) if p.live(t) => {
+            println!("\nworking: {} ({})", p.task, ago(t - p.epoch));
+            println!("  holding nothing — released");
+        }
         // A claim that aged out reads as "never claimed" unless it is said
         // out loud — which is exactly when someone wonders why a warning
         // stopped firing.
+        // "done" is a clean exit — the session said so on its way out. Only
+        // an unannounced disappearance counts as expired.
+        Some(p) if p.status == "done" => {
+            println!("\nnot working on anything right now");
+            println!("  finished {}", ago(t - p.epoch));
+        }
         Some(p) if !p.touching.is_empty() => {
             println!("\nnot working on anything right now");
             println!(
-                "  last claim {} expired {}",
+                "  last claim {} expired {} — session ended without releasing",
                 p.touching.join(", "),
                 ago(t.saturating_sub(p.epoch + p.eta_s * STALE_MULT))
             );
