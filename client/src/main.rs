@@ -214,7 +214,10 @@ fn ago(secs: i64) -> String {
         s if s < 60 => format!("{s}s ago"),
         s if s < 3600 => format!("{}m ago", s / 60),
         s if s < 86_400 => format!("{}h ago", s / 3600),
-        s => format!("{}d ago", s / 86_400),
+        // Past a day, "4d ago" is the point where you start wanting the
+        // actual date — which is exactly when a claim is stale enough to
+        // matter. Keep the relative form, since it is what you read first.
+        s => format!("{}d ago ({})", s / 86_400, stamp(now() - s)),
     }
 }
 
@@ -1599,6 +1602,17 @@ mod tests {
                 .map(|pat| pat.matches(rel))
                 .unwrap_or(false)
         })
+    }
+
+    #[test]
+    fn ago_gains_a_date_past_a_day() {
+        assert_eq!(ago(30), "30s ago");
+        assert_eq!(ago(120), "2m ago");
+        assert_eq!(ago(7200), "2h ago");
+        // past a day: relative form kept, absolute date appended
+        let d = ago(200_000);
+        assert!(d.starts_with("2d ago ("), "{d}");
+        assert!(d.ends_with(')'), "{d}");
     }
 
     #[test]
