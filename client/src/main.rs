@@ -1414,7 +1414,12 @@ fn show_self(c: &Cfg, k: &Keys) {
                 println!("  claiming {}/{}", p.project, g);
             }
         }
-        Some(p) => println!("\nworking: {}", p.task),
+        // Same line a peer sees when they look at you — your own view said
+        // nothing, so a release looked identical to never having claimed.
+        Some(p) => {
+            println!("\nworking: {}", p.task);
+            println!("  holding nothing — released");
+        }
         None => match mine.iter().max_by_key(|p| p.epoch) {
             Some(p) if !p.touching.is_empty() => {
                 println!("\nno active claim");
@@ -1440,9 +1445,12 @@ fn show_self(c: &Cfg, k: &Keys) {
     }
 
     let peers = crypto::load_peers();
+    // "with active claims" has to mean holding something. A peer that
+    // released is live but holds nothing, and counting it made the summary
+    // contradict the list right above it.
     let live = fetch_plans(c, k)
         .iter()
-        .filter(|p| p.pubkey != k.pubkey() && p.live(t))
+        .filter(|p| p.pubkey != k.pubkey() && p.live(t) && !p.touching.is_empty())
         .count();
     // With no peers, "look someone up" is advertising something that cannot
     // work yet. Point at the exchange instead — that is the actual next step.
