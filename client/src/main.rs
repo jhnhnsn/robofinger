@@ -221,12 +221,17 @@ fn ago(secs: i64) -> String {
     }
 }
 
-/// Civil date-time from a unix timestamp, UTC.
+/// Civil date-time from a unix timestamp, in local time.
 ///
 /// Hand-rolled rather than pulling in `chrono` — this is one line of output in
 /// a log command, not worth a dependency in a binary that sits beside private
 /// keys. Days-since-epoch to y/m/d via the standard civil-from-days algorithm.
+///
+/// Local rather than UTC because these sit beside "10m ago" on the same
+/// screen: a stamp seven hours off from the wall clock reads as a bug even
+/// when it is correct. The offset comes from libc, so DST is handled.
 fn stamp(epoch: i64) -> String {
+    let epoch = epoch + utc_offset(epoch);
     let (days, secs) = (epoch.div_euclid(86_400), epoch.rem_euclid(86_400));
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -242,6 +247,37 @@ fn stamp(epoch: i64) -> String {
         secs / 3600,
         (secs % 3600) / 60
     )
+}
+
+/// Seconds east of UTC at `epoch`, from the platform's zone rules.
+///
+/// Shelling out to `date` beats carrying a tz database, and this runs once
+/// per printed line. Falls back to UTC if it fails, which is the old
+/// behaviour rather than a wrong one.
+fn utc_offset(epoch: i64) -> i64 {
+    let out = std::process::Command::new("date")
+        .args(["-r", &epoch.to_string(), "+%z"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .or_else(|| {
+            // GNU date wants -d @<epoch>; BSD/macOS wants -r.
+            std::process::Command::new("date")
+                .args(["-d", &format!("@{epoch}"), "+%z"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+        });
+    let Some(out) = out else { return 0 };
+    let z = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // "+HHMM" / "-HHMM"
+    if z.len() < 5 {
+        return 0;
+    }
+    let sign = if z.starts_with('-') { -1 } else { 1 };
+    let h: i64 = z[1..3].parse().unwrap_or(0);
+    let m: i64 = z[3..5].parse().unwrap_or(0);
+    sign * (h * 3600 + m * 60)
 }
 
 fn git_toplevel() -> Option<String> {
@@ -1507,7 +1543,10 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
         .find(|p| p.pubkey == peer.pubkey)
     {
         Some(p) if p.live(t) && !p.touching.is_empty() => {
-            println!("\nworking: {}", p.task);
+            // Same shape a post uses — absolute stamp and who wrote it — so
+            // the plan and the posts below it scan as one column.
+            println!("\n{} {}", stamp(p.epoch), p.alias);
+            println!("working: {}", p.task);
             for g in &p.touching {
                 println!("  claiming {}/{}", p.project, g);
             }
@@ -1518,8 +1557,9 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
         // that rotted because the session died means no such thing, and the
         // two used to render identically.
         Some(p) if p.live(t) => {
-            println!("\nworking: {} ({})", p.task, ago(t - p.epoch));
-            println!("  holding nothing — released");
+            println!("\n{} {}", stamp(p.epoch), p.alias);
+            println!("working: {}", p.task);
+            println!("  holding nothing — released {}", ago(t - p.epoch));
         }
         // A claim that aged out reads as "never claimed" unless it is said
         // out loud — which is exactly when someone wonders why a warning
@@ -1527,7 +1567,8 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
         // "done" is a clean exit — the session said so on its way out. Only
         // an unannounced disappearance counts as expired.
         Some(p) if p.status == "done" => {
-            println!("\nnot working on anything right now");
+            println!("\n{} {}", stamp(p.epoch), p.alias);
+            println!("not working on anything right now");
             println!("  finished {}", ago(t - p.epoch));
         }
         Some(p) if !p.touching.is_empty() => {
