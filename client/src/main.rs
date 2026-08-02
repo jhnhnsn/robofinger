@@ -1180,9 +1180,18 @@ fn main() {
         }
         // PreToolUse hook: hook JSON on stdin, advisory warning on stdout.
         "check" => {
-            let mut buf = String::new();
-            let _ = std::io::stdin().read_to_string(&mut buf);
+            // Only read stdin when no path was given. read_to_string blocks
+            // until EOF, so doing it unconditionally hangs forever when a
+            // human runs `robofinger check <path>` at a terminal — stdin is
+            // the tty and nothing ever closes it. Hooks pipe JSON and close,
+            // so they are unaffected either way.
             let path = args.get(1).cloned().or_else(|| {
+                use std::io::IsTerminal;
+                if std::io::stdin().is_terminal() {
+                    return None;
+                }
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf).ok()?;
                 serde_json::from_str::<serde_json::Value>(&buf)
                     .ok()?
                     .pointer("/tool_input/file_path")?
