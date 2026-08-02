@@ -80,6 +80,9 @@ AGENTS
       robofinger claim \"migrate session store\" 'src/auth/**'
       robofinger claim \"fix retry backoff\" 'src/http/**' 'src/net/*.rs'
 
+  wait <path> [--timeout <s>]   block until a peer's claim on it clears
+      robofinger wait src/auth/mod.rs --timeout 600
+
   release                       drop your claims, stay working
   done                          mark finished
   check <path>                  conflict check; reads hook JSON on stdin
@@ -1142,6 +1145,39 @@ fn main() {
             let _ = publish(&c, &k, "done", "", vec![]);
             println!("done");
         }
+        // Block until a path is free. Gives an agent something concrete to run
+        // when it hits a conflict, instead of improvising a polling loop or
+        // giving up and editing anyway.
+        "wait" => {
+            let Some(path) = args.get(1).cloned() else {
+                eprintln!("usage: robofinger wait <path> [--timeout <seconds>]");
+                std::process::exit(2);
+            };
+            let timeout: i64 = args
+                .iter()
+                .position(|a| a == "--timeout")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1800);
+            let start = now();
+            loop {
+                let hits = conflicts(&c, &k, &path);
+                if hits.is_empty() {
+                    println!("{path} is free");
+                    return;
+                }
+                if now() - start >= timeout {
+                    let who: Vec<String> = hits.iter().map(|(p, _)| p.alias.clone()).collect();
+                    eprintln!(
+                        "timed out after {}s — {} still claims {path}",
+                        timeout,
+                        who.join(", ")
+                    );
+                    std::process::exit(1);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(15));
+            }
+        }
         // PreToolUse hook: hook JSON on stdin, advisory warning on stdout.
         "check" => {
             let mut buf = String::new();
@@ -1164,9 +1200,10 @@ fn main() {
                     .map(|(p, g)| format!("{} ({}) claims {}", p.alias, p.task, g))
                     .collect();
                 let msg = format!(
-                    "CLAIM CONFLICT on {}:\n{}\nThis is advisory. Consider working elsewhere, or coordinate first.",
+                    "CLAIM CONFLICT on {}:\n{}\nThis is advisory. Work elsewhere, coordinate, or wait for it to clear:\n  robofinger wait {} --timeout 600\nRun that in the background rather than polling by hand; it exits 0 the moment the path is free.",
                     path,
-                    detail.join("\n")
+                    detail.join("\n"),
+                    path
                 );
                 println!(
                     "{}",
