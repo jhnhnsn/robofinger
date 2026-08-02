@@ -564,8 +564,18 @@ fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
 /// Append a post. Posts carry their own seq space, so posting never disturbs
 /// claim ordering.
 fn post(c: &Cfg, k: &Keys, text: &str, group: Option<&str>) -> Result<(), String> {
-    let subs = crypto::load_peers();
-    let prev = fetch_envelopes(c, k, &subs, "posts", "limit=1")
+    // Ask only for your own posts. `limit=1` over everyone returns whichever
+    // peer posted most recently, and filtering that for your own key finds
+    // nothing as soon as someone else is newer — seq falls back to 1 and the
+    // relay rejects the post 409.
+    let me = [Peer {
+        label: c.alias.clone(),
+        pubkey: k.pubkey(),
+        age_pub: String::new(),
+        home: None,
+        groups: vec![],
+    }];
+    let prev = fetch_envelopes(c, k, &me, "posts", "limit=1")
         .iter()
         .filter(|e| e.pubkey == k.pubkey())
         .map(|e| e.seq)
