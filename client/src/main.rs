@@ -1164,9 +1164,12 @@ fn main() {
                     .map(|(p, g)| format!("{} ({}) claims {}", p.alias, p.task, g))
                     .collect();
                 let msg = format!(
-                    "CLAIM CONFLICT on {}:\n{}\nThis is advisory. Consider working elsewhere, or coordinate first.",
+                    "CLAIM CONFLICT on {}:\n{}\nThis is advisory. Work elsewhere, coordinate, or wait for it to clear — \
+                     poll `robofinger check {}` in the background (it prints nothing once free) and \
+                     carry on with unblocked work meanwhile.",
                     path,
-                    detail.join("\n")
+                    detail.join("\n"),
+                    path
                 );
                 println!(
                     "{}",

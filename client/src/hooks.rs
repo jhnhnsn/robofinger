@@ -24,7 +24,15 @@ See who is working on what: `robofinger list`
 Globs are relative to the repo you're working in. Claims are advisory — a
 CLAIM CONFLICT warning means another agent is working there; decide whether to
 back off or proceed, don't silently ignore it. Claims auto-expire, so a
-forgotten release is not fatal."#;
+forgotten release is not fatal.
+
+Waiting is a third option, and usually the right one when the conflict is on
+the file you actually need. `robofinger check <path>` exits 0 and prints a
+CLAIM CONFLICT line while the path is held, and prints nothing once it clears,
+so poll it in the background rather than sitting idle or asking the user:
+run it under a background monitor and get on with unblocked work in the
+meantime. Don't hand-roll a foreground sleep loop — it blocks the session for
+something that may take minutes."#;
 
 /// Where the hooks get written.
 ///
