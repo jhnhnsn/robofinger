@@ -30,6 +30,12 @@ const WRITES_PER_MIN = 30;
 
 // Posts are append-only, so unlike plans they need their own bound.
 const MAX_POSTS_PER_KEY = 500;
+/// Instance labels are a storage key, so they need a bound like any other.
+const MAX_INSTANCE = 64;
+/// Claims kept per (identity, agent): the live one plus a little history.
+/// Claims republish on every edit, so this is deliberately shallow — the
+/// client only writes a new row when what it holds actually changes.
+const MAX_PLANS_PER_INSTANCE = 3;
 const DEFAULT_POST_LIMIT = 20;
 const MAX_POST_LIMIT = 100;
 
@@ -123,12 +129,25 @@ async function readEnvelope(pubkey, request) {
     return { error: json({ error: "body and sig required" }, 400) };
   }
 
-  // Signature covers pubkey|seq|body, so neither the ordering nor the
-  // ciphertext can be altered by the relay or anyone in between.
-  const ok = await verify(pubkey, env.sig, `${pubkey}|${seq}|${env.body}`);
+  // Which agent on this identity wrote it. Cleartext because it is part of
+  // the storage key — an instance label inside the ciphertext could not stop
+  // two agents from overwriting each other's plan.
+  const instance = typeof env.instance === "string" ? env.instance : "";
+  if (instance.length > MAX_INSTANCE) {
+    return { error: json({ error: `instance too long (max ${MAX_INSTANCE})` }, 400) };
+  }
+
+  // Signature covers pubkey|instance|seq|body, so neither the ordering, the
+  // ciphertext, nor which agent claimed it can be altered in transit. An
+  // empty instance reproduces the pre-0.2 message, so single-agent clients
+  // that predate the field still verify.
+  const msg = instance
+    ? `${pubkey}|${instance}|${seq}|${env.body}`
+    : `${pubkey}|${seq}|${env.body}`;
+  const ok = await verify(pubkey, env.sig, msg);
   if (!ok) return { error: json({ error: "bad signature" }, 401) };
 
-  return { env, seq };
+  return { env, seq, instance };
 }
 
 /// Sliding-window write limit per publisher. Returns a Response when over
@@ -180,14 +199,18 @@ async function getPlans(db, ns, from) {
   const want = fromList(from);
   if (want && want.length === 0) return [];
 
+  // Newest first, so a client reading `plans` sees the live claim before the
+  // history behind it. All instances of a key come back together; the client
+  // groups them.
   const { results } = want
     ? await db
         .prepare(
-          `SELECT body FROM plans WHERE ns=? AND pubkey IN (${want.map(() => "?").join(",")})`,
+          `SELECT body FROM plans WHERE ns=? AND pubkey IN (${want.map(() => "?").join(",")})
+           ORDER BY seq DESC`,
         )
         .bind(ns, ...want)
         .all()
-    : await db.prepare("SELECT body FROM plans WHERE ns=?").bind(ns).all();
+    : await db.prepare("SELECT body FROM plans WHERE ns=? ORDER BY seq DESC").bind(ns).all();
 
   return (results ?? [])
     .map((r) => {
@@ -263,7 +286,7 @@ async function getForward(db, ns, pubkey) {
 /// the row does not exist yet (try the INSERT) or the stored seq was already
 /// >= ours (reject).
 async function putPlan(db, ns, pubkey, request) {
-  const { env, seq, error } = await readEnvelope(pubkey, request);
+  const { env, seq, instance, error } = await readEnvelope(pubkey, request);
   if (error) return error;
 
   const limited = await rateLimit(db, ns, pubkey);
@@ -272,41 +295,55 @@ async function putPlan(db, ns, pubkey, request) {
   const now = Math.floor(Date.now() / 1000);
   const row = JSON.stringify(env);
 
-  const upd = await db
-    .prepare("UPDATE plans SET seq=?, epoch=?, body=? WHERE ns=? AND pubkey=? AND seq < ?")
-    .bind(seq, now, row, ns, pubkey, seq)
-    .run();
-  if (upd.meta.changes > 0) return json({ ok: true, seq });
-
-  // No update: either brand new, or stale. Distinguish by looking.
-  const existing = await db
-    .prepare("SELECT seq FROM plans WHERE ns=? AND pubkey=?")
-    .bind(ns, pubkey)
+  // Monotonic seq per (identity, agent). Two agents on one identity keep
+  // independent counters, so neither one's writes look stale to the other.
+  const cur = await db
+    .prepare("SELECT MAX(seq) AS seq FROM plans WHERE ns=? AND pubkey=? AND instance=?")
+    .bind(ns, pubkey, instance)
     .first();
-  if (existing) {
-    return json({ error: "stale seq", have: existing.seq, got: seq }, 409);
+  if (cur && cur.seq !== null && cur.seq >= seq) {
+    return json({ error: "stale seq", have: cur.seq, got: seq }, 409);
   }
 
-  // Cap distinct publishers per namespace. Only new publishers are counted, so
-  // a full namespace keeps working for its existing members.
-  const { n } = await db
-    .prepare("SELECT COUNT(*) AS n FROM plans WHERE ns=?")
-    .bind(ns)
-    .first();
-  if (n >= MAX_AGENTS_PER_NS) {
-    return json({ error: `namespace full (max ${MAX_AGENTS_PER_NS} agents)` }, 507);
+  // Cap distinct identities per namespace, counting people rather than
+  // agents: every instance of one identity is still one publisher. Only new
+  // publishers are counted, so a full namespace keeps working for its
+  // existing members.
+  if (!cur || cur.seq === null) {
+    const { n } = await db
+      .prepare("SELECT COUNT(DISTINCT pubkey) AS n FROM plans WHERE ns=?")
+      .bind(ns)
+      .first();
+    if (n >= MAX_AGENTS_PER_NS) {
+      return json({ error: `namespace full (max ${MAX_AGENTS_PER_NS} agents)` }, 507);
+    }
   }
 
   try {
     await db
-      .prepare("INSERT INTO plans(ns,pubkey,seq,epoch,body) VALUES(?,?,?,?,?)")
-      .bind(ns, pubkey, seq, now, row)
+      .prepare("INSERT INTO plans(ns,pubkey,instance,seq,epoch,body) VALUES(?,?,?,?,?,?)")
+      .bind(ns, pubkey, instance, seq, now, row)
       .run();
   } catch {
-    // Lost a race with a concurrent insert of the same key. The other write
-    // won; ours is by definition not newer.
+    // UNIQUE(ns,pubkey,instance,seq) rejected it: another write with this
+    // exact seq landed first, so ours is by definition not newer. This is
+    // what makes the read-then-insert above safe without a transaction.
     return json({ error: "stale seq", got: seq }, 409);
   }
+
+  // Keep the live claim plus a little history; drop the rest.
+  await db
+    .prepare(
+      `DELETE FROM plans WHERE ns=? AND pubkey=? AND instance=? AND seq <= (
+         SELECT MIN(seq) FROM (
+           SELECT seq FROM plans WHERE ns=? AND pubkey=? AND instance=?
+           ORDER BY seq DESC LIMIT ?
+         )
+       ) - 1`,
+    )
+    .bind(ns, pubkey, instance, ns, pubkey, instance, MAX_PLANS_PER_INSTANCE)
+    .run();
+
   return json({ ok: true, seq });
 }
 
@@ -396,13 +433,11 @@ export default {
     const url = new URL(request.url);
     const r = route(url.pathname);
     if (!r) {
-      return json(
-        {
-          error:
-            "usage: <base>/{plans|posts} or <base>/{u|plan|post|forward}/<pubkey>",
-        },
-        404,
-      );
+      // Say nothing. A relay is a dumb pipe with no public surface to browse,
+      // and advertising the endpoints to anyone who wanders past only helps
+      // someone deciding whether it is worth probing. Clients are built
+      // against the documented contract, not against this response.
+      return new Response(null, { status: 404 });
     }
 
     // Reject oversized writes on the declared length, before reading the body.

@@ -49,8 +49,9 @@ Two layers. The relay sees the envelope; only recipients see the plan.
 | Field | Purpose |
 |---|---|
 | `pubkey` | Ed25519 identity; the relay accepts writes only to this key's own path |
+| `instance` | which agent on that identity wrote it; omitted when there is only one |
 | `seq` | Monotonic per key; a write with `seq <= stored` is rejected 409 |
-| `sig` | Ed25519 over `pubkey\|seq\|body`, so neither ordering nor ciphertext can be altered in transit |
+| `sig` | Ed25519 over `pubkey\|instance\|seq\|body` (`pubkey\|seq\|body` when `instance` is empty), so neither ordering, ciphertext, nor which agent claimed it can be altered in transit |
 | `body` | base64url of an age ciphertext — opaque to the relay |
 
 ### Plan (encrypted, inside `body`)
@@ -74,9 +75,34 @@ from the `Plan` struct in `client/src/main.rs`, which is the only definition.
 | `touching` | globs, relative to the repo root; empty means no claim |
 | `project` | git repo name, so `src/**` in one repo cannot conflict with another |
 | `eta_s` | staleness budget; a claim is live while `now - epoch < eta_s * 2` |
+| `claimed_at` | when `touching` last changed. Survives a republish, so `epoch - claimed_at` is how long the agent has held these files without touching them |
 
 Every field is `#[serde(default)]`, so an older client reading a newer plan
 drops what it does not recognise rather than failing.
+
+## Several agents, one identity
+
+Two coding agents in the same repo need to hold claims at the same time.
+Give each one a name and they share your identity without overwriting each
+other:
+
+```sh
+ROBOFINGER_INSTANCE=claude-1 robofinger claim "parser" 'src/parse/**'
+ROBOFINGER_INSTANCE=claude-2 robofinger claim "auth"   'src/auth/**'
+```
+
+The relay keys plans on `(ns, pubkey, instance)`, so each agent gets its own
+row and its own `seq`. Conflict checks treat a sibling agent as a peer —
+same key, different instance, still a warning. Peers see one identity with
+several blocks under it, which is what it is.
+
+`instance` is cleartext. It has to be: the relay cannot read the ciphertext,
+so a label hidden inside it could not stop two agents from clobbering one
+row. Anyone in your peer list therefore learns how many agents you run and
+what you called them — pick names accordingly, and note that folder names
+would leak directory structure.
+
+Leaving it unset is the single-agent case, byte-identical to pre-0.2 traffic.
 
 ## Endpoints
 

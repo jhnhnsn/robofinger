@@ -29,6 +29,8 @@ const STALE_MULT: i64 = 2;
 const DEFAULT_ETA: i64 = 1800;
 /// Max peer keys in a `?from=` query before the URL gets too long for the edge.
 const MAX_FROM: usize = 100;
+/// Claims shown per agent: the live one and what it was doing before.
+const CLAIM_HISTORY: usize = 2;
 
 const USAGE: &str = "\
 robofinger — a .plan file for a world with agents.
@@ -135,6 +137,16 @@ struct Plan {
     project: String,
     #[serde(default = "default_eta")]
     eta_s: i64,
+    /// Echoed inside the encrypted body so a reader can label a claim without
+    /// trusting the cleartext envelope.
+    #[serde(default)]
+    instance: String,
+    /// When `touching` last *changed*, as opposed to when this plan was last
+    /// published. A working agent republishes on every edit, so `epoch` says
+    /// nothing about how long a claim has been held — and the difference
+    /// between the two is exactly what "idle" means.
+    #[serde(default)]
+    claimed_at: i64,
 }
 
 fn default_eta() -> i64 {
@@ -150,6 +162,9 @@ impl Plan {
 }
 
 struct Cfg {
+    /// Which agent on this machine this process is. Empty for a single-agent
+    /// install, which is the default and what most people run.
+    instance: String,
     /// Relay base URL. Its path IS the namespace, so
     /// `https://example.com/plan` and `https://example.com/plan/team-a` are
     /// separate rooms with separate storage.
@@ -189,7 +204,15 @@ fn cfg() -> Option<Cfg> {
         .or_else(|| get("ROBOFINGER_AGENT"))
         .or_else(hostname)
         .unwrap_or_else(|| "unknown".into());
-    Some(Cfg { url, alias })
+    // Per-process, so two agents in one repo can differ without separate
+    // config files. Empty is the single-agent case and stays on the pre-0.2
+    // wire format.
+    let instance = get("ROBOFINGER_INSTANCE").unwrap_or_default();
+    Some(Cfg {
+        url,
+        alias,
+        instance,
+    })
 }
 
 fn hostname() -> Option<String> {
@@ -208,6 +231,16 @@ fn now() -> i64 {
 }
 
 /// "4m", "3h", "2d" — compact relative age for list output.
+/// A bare duration, for when the sentence already supplies the tense.
+fn dur(secs: i64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    }
+}
+
 fn ago(secs: i64) -> String {
     match secs {
         s if s < 0 => "just now".into(),
@@ -311,14 +344,33 @@ fn repo_root() -> String {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Envelope {
     pubkey: String,
+    /// Which agent on this identity wrote it. Cleartext because the relay has
+    /// to key on it — an instance label inside the ciphertext could not stop
+    /// two agents from overwriting each other's plan row.
+    ///
+    /// Empty means "the only one", which is what every pre-0.2 client sent and
+    /// what a single-agent install still sends.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    instance: String,
     seq: u64,
     sig: String,
     body: String,
 }
 
 impl Envelope {
+    /// Covers `instance`, so a relay that ignores the field rejects the write
+    /// rather than silently filing it under the wrong agent. An empty instance
+    /// reproduces the pre-0.2 message exactly, so old and new agree on the
+    /// single-agent case.
     fn signed_message(&self) -> String {
-        format!("{}|{}|{}", self.pubkey, self.seq, self.body)
+        if self.instance.is_empty() {
+            format!("{}|{}|{}", self.pubkey, self.seq, self.body)
+        } else {
+            format!(
+                "{}|{}|{}|{}",
+                self.pubkey, self.instance, self.seq, self.body
+            )
+        }
     }
 }
 
@@ -405,12 +457,35 @@ fn decrypt_plan(e: &Envelope, k: &Keys) -> Option<Plan> {
     Some(plan)
 }
 
+/// Every plan row the relay has, newest first: the live claim for each agent
+/// plus the short history behind it.
 fn fetch_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
     let subs = crypto::load_peers();
     fetch_envelopes(c, k, &subs, "plans", "")
         .iter()
         .filter_map(|e| decrypt_plan(e, k))
         .collect()
+}
+
+/// The live plan for each (key, agent) — what "what are you doing" means.
+///
+/// `fetch_plans` returns history too, so anything asking about the present
+/// has to collapse it first. Newest seq wins per agent.
+fn current_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
+    let mut best: std::collections::HashMap<(String, String), Plan> =
+        std::collections::HashMap::new();
+    for p in fetch_plans(c, k) {
+        let key = (p.pubkey.clone(), p.instance.clone());
+        match best.get(&key) {
+            Some(cur) if cur.seq >= p.seq => {}
+            _ => {
+                best.insert(key, p);
+            }
+        }
+    }
+    let mut v: Vec<Plan> = best.into_values().collect();
+    v.sort_by_key(|p| std::cmp::Reverse(p.epoch));
+    v
 }
 
 /// A signed "I moved" pointer, if the peer published one.
@@ -471,11 +546,23 @@ fn publish(
     task: &str,
     touching: Vec<String>,
 ) -> Result<(), String> {
-    let prev_seq = fetch_plans(c, k)
+    // Scope both the sequence and the claim age to this instance. Sharing a
+    // counter between two agents on one identity means each one's write looks
+    // stale to the other, which the relay correctly rejects 409.
+    let mine = current_plans(c, k);
+    let prev = mine
         .iter()
-        .find(|p| p.pubkey == k.pubkey())
-        .map(|p| p.seq)
-        .unwrap_or(0);
+        .find(|p| p.pubkey == k.pubkey() && p.instance == c.instance);
+    let prev_seq = prev.map(|p| p.seq).unwrap_or(0);
+    // Hold claimed_at steady while the same globs are being re-published, so
+    // "claimed 20m ago (idle 8m)" can distinguish a long-held claim from a
+    // long-abandoned one. Changing what you hold starts the clock over.
+    let claimed_at = match prev {
+        Some(p) if p.touching == touching && !touching.is_empty() && p.claimed_at > 0 => {
+            p.claimed_at
+        }
+        _ => now(),
+    };
     let plan = Plan {
         alias: c.alias.clone(),
         pubkey: k.pubkey(),
@@ -489,6 +576,8 @@ fn publish(
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_ETA),
+        instance: c.instance.clone(),
+        claimed_at,
     };
 
     // Claims deliberately ignore groups: a claim some peers cannot see is a
@@ -529,6 +618,7 @@ fn recipients(k: &Keys, group: Option<&str>) -> Vec<age::x25519::Recipient> {
 fn send(c: &Cfg, k: &Keys, kind: &str, seq: u64, body: String) -> Result<(), String> {
     let mut env = Envelope {
         pubkey: k.pubkey(),
+        instance: c.instance.clone(),
         seq,
         sig: String::new(),
         body,
@@ -552,6 +642,8 @@ fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
         task: new_addr.to_string(),
         touching: vec![],
         project: String::new(),
+        instance: c.instance.clone(),
+        claimed_at: 0,
         eta_s: 0,
     };
     let body = crypto::encrypt(
@@ -592,6 +684,8 @@ fn post(c: &Cfg, k: &Keys, text: &str, group: Option<&str>) -> Result<(), String
         touching: vec![],
         project: project(),
         eta_s: 0,
+        instance: c.instance.clone(),
+        claimed_at: 0,
     };
     let body = crypto::encrypt(
         &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
@@ -620,10 +714,14 @@ fn conflicts(c: &Cfg, k: &Keys, path: &str) -> Vec<(Plan, String)> {
     let rel = &relative_to_root(path);
     let here = project();
     let t = now();
-    let plans = fetch_plans(c, k);
+    let plans = current_plans(c, k);
     let mut hits = Vec::new();
     for p in plans {
-        if p.pubkey == k.pubkey() || p.project != here || !p.live(t) {
+        // Your own key, but a different agent on it, is a real conflict —
+        // two Claudes in one repo is the case this exists for. Only skip
+        // yourself.
+        let is_me = p.pubkey == k.pubkey() && p.instance == c.instance;
+        if is_me || p.project != here || !p.live(t) {
             continue;
         }
         for g in &p.touching {
@@ -1040,7 +1138,7 @@ fn main() {
                     let seen: std::collections::HashMap<String, i64> = match cfg() {
                         Some(c) => {
                             let mut m = std::collections::HashMap::new();
-                            for pl in fetch_plans(&c, &k) {
+                            for pl in current_plans(&c, &k) {
                                 let e = m.entry(pl.pubkey.clone()).or_insert(pl.epoch);
                                 if pl.epoch > *e {
                                     *e = pl.epoch;
@@ -1060,7 +1158,7 @@ fn main() {
                     // Live claims, indexed by key, so each peer can show what
                     // it is holding right now.
                     let claims: std::collections::HashMap<String, Plan> = match cfg() {
-                        Some(c) => fetch_plans(&c, &k)
+                        Some(c) => current_plans(&c, &k)
                             .into_iter()
                             // Keep live plans holding nothing too: a peer who
                             // released on purpose is worth a line, and dropping
@@ -1167,8 +1265,30 @@ fn main() {
             } else {
                 vec![]
             };
+            // A claim replaces your whole list rather than adding to it, so
+            // an incremental `claim` silently drops what came before. Say what
+            // is being let go.
+            let t = now();
+            let dropped: Vec<String> = current_plans(&c, &k)
+                .into_iter()
+                .find(|p| p.pubkey == k.pubkey() && p.instance == c.instance && p.live(t))
+                .map(|p| {
+                    p.touching
+                        .into_iter()
+                        .filter(|g| !globs.contains(g))
+                        .collect()
+                })
+                .unwrap_or_default();
             match publish(&c, &k, "working", &task, globs.clone()) {
-                Ok(_) => println!("claimed {globs:?} ({task})"),
+                Ok(_) => {
+                    println!("claimed {globs:?} ({task})");
+                    if !dropped.is_empty() {
+                        eprintln!(
+                            "  released {} — a claim replaces, it does not add",
+                            dropped.join(", ")
+                        );
+                    }
+                }
                 Err(e) => {
                     eprintln!("publish failed: {e}");
                     std::process::exit(1);
@@ -1176,9 +1296,9 @@ fn main() {
             }
         }
         "release" => {
-            let task = fetch_plans(&c, &k)
+            let task = current_plans(&c, &k)
                 .iter()
-                .find(|p| p.pubkey == k.pubkey())
+                .find(|p| p.pubkey == k.pubkey() && p.instance == c.instance)
                 .map(|p| p.task.clone())
                 .unwrap_or_default();
             let _ = publish(&c, &k, "working", &task, vec![]);
@@ -1216,7 +1336,17 @@ fn main() {
             if !hits.is_empty() {
                 let detail: Vec<String> = hits
                     .iter()
-                    .map(|(p, g)| format!("{} ({}) claims {}", p.alias, p.task, g))
+                    .map(|(p, g)| {
+                        // Name the agent, not just the machine: two Claudes on
+                        // one identity are both "macbook", and which one is
+                        // holding the file is the whole question.
+                        let who = if p.instance.is_empty() {
+                            p.alias.clone()
+                        } else {
+                            format!("{}/{}", p.alias, p.instance)
+                        };
+                        format!("{} ({}) claims {}", who, p.task, g)
+                    })
                     .collect();
                 let msg = format!(
                     "CLAIM CONFLICT on {}:\n{}\nThis is advisory. Work elsewhere, coordinate, or wait for it to clear — \
@@ -1241,7 +1371,7 @@ fn main() {
         // SessionStart hook: surface live peer claims into the agent's context.
         "start" => {
             let t = now();
-            let lines: Vec<String> = fetch_plans(&c, &k)
+            let lines: Vec<String> = current_plans(&c, &k)
                 .into_iter()
                 .filter(|p| p.pubkey != k.pubkey() && p.live(t))
                 .flat_map(|p| {
@@ -1450,6 +1580,59 @@ fn ask(question: &str, default: Option<&str>) -> Option<String> {
     }
 }
 
+/// Render one plan the way a post renders: stamp, who, then the detail.
+///
+/// `who` carries the instance when there is one, so two agents on a single
+/// identity are told apart in the one place that matters — the line you read
+/// when deciding whether to touch a file.
+fn show_plan(p: &Plan, t: i64, suffix: &str) {
+    let who = if p.instance.is_empty() {
+        p.alias.clone()
+    } else {
+        format!("{}/{}", p.alias, p.instance)
+    };
+    println!("\n{} {}{}", stamp(p.epoch), who, suffix);
+
+    if !p.live(t) {
+        if p.status == "done" {
+            println!("finished {}", ago(t - p.epoch));
+        } else if !p.touching.is_empty() {
+            println!(
+                "{} expired {} — session ended without releasing",
+                p.touching.join(", "),
+                ago(t.saturating_sub(p.epoch + p.eta_s * STALE_MULT))
+            );
+        } else {
+            println!("not working on anything right now");
+        }
+        return;
+    }
+
+    println!("working: {}", p.task);
+    if p.touching.is_empty() {
+        println!("  holding nothing — released {}", ago(t - p.epoch));
+        return;
+    }
+    for g in &p.touching {
+        println!("  claiming {}/{}", p.project, g);
+    }
+    // claimed_at survives a republish; epoch does not. The gap between them
+    // is how long the agent has been quiet while still holding the files,
+    // which is the thing you actually want to know before waiting on it.
+    let held = if p.claimed_at > 0 {
+        p.claimed_at
+    } else {
+        p.epoch
+    };
+    let idle = t - p.epoch;
+    if idle >= 120 {
+        // ago() carries its own "ago", so the idle figure is a bare duration.
+        println!("  claimed {} (idle {})", ago(t - held), dur(idle));
+    } else {
+        println!("  claimed {}", ago(t - held));
+    }
+}
+
 /// `robofinger` with no arguments: your own status, the way `finger` with no
 /// arguments showed the local machine.
 fn show_self(c: &Cfg, k: &Keys) {
@@ -1462,30 +1645,34 @@ fn show_self(c: &Cfg, k: &Keys) {
     println!("{} @ {}", c.alias, c.url);
     println!("{}", k.pubkey());
 
-    match mine.iter().find(|p| p.live(t)) {
-        Some(p) if !p.touching.is_empty() => {
-            println!("\nworking: {}", p.task);
-            for g in &p.touching {
-                println!("  claiming {}/{}", p.project, g);
-            }
+    // Group by agent. One instance is the ordinary case and renders exactly
+    // as before; several means two Claudes sharing this identity, and each
+    // gets its own block.
+    let mut by_instance: std::collections::HashMap<String, Vec<Plan>> =
+        std::collections::HashMap::new();
+    for p in &mine {
+        by_instance
+            .entry(p.instance.clone())
+            .or_default()
+            .push(p.clone());
+    }
+    let mut names: Vec<String> = by_instance.keys().cloned().collect();
+    names.sort();
+
+    if mine.is_empty() {
+        println!("\nno active claim");
+    }
+    for name in names {
+        let mut rows = by_instance.remove(&name).unwrap_or_default();
+        rows.sort_by_key(|p| std::cmp::Reverse(p.seq));
+        for (i, p) in rows.iter().take(CLAIM_HISTORY).enumerate() {
+            let suffix = match (i, name == c.instance) {
+                (0, true) if !name.is_empty() => "  (this one)",
+                (0, _) => "",
+                _ => "  (previous)",
+            };
+            show_plan(p, t, suffix);
         }
-        // Same line a peer sees when they look at you — your own view said
-        // nothing, so a release looked identical to never having claimed.
-        Some(p) => {
-            println!("\nworking: {}", p.task);
-            println!("  holding nothing — released");
-        }
-        None => match mine.iter().max_by_key(|p| p.epoch) {
-            Some(p) if !p.touching.is_empty() => {
-                println!("\nno active claim");
-                println!(
-                    "  {} expired {}",
-                    p.touching.join(", "),
-                    ago(t.saturating_sub(p.epoch + p.eta_s * STALE_MULT))
-                );
-            }
-            _ => println!("\nno active claim"),
-        },
     }
 
     let posts: Vec<Plan> = fetch_posts(c, k, 3)
@@ -1503,7 +1690,7 @@ fn show_self(c: &Cfg, k: &Keys) {
     // "with active claims" has to mean holding something. A peer that
     // released is live but holds nothing, and counting it made the summary
     // contradict the list right above it.
-    let live = fetch_plans(c, k)
+    let live = current_plans(c, k)
         .iter()
         .filter(|p| p.pubkey != k.pubkey() && p.live(t) && !p.touching.is_empty())
         .count();
@@ -1557,48 +1744,33 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
         println!("  accept with: robofinger peer update {}", peer.label);
     }
 
-    match fetch_plans(c, k)
+    let theirs: Vec<Plan> = fetch_plans(c, k)
         .into_iter()
-        .find(|p| p.pubkey == peer.pubkey)
-    {
-        Some(p) if p.live(t) && !p.touching.is_empty() => {
-            // Same shape a post uses — absolute stamp and who wrote it — so
-            // the plan and the posts below it scan as one column.
-            println!("\n{} {}", stamp(p.epoch), p.alias);
-            println!("working: {}", p.task);
-            for g in &p.touching {
-                println!("  claiming {}/{}", p.project, g);
+        .filter(|p| p.pubkey == peer.pubkey)
+        .collect();
+
+    if !theirs.is_empty() {
+        let mut by_instance: std::collections::HashMap<String, Vec<Plan>> =
+            std::collections::HashMap::new();
+        for p in &theirs {
+            by_instance
+                .entry(p.instance.clone())
+                .or_default()
+                .push(p.clone());
+        }
+        let mut names: Vec<String> = by_instance.keys().cloned().collect();
+        names.sort();
+        for name in names {
+            let mut rows = by_instance.remove(&name).unwrap_or_default();
+            rows.sort_by_key(|p| std::cmp::Reverse(p.seq));
+            for (i, p) in rows.iter().take(CLAIM_HISTORY).enumerate() {
+                show_plan(p, t, if i == 0 { "" } else { "  (previous)" });
             }
-            println!("  since {}", ago(t - p.epoch));
         }
-        // Live and working, holding nothing: they let go on purpose. Say so.
-        // A deliberate release means the files are safe to pick up; a claim
-        // that rotted because the session died means no such thing, and the
-        // two used to render identically.
-        Some(p) if p.live(t) => {
-            println!("\n{} {}", stamp(p.epoch), p.alias);
-            println!("working: {}", p.task);
-            println!("  holding nothing — released {}", ago(t - p.epoch));
-        }
-        // A claim that aged out reads as "never claimed" unless it is said
-        // out loud — which is exactly when someone wonders why a warning
-        // stopped firing.
-        // "done" is a clean exit — the session said so on its way out. Only
-        // an unannounced disappearance counts as expired.
-        Some(p) if p.status == "done" => {
-            println!("\n{} {}", stamp(p.epoch), p.alias);
-            println!("not working on anything right now");
-            println!("  finished {}", ago(t - p.epoch));
-        }
-        Some(p) if !p.touching.is_empty() => {
-            println!("\nnot working on anything right now");
-            println!(
-                "  last claim {} expired {} — session ended without releasing",
-                p.touching.join(", "),
-                ago(t.saturating_sub(p.epoch + p.eta_s * STALE_MULT))
-            );
-        }
-        Some(_) => println!("\nnot working on anything right now"),
+    }
+    match theirs.first() {
+        // Already rendered above, with its history.
+        Some(_) => {}
         None if has_unreadable(c, k, &peer.pubkey, "plans") => {
             // Not "not to you" — publishing goes to a recipient list, not to
             // individuals, so this is a missing key exchange rather than an
@@ -1659,6 +1831,8 @@ mod tests {
             touching: touching.iter().map(|s| s.to_string()).collect(),
             project: project.into(),
             eta_s: 1800,
+            instance: String::new(),
+            claimed_at: 0,
         }
     }
 
