@@ -355,5 +355,6 @@ robofinger init --url https://<name>.<you>.workers.dev/plan
 ## More
 
 - [Reference](docs/REFERENCE.md) — wire format, security model, limits, self-hosting
+- [Changelog](CHANGELOG.md) — what changed in each release
 
 [MIT](LICENSE)
