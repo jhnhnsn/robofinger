@@ -1212,7 +1212,15 @@ fn main() {
                             // worth a line — silence here looks like a peer
                             // whose claim quietly rotted.
                             if pl.touching.is_empty() && pl.live(t) && !pl.task.is_empty() {
-                                println!("               released — working on {}", pl.task);
+                                // Tasks often already start with "working",
+                                // and "working on working X" reads like a bug.
+                                let d = pl.task.trim();
+                                let lead = if d.to_ascii_lowercase().starts_with("working") {
+                                    ""
+                                } else {
+                                    "working on "
+                                };
+                                println!("               released — {lead}{d}");
                             }
                         }
                         // Surface a move, but never follow it automatically: a
@@ -1260,6 +1268,12 @@ fn main() {
     match cmd {
         "claim" => {
             let task = args.get(1).cloned().unwrap_or_default();
+            // A mistyped flag must not become a published claim description.
+            if task.starts_with('-') {
+                eprintln!("usage: robofinger claim \"<task>\" '<glob>' ['<glob>' …]");
+                eprintln!("  the task comes first, quoted; globs after it");
+                std::process::exit(2);
+            }
             let globs: Vec<String> = if args.len() > 2 {
                 args[2..].to_vec()
             } else {
@@ -1585,7 +1599,7 @@ fn ask(question: &str, default: Option<&str>) -> Option<String> {
 /// `who` carries the instance when there is one, so two agents on a single
 /// identity are told apart in the one place that matters — the line you read
 /// when deciding whether to touch a file.
-fn show_plan(p: &Plan, t: i64, suffix: &str) {
+fn show_plan(p: &Plan, t: i64, suffix: &str, current: bool) {
     let who = if p.instance.is_empty() {
         p.alias.clone()
     } else {
@@ -1625,7 +1639,9 @@ fn show_plan(p: &Plan, t: i64, suffix: &str) {
         p.epoch
     };
     let idle = t - p.epoch;
-    if idle >= 120 {
+    // Only the live row can be idle. A superseded claim was not abandoned —
+    // it was replaced — so its "idle" would just be the age of the row.
+    if current && idle >= 120 {
         // ago() carries its own "ago", so the idle figure is a bare duration.
         println!("  claimed {} (idle {})", ago(t - held), dur(idle));
     } else {
@@ -1671,7 +1687,7 @@ fn show_self(c: &Cfg, k: &Keys) {
                 (0, _) => "",
                 _ => "  (previous)",
             };
-            show_plan(p, t, suffix);
+            show_plan(p, t, suffix, i == 0);
         }
     }
 
@@ -1764,7 +1780,7 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
             let mut rows = by_instance.remove(&name).unwrap_or_default();
             rows.sort_by_key(|p| std::cmp::Reverse(p.seq));
             for (i, p) in rows.iter().take(CLAIM_HISTORY).enumerate() {
-                show_plan(p, t, if i == 0 { "" } else { "  (previous)" });
+                show_plan(p, t, if i == 0 { "" } else { "  (previous)" }, i == 0);
             }
         }
     }

@@ -10,3 +10,22 @@ macbook waited for bdrm's claim on this path to clear before writing:
 
 That is the whole handoff, and it is the first one that has run between two
 machines without either side coordinating out of band.
+
+Second run, 2026-08-03, both machines on v0.2.0 against the migrated relay:
+
+  bdrm claimed TESTFILE33          conflict fired, "claimed 7s ago"
+  macbook polled in the background rather than sitting idle
+  bdrm went quiet holding it       "claimed 2m ago (idle 2m)"
+  bdrm released explicitly         "released — working on ..."
+  macbook claimed it, wrote this
+
+Two things showed up here that the first run could not:
+
+The idle indicator distinguished "still editing" from "stopped, still
+holding" — bdrm's claim froze at 2m while the file stayed locked. Under the
+old display both looked identical, and you had to watch the number across
+two checks to tell.
+
+Claim history crossed machines. bdrm's previous plan rendered as (previous)
+underneath its live one, which means claimed_at and the append-only plan
+rows survive the wire between two hosts, not just two processes on one.
