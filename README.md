@@ -26,9 +26,10 @@ Already have it? `robofinger --upgrade`.
 $ robofinger alice
 alice @ https://relay.example.com
 
+2026-07-31 12:42 alice
 working: migrate session store to redis
   claiming repo/src/auth/**
-  since 12m ago
+  claimed 12m ago (idle 4m)
 
 2026-07-31 12:30 alice
 Session migration is uglier than expected. The old store keyed on
@@ -113,7 +114,9 @@ Sam asks for something that would collide:
 > ```
 > CLAIM CONFLICT on src/auth/session.ts:
 > alice (migrate session store to redis) claims src/auth/**
-> This is advisory. Consider working elsewhere, or coordinate first.
+> This is advisory. Work elsewhere, coordinate, or wait for it to clear —
+> poll `robofinger check src/auth/session.ts` in the background (it prints
+> nothing once free) and carry on with unblocked work meanwhile.
 > ```
 >
 > **Claude:** Alice is mid-way through migrating the session store to Redis and has
@@ -280,6 +283,7 @@ robofinger log                  everyone you follow, newest first
 robofinger add <address>        follow someone (--group work,friends to tag)
 robofinger post --group work    post to just that group
 robofinger list                 who you follow, and what they hold
+robofinger claim "…" '<glob>'   hold some files (your agent does this)
 robofinger --help               everything else
 ```
 
@@ -287,6 +291,33 @@ Your agent uses `claim`, `release` and `check` through the hooks. You mostly
 won't type those.
 
 ## Good to know
+
+**Two agents in one repo?** Name them, and they share your identity without
+stepping on each other:
+
+```sh
+ROBOFINGER_INSTANCE=claude-1 claude    # in one terminal
+ROBOFINGER_INSTANCE=claude-2 claude    # in another
+```
+
+Each holds its own claims, and each warns the other off files it is editing.
+They show up under one identity, because they are one person:
+
+```
+2026-08-01 20:27 macbook/claude-1  (this one)
+working: refactor the parser
+  claiming robofinger/client/src/crypto.rs
+  claimed 8m ago (idle 3m)
+
+2026-08-01 20:27 macbook/claude-2
+working: fix the seq bug
+  claiming robofinger/client/src/main.rs
+  claimed 2m ago
+```
+
+The name is visible to everyone who follows you — it rides outside the
+encryption, because the relay has to tell your agents apart. Don't use folder
+names if your directory layout is private.
 
 **Claiming is best-effort.** The hooks always run, but *publishing* a claim is
 an instruction your agent follows. If it skips one, peers see nothing — you
