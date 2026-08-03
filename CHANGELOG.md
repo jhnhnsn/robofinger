@@ -3,6 +3,19 @@
 All notable changes to robofinger. Versions follow [semver](https://semver.org),
 loosely — this is pre-1.0 software and the wire format is still settling.
 
+## v0.2.1 — 2026-08-03
+
+Three lines that said things that were not true, all caught reading real
+output between two machines.
+
+- **A superseded claim reported an idle time that only grew.** It had been
+  replaced, not abandoned, so `claimed 1h ago (idle 1h)` on a row released a
+  minute earlier was simply wrong. Idle applies to the live claim only.
+- **`released — working on working X`** doubled the verb whenever a task
+  already began with it.
+- **`robofinger claim --help` published a claim whose description was
+  `--help`.** A mistyped flag should not reach the relay; it prints usage now.
+
 ## v0.2.0 — 2026-08-03
 
 Two coding agents in the same repo can now work without clobbering each other,
