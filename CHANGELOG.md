@@ -3,6 +3,145 @@
 All notable changes to robofinger. Versions follow [semver](https://semver.org),
 loosely — this is pre-1.0 software and the wire format is still settling.
 
+## v0.5.1 — 2026-08-27
+
+- **A wedged relay no longer hangs the agent.** ureq has no timeout by default.
+  A relay that *refuses* a connection was always survivable — it fails fast and
+  the hooks fail open — but one that accepts and never answers (a half-open
+  connection, a wedged worker, a captive portal) blocked forever. Since `check`
+  and `start` run inside a coding agent's session, that hung the agent.
+
+  Every request now goes through one `agent()` constructor carrying a
+  `timeout_global`, which covers reading the response body too — a reply that
+  starts and then stalls would slip past a connect-only timeout, and that is
+  where the hang actually was. Commands a person is watching get 10s; the hooks
+  get 2s, because a command makes several requests in sequence and the
+  wall-clock worst case is a multiple of the per-request bound. Against a
+  healthy local relay a hook takes ~40ms, so the headroom is enormous.
+
+  CI now runs the hooks against a socket that accepts and never answers.
+  A constant would not prove the bound is wired to the actual requests.
+
+## v0.5.0 — 2026-08-27
+
+0.4 gave the agents a way to talk. This makes sure they are ever told about it.
+
+Before this, the one instruction that made robofinger function — "claim the
+paths before you edit them" — reached an agent only if a human copy-pasted a
+snippet out of terminal output into `CLAUDE.md`. That step was unenforced and
+invisible when skipped, and an agent that missed it never claimed: `touching`
+stayed empty, every peer's conflict check passed trivially, and the tool did
+nothing while looking exactly like it worked.
+
+- **`ROBOFINGER.md`**, written into the repo root by `init` and `hooks
+  install`. The full workflow — claim, release, ask, escalate — as a file the
+  team commits rather than a string in the binary. Named for the tool rather
+  than appended to `CLAUDE.md` so it is agent-agnostic and survives the user
+  rewriting their own memory file.
+- **A `## Team conventions` section that is yours.** Everything below it is
+  carried across verbatim when robofinger refreshes its own text; everything
+  above is regenerated. A file whose heading you removed is treated as a first
+  install rather than an error.
+- **Hooks install by default, at project scope** — `<repo>/.claude/settings.json`,
+  a repo-local file a team commits, which does not need the consent that
+  writing the user's global config does. `--no-hooks` opts out; `--hooks-user`
+  still selects account scope; `--hooks` is kept as a no-op because it is in
+  everyone's shell history. Defaulting to off meant every scripted or agent-run
+  install produced a silent no-op, and the old prompt never fired without a TTY.
+- **Session start warns about your own unreleased claims** — the ones left by a
+  session that ended without releasing. The deadman switch frees them
+  eventually, but "eventually" is up to an hour of teammates treating a dead
+  session as live, and this agent is the only one that can say what actually
+  happened to the files. A 15-minute grace period keeps a resumed session
+  quiet; a warning that cries wolf gets ignored when it is real.
+- Deleted `prompt_install` and its TTY handling, ~58 lines made dead by the
+  install default.
+
+## v0.4.0 — 2026-08-26
+
+0.3 gave agents a shared record. This gives them a way to talk about it, and a
+rule for when to stop and involve a person.
+
+- **`robofinger ask [--to <peer>] "<text>"`** — raise something the team should
+  settle rather than deciding alone. A distinct entry kind, not a note, so
+  peers surface it at session start instead of hoping somebody reads the feed.
+  With `--to` it is marked FOR YOU in that agent's session; without, the whole
+  team sees it.
+- **`robofinger answer --to <peer> [--re <id>] "<text>"`** — reply. `--re`
+  quotes the question back to the asker, backfilling it from the relay when the
+  cursor has already moved past it, because an answer with no sight of the
+  question is unreadable.
+- **`--to` on `post`** too, and `--ids` on `since`/`log` so an id can be quoted.
+- **SessionStart now injects the whole picture**: open questions addressed to
+  this agent, what peers hold right now, and what they did since it last looked
+  — capped, with the remainder counted and pointed at, since this lands in a
+  context window the agent still needs for its work. It advances the cursor, so
+  a backlog is not re-shown every session. Previously it showed live claims
+  only, and the timeline was opt-in: an agent got it only if it read CLAUDE.md
+  and remembered.
+- **Escalation cases are named, not left to judgment.** The session block and
+  every CLAIM CONFLICT now say when to involve a human — neither agent
+  yielding, a claim past its ETA that may be a dead session, an answer that
+  would undo a teammate's work — and to state the default and what the
+  alternatives cost. "Use your judgment" produces agents that either never ask
+  or ask constantly.
+- **CLAIM CONFLICT lists four options** in order, with the holder's name filled
+  into a ready-to-run `ask --to`.
+- Addressing resolves against alias, instance or `alias/instance`,
+  case-insensitively — the two ends routinely disagree about what a peer is
+  called. `--to` naming nobody you follow warns rather than failing, since the
+  label is the publisher's own.
+- Flag parsing no longer strips a flag's text back out of the message, which
+  broke as soon as the message mentioned the flag — the shell has already eaten
+  the quotes by then.
+
+## v0.3.0 — 2026-08-26
+
+Claims answer "is anyone in this file right now". They could not answer "what
+has my teammate been doing", because a claim is ephemeral by design and
+`release` drops it. This release adds the second half.
+
+- **Every claim and release lands on a timeline.** Same append-only stream as
+  `robofinger post`, so notes and events interleave in one chronological order
+  rather than living in two places that have to be merged. Entries carry the
+  paths the event covered and the task description, capped at 280 characters.
+- **`robofinger since`** — what peers have done since you last looked. Keeps a
+  watermark in `~/.config/robofinger/seen` and advances it, so a second run is
+  empty. This is the query an agent wants at the start of a task, and the one
+  git cannot answer until someone commits.
+- **`robofinger log --since <2h|epoch>`** — an explicit window. A read, not a
+  consumption: it never moves the watermark, so the two do not interfere.
+- **`robofinger release --note "<what happened>"`** — the claim description only
+  ever recorded intent. Without a note the entry records how long the claim was
+  held instead.
+- **`?after=` on the relay**, mirroring the existing `?before=`. No schema
+  change, so no migration. The watermark is kept per relay: row ids are assigned
+  by the relay and are not comparable across them, and a single global cursor
+  would silently cut a slice out of a peer hosted elsewhere.
+- **Automatic per-session instance names.** Two agents in one repo no longer
+  need `ROBOFINGER_INSTANCE` set by hand — each session is detected and named
+  (`claude-1`, `claude-2`) from `CLAUDE_CODE_SESSION_ID` or `TERM_SESSION_ID`,
+  both of which survive subprocess inheritance. A pid would not: `PreToolUse`
+  runs as a fresh process, so every session would flag a conflict against
+  itself.
+- **`list` was hiding claims.** A peer running several agents holds several
+  claims, and the map was keyed on pubkey alone — so whichever landed last won
+  and the rest vanished. The hidden ones were exactly the claims you might
+  collide with.
+- **Instances are bounded, 10 per key.** Since every session now mints one, the
+  per-instance trim (scoped to a single instance) would never touch retired
+  ones and a `plans` fetch would grow with lifetime session count. Evicted by
+  most recent activity, ranked on wall-clock `epoch` rather than `seq` — `seq`
+  restarts at 1 per instance, so it measures how *chatty* an agent was, not how
+  recent, and would evict the tab that just wrote.
+- **`robofinger log | head` no longer panics** on the closed pipe.
+- Only a claim that actually changed writes a timeline entry. A working agent
+  republishes on every edit; journalling each one would exhaust the 30/min
+  write budget in under a minute and the relay would start refusing real claims.
+- Repositioned around agent-to-agent coordination. The `.plan`/finger framing
+  is gone from the README; `post` stays, as a note a robot leaves rather than a
+  blog.
+
 ## v0.2.1 — 2026-08-03
 
 Three lines that said things that were not true, all caught reading real

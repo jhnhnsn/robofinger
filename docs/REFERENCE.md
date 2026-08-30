@@ -76,20 +76,92 @@ from the `Plan` struct in `client/src/main.rs`, which is the only definition.
 | `project` | git repo name, so `src/**` in one repo cannot conflict with another |
 | `eta_s` | staleness budget; a claim is live while `now - epoch < eta_s * 2` |
 | `claimed_at` | when `touching` last changed. Survives a republish, so `epoch - claimed_at` is how long the agent has held these files without touching them |
+| `kind` | timeline entries only: `claim` \| `release` \| `done` \| `ask` \| `answer`. Absent on a hand-written note, which is also what every pre-0.3 post carries |
+| `globs` | timeline entries only: the paths the event concerned. Not `touching`, which is the *live* claim and is empty on exactly the event that most needs to name paths — a release |
+| `to` | who the entry is addressed to, as the *publisher's* label for them. Advisory routing, **not access control** — see below |
+| `reply_to` | the `id` of the entry this answers, so an exchange can be followed |
 
 Every field is `#[serde(default)]`, so an older client reading a newer plan
 drops what it does not recognise rather than failing.
 
+### Addressing
+
+`to` changes whose session flags an entry as needing a reply. It does **not**
+change who can read it: an addressed entry is still encrypted to everyone you
+follow, so the team sees the exchange rather than two agents negotiating in
+private. Anyone who can read the entry can read who it names.
+
+It carries a *label*, not a pubkey, because that is what a human or an agent
+types. The two ends routinely disagree about what a peer is called — `add --as`
+exists precisely to override a peer's suggested label — so `addressed_to_me`
+accepts any of: the recipient's alias, its instance, or `alias/instance`, all
+case-insensitively. Deliberately generous: a missed match means an agent never
+learns a question was for it, while a false match costs one extra line read.
+
+Escalation to a human is not encoded in the wire format. It is a rule stated in
+the SessionStart block and in every conflict warning — two agents wanting one
+path with neither yielding, a claim well past its ETA, an answer that would undo
+a teammate's work. Stating the cases rather than saying "use your judgment" is
+deliberate: judgment alone produces agents that either never ask or ask
+constantly, and which one varies by model and by session.
+
+## How agents are instructed
+
+Three channels, in descending order of reliability:
+
+| Channel | Fires | Content |
+|---|---|---|
+| `PreToolUse` → `robofinger check` | before every Edit/Write | CLAIM CONFLICT plus four options, with the holder's name interpolated into a runnable `ask --to` |
+| `SessionStart` → `robofinger start` | session start | questions addressed to this agent, live peer claims, timeline since last look, this agent's own unreleased claims |
+| `ROBOFINGER.md` | whenever an agent reads the repo | the full workflow, plus whatever the team added |
+
+`ROBOFINGER.md` is written into the repo root by `init` and by `hooks install`.
+It is a file rather than a string the user pastes somewhere: the paste step was
+unenforced and invisible when skipped, and an agent that never reads it never
+claims — so `touching` stays empty, every peer's check passes trivially, and
+the tool silently does nothing while appearing to work.
+
+It is named for the tool rather than appended to `CLAUDE.md` so it is
+agent-agnostic, survives the user rewriting their own memory file, and can be
+committed for the team. Everything from the `## Team conventions` heading
+onward is the user's and is carried across verbatim on upgrade; everything
+above it is regenerated. A file whose heading the user removed is treated as a
+first install rather than an error.
+
+Hooks default to **project scope** (`<repo>/.claude/settings.json`) — a
+repo-local file a team commits, which does not need the consent that writing
+the user's global `~/.claude/settings.json` does. `--hooks-user` selects
+account scope; `--no-hooks` skips both. Defaulting to off meant every scripted
+or agent-run install produced a silent no-op.
+
+Escalation to a human is not in the wire format. It is a rule stated in the
+SessionStart block, in every conflict warning, and in `ROBOFINGER.md` — two
+agents wanting one path with neither yielding, a claim well past its ETA, an
+answer that would undo a teammate's work. Naming the cases rather than saying
+"use your judgment" is deliberate: judgment alone produces agents that either
+never ask or ask constantly, and which one varies by model and by session.
+
 ## Several agents, one identity
 
-Two coding agents in the same repo need to hold claims at the same time.
-Give each one a name and they share your identity without overwriting each
-other:
+Two coding agents in the same repo need to hold claims at the same time, so
+each session is given its own instance name automatically:
 
 ```sh
-ROBOFINGER_INSTANCE=claude-1 robofinger claim "parser" 'src/parse/**'
-ROBOFINGER_INSTANCE=claude-2 robofinger claim "auth"   'src/auth/**'
+ROBOFINGER_INSTANCE      explicit name — wins when set
+CLAUDE_CODE_SESSION_ID   one Claude Code session
+TERM_SESSION_ID          one terminal session, any tool
+(none)                   headless: one instance, pre-0.2 wire format
 ```
+
+The first of these that is set becomes the session key, which is mapped to a
+short name (`claude-1`, `claude-2`) in `$ROBOFINGER_HOME/instances`.
+Reservations are refreshed on use and expire after 24h, so a killed agent's
+name is reclaimed rather than climbing forever.
+
+Both signals survive subprocess inheritance, which is the property that
+matters: the `PreToolUse` hook runs as a *fresh process* and must resolve to
+the same instance as the agent holding the claim. A pid would not — every
+session would flag a conflict against itself.
 
 The relay keys plans on `(ns, pubkey, instance)`, so each agent gets its own
 row and its own `seq`. Conflict checks treat a sibling agent as a peer —
@@ -102,7 +174,9 @@ row. Anyone in your peer list therefore learns how many agents you run and
 what you called them — pick names accordingly, and note that folder names
 would leak directory structure.
 
-Leaving it unset is the single-agent case, byte-identical to pre-0.2 traffic.
+With no session signal at all — CI, cron, a pipe — the instance stays empty
+and traffic is byte-identical to pre-0.2. A pre-0.2 peer that publishes with
+no instance still conflicts normally with a named one.
 
 ## Endpoints
 
@@ -111,7 +185,7 @@ All paths are relative to the relay base URL, whose path is the namespace.
 | Method | Path | Does |
 |---|---|---|
 | GET | `/plans?from=<keys>` | current claims for the listed keys |
-| GET | `/posts?from=<keys>&limit=N&before=<id>` | newest-first posts |
+| GET | `/posts?from=<keys>&limit=N&before=<id>&after=<id>` | newest-first timeline entries |
 | GET | `/u/<pubkey>` | one identity: plans, posts and forward together |
 | GET | `/forward/<pubkey>` | a signed "I moved" pointer, if any |
 | PUT | `/plan/<pubkey>` | publish a claim |
@@ -121,10 +195,54 @@ All paths are relative to the relay base URL, whose path is the namespace.
 `?from=` is applied in SQL against the `pubkey` primary key, so a client never
 pays to read plans it would discard.
 
+`?before=` pages backwards through history; `?after=` is the mirror, and is
+what `robofinger since` sends. Both keep the `id DESC` ordering, so an `after`
+with more new rows than `limit` returns the *newest* window rather than the
+oldest — a caller advances its cursor to the highest id it saw and calls again.
+Paging forward from the oldest instead would make the common case (nothing, or
+a handful, new) walk the whole backlog to reach the present.
+
+`robofinger since` advances its watermark past everything it fetched; `since
+--peer <label>` and `log --since <when>` are filtered reads and do not, so a
+narrow query can never swallow entries a later broad one would have shown.
+
+Row ids come from the relay, so they are only comparable **within one relay**.
+A client that follows peers on several relays keeps one watermark per relay,
+in `~/.config/robofinger/seen` — a single global cursor would silently cut an
+arbitrary slice out of a peer hosted elsewhere.
+
 A client only ever asks a relay for keys whose home *is* that relay. This is a
 security boundary as well as an optimisation: signatures are not bound to a
 host, so a hostile relay can replay a peer's real (or stale) envelope onto
 itself — but it is never asked for that key, so the copy is never fetched.
+
+## Timeouts
+
+Every relay request is bounded. ureq has no timeout by default, which is
+survivable against a relay that *refuses* a connection — that fails fast, and
+the hooks fail open — but not against one that accepts and never answers: a
+half-open connection, a wedged worker, a captive portal. `check` and `start`
+run inside a coding agent's session, so an unbounded request there hangs the
+agent itself.
+
+| Budget | Applies to | Value |
+|---|---|---|
+| `NET_TIMEOUT` | commands a person is waiting on | 10s |
+| `HOOK_TIMEOUT` | `check`, `start`, `end` | 2s |
+
+The bound is `timeout_global`, covering the whole request including reading the
+body — a response that starts and then stalls slips past a connect-only
+timeout, and that is where the hang actually was.
+
+Hooks get a much tighter budget because a command makes several requests in
+sequence — one per relay, and a claim reads before it writes — so the
+wall-clock worst case is a multiple of the per-request bound. Two seconds is
+far above the ~100–300ms a healthy relay takes (a local relay answers a hook in
+~40ms), so a real answer still arrives.
+
+Every request goes through one `agent()` constructor, so a new call site cannot
+forget the timeout. CI asserts it against a real socket that accepts and never
+answers — a constant alone would not prove the bound is wired to the requests.
 
 ## Security
 
@@ -240,7 +358,9 @@ trip.
 | Requests | 300/min per IP | evaluated before any Durable Object is instantiated, so namespace-spraying cannot cost a DO per name |
 | Writes | 30/min per pubkey | billed to a key that cost something to establish, not a rotatable IP |
 | Agents | 200 per namespace | bounds storage and rows-read; existing members are never locked out |
-| Posts | 500 per key | append-only needs a bound; oldest are evicted first |
+| Timeline entries | 500 per key | append-only needs a bound; oldest are evicted first. Claims, releases and notes share this budget, so a busy agent's timeline is finite and old entries fall off |
+| Claims | 3 per instance | the live one plus a little history |
+| Instances | 10 per key | sessions are auto-named, so retired ones would accumulate; least recently active evicted first |
 | `?from=` keys | 100 | beyond this the URL exceeds what the edge accepts; clients fall back to an unfiltered fetch |
 
 ## Cloudflare free tier
@@ -255,8 +375,8 @@ trip.
 
 `check` fires on every Edit/Write and dominates everything else. At ~500 edits
 per agent per day that is roughly 250 agents before the request limit binds.
-Storage is one row per agent plus up to 500 posts each, so the 5GB limit is
-unreachable in practice.
+Storage is bounded at up to 30 claim rows per key (10 instances × 3) plus 500
+posts each, so the 5GB limit is unreachable in practice.
 
 ## Self-hosting
 
@@ -283,3 +403,19 @@ cd client && cargo test
 The path tests are regression guards: target files usually do not exist yet
 (Write creates them), and on macOS git reports `/private/tmp` while hooks pass
 `/tmp`. Both silently disabled conflict detection during development.
+
+So is `only_a_changed_claim_is_worth_an_entry`. A working agent republishes its
+claim on every edit; if each republish wrote a timeline entry, the 30/min write
+budget would be gone in under a minute and the relay would start refusing the
+claims that matter — a logging feature breaking the coordination one.
+
+The relay's SQL is checked against real sqlite, because a `wrangler --dry-run`
+does not execute a single query:
+
+```sh
+cd relay/cloudflare-d1 && ./test_trim.sh && ./test_cursor.sh
+```
+
+`test_trim.sh` pins the instance-eviction ranking key; `test_cursor.sh` pins
+`?after=`/`?before=` paging. Both duplicate the SQL from `src/index.js` rather
+than importing it — keep them in sync.

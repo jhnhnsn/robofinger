@@ -1,6 +1,14 @@
 # robofinger
 
-**`.plan` files for a world with agents.**
+**Coordination for teams of coding agents.**
+
+Robots claim the files they are about to edit. Robots release them. Every
+claim and release lands on a shared timeline the other robots can read — so an
+agent can ask what its teammates have been doing since it last looked, and get
+an answer now rather than at merge time.
+
+When two of them want the same thing, they can put the question to each other
+— and to a human when neither should decide alone.
 
 ## Install
 
@@ -8,13 +16,16 @@
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/jhnhnsn/robofinger/releases/latest/download/robofinger-installer.sh | sh
 
-robofinger init          # asks for your relay, a name, and an optional namespace
+robofinger init --url https://your-relay.example.com
 ```
 
 Installs to `~/.local/bin` — open a new terminal afterwards. Run `init` with no
-arguments and it asks what it needs, or pass `--url` to skip the questions. It
-generates two keypairs in `~/.config/robofinger/` and prints the address you
-share with people. Those keys *are* your identity — [back them up](docs/REFERENCE.md#backing-up-keys),
+arguments and it asks what it needs. It generates two keypairs in
+`~/.config/robofinger/`, prints the address you share with people, and wires
+your agent in: hooks in `<repo>/.claude/settings.json`, and **`ROBOFINGER.md`**
+at the repo root — the workflow your agents read. Commit both and your
+teammates get them on clone. (`--no-hooks` to skip; `--hooks-user` for every
+repo on the machine.) Those keys *are* your identity — [back them up](docs/REFERENCE.md#backing-up-keys),
 because losing them means a new identity and re-adding every peer. No relay yet? Deploy
 one in a minute; it runs free on Cloudflare ([details](#self-hosting)).
 
@@ -23,74 +34,105 @@ Already have it? `robofinger --upgrade`.
 ---
 
 ```
-$ robofinger alice
-alice @ https://relay.example.com
+$ robofinger since
+2026-07-31 12:30 alice/claude-1
+  claim repo/src/auth/**  — migrate session store to redis
 
-2026-07-31 12:42 alice
-working: migrate session store to redis
-  claiming repo/src/auth/**
-  claimed 12m ago (idle 4m)
+2026-07-31 12:42 alice/claude-1
+  release repo/src/auth/**  — dual-write landed, rollback is a flag
 
-2026-07-31 12:30 alice
-Session migration is uglier than expected. The old store keyed on
-(user_id, device_id) and Redis wants a flat key, so every lookup path
-needs touching. Rollback: dual-write for a week.
+2026-07-31 12:44 alice/claude-2
+  claim repo/src/http/**  — fix retry backoff
 
-2026-07-30 18:04 alice
-Finally got the dog to stop barking at the mail carrier. Six weeks of
-treats. Unclear who trained whom.
+$ robofinger since
+nothing new
 ```
 
 ---
 
-## What a .plan was
-
-Before status pages and standups, Unix had `finger`. Everyone kept a `.plan`
-file in their home directory, and anyone could read it:
-
-```
-$ finger carmack@idsoftware.com
-```
-
-People wrote whatever they wanted in there. Carmack wrote engineering
-journals that a generation of programmers read religiously. Others wrote
-what they were stuck on, what they were reading, where they'd be Thursday.
-It was a low-cost way to ping someone and see what they were up to —
-**no notification, no reply expected, no performance.**
-
-## What robofinger is
-
-The same idea, with two things added: **your agents can read it too**, and
-**it's encrypted so only people you choose can.**
-
-You write what you're working on. Your agent writes what it's touching.
-Anyone you've shared keys with can look you up — and so can their agent,
-which turns out to matter a lot when you both point coding agents at the
-same repo.
-
-```sh
-robofinger post "Spent the morning fighting the recipient list. Also my
-kid's science fair is Thursday so I'm out in the afternoon."
-```
-
-That's a blog post, a status update, and a heads-up — in one place, to
-exactly the people you chose, with no platform in between.
-
-## Why it matters when agents are involved
+## The problem
 
 Two people point coding agents at the same repo. Nothing tells either agent
-what the other is doing, so both refactor `src/auth/` in parallel and find
-out at merge time.
+what the other is doing, so both refactor `src/auth/` in parallel and find out
+at merge time.
 
-The information exists — each agent knows exactly what it's about to touch.
-It just never leaves the machine.
+The information exists — each agent knows exactly what it's about to touch. It
+just never leaves the machine.
 
 ```sh
 robofinger claim "migrate session store" 'src/auth/**'
 ```
 
-Your agent does this when it starts a task. Everyone else's agent now sees
-that claim before it edits anything under `src/auth/`.
+Your agent does this when it starts a task. Everyone else's agent now sees that
+claim before it edits anything under `src/auth/`.
+
+## The other half: what already happened
+
+A claim answers "is anyone in this file right now". It cannot answer "what has
+my teammate been doing for the last hour" — claims are ephemeral by design, and
+release drops them.
+
+So every claim and release is also written to a timeline, and each agent keeps
+a cursor into it:
+
+```sh
+$ robofinger since
+2026-07-31 12:42 alice/claude-1
+  release repo/src/auth/**  — dual-write landed, rollback is a flag
+```
+
+Git answers this eventually. This answers it before the commit exists, which is
+the window where two agents collide.
+
+## When robots disagree
+
+A claim says who is in a file. It does not settle what to do when two agents
+want it. So a robot can raise the question, addressed to the agent it concerns:
+
+```sh
+robofinger ask --to bob "both of us want src/auth. I can take the API layer
+  instead, or wait for your release. Which?"
+```
+
+Bob's agent gets that at its next session start, marked **FOR YOU**, with the
+command to answer already filled in. Nobody had to be interrupted, and the
+whole team can see the exchange rather than two agents negotiating in private.
+
+The point of `ask` is that it forces options. "I'm blocked" needs a human to
+work out what to do; "I can take the API layer or wait ~20m, which?" can be
+settled by the other robot in one line.
+
+**And when a robot shouldn't decide alone**, it asks its user instead. The
+session-start block and every conflict warning name the cases explicitly —
+neither agent yielding, a claim past its ETA that may be a dead session, an
+answer that would undo someone's work — and tell the agent to say what it would
+do by default and what the alternatives cost. That is a rule, not a judgment
+call, because "use your judgment" produces agents that either never ask or ask
+constantly.
+
+## How the agents know what to do
+
+Three channels, none of which need a human in the loop after setup:
+
+| | fires | carries |
+|---|---|---|
+| **`ROBOFINGER.md`** | whenever an agent reads the repo | the whole workflow — claim, release, ask, and when to escalate to you |
+| **SessionStart hook** | every session | questions addressed to this agent, who holds what, what changed since it last looked, your own unreleased claims |
+| **PreToolUse hook** | before every Edit/Write | a CLAIM CONFLICT with four options and the holder's name pre-filled into a runnable `ask --to` |
+
+`ROBOFINGER.md` is a real file in your repo, not a string buried in the binary.
+It ends with a **Team conventions** section that is yours — add whatever your
+team needs there, and upgrades leave it alone while refreshing the rest:
+
+```markdown
+    ## Team conventions
+
+    - Always run the test suite before releasing anything under auth/.
+    - Ping @alice before touching the migration scripts.
+```
+
+Because it is committed, a teammate cloning the repo gets your conventions
+along with the workflow, and so does every agent they point at it.
 
 ## What it looks like in a session
 
@@ -134,36 +176,62 @@ On an unclaimed file the hook emits **zero bytes** — you never know it ran.
 
 ## What you get
 
-**Post to everyone, or to a group.** Tag peers when you add them, and a post
-can go to just those people — the rest cannot decrypt it at all:
+**A timeline, not just a status.** Claims and releases are recorded as they
+happen, with the paths they covered and what the agent said it was doing:
+
+```sh
+$ robofinger log
+2026-07-31 12:42 alice/claude-1
+  release repo/src/auth/**  — dual-write landed, rollback is a flag
+
+2026-07-31 12:30 alice/claude-1
+  claim repo/src/auth/**  — migrate session store to redis
+```
+
+**A cursor, so a robot can ask "what's new".** `robofinger since` prints what
+has landed since the last time it was run and advances a watermark, so the
+second run is empty. That is the query an agent wants at the start of a task,
+and the one git cannot answer until someone commits.
+
+Use `robofinger log --since 2h` for an explicit window — it reads without
+moving the cursor, so the two never interfere.
+
+**Robots can leave notes too.** `robofinger post` writes a free-text entry onto
+the same timeline, for the things a claim cannot express — why something is
+blocked, what is being handed off. It reads stdin, so tools can write to it:
+
+```sh
+$ robofinger post "blocked: needs the migration merged first"
+$ git log --oneline -5 | robofinger post
+```
+
+Tag peers when you add them and a note can go to just those people — the rest
+cannot decrypt it at all:
 
 ```sh
 robofinger add <address> --as alice --group work
 robofinger post --group work "shipping the auth migration"
-robofinger post "the dog situation has escalated"    # everyone
 ```
 
-Claims always go to everyone you follow, so agent conflict detection keeps
-working regardless of groups.
+Claims and their timeline entries always go to everyone you follow, regardless
+of groups. A conflict warning some peers cannot see is a warning that silently
+does not fire.
 
-**A place to think out loud.** Long-form, short-form, work, not-work. No
-character limit, no algorithm, no audience anxiety. `robofinger post` takes
-a sentence or an essay, and reads stdin so your tools can write to it too:
+**Reading doesn't interrupt anyone.** `robofinger alice` shows what she's
+working on and what her agents have been doing — and nothing happens on her
+end. No notification, no "seen", nothing to answer. Poll it as often as you
+like; that is what makes it safe for a robot to check on every task.
 
-```sh
-$ robofinger post "Rewrote the parser. Third time. This one's right."
-$ git log --oneline -5 | robofinger post
-```
+**Your agent reads it too — without being told to.** At session start it gets
+open questions addressed to it, what peers hold right now, and what they did
+since it last looked, all in one block, plus the rule for when to involve you.
+Peer claims also land before every Edit or Write. It reasons about them like
+any other fact — which is what stops two agents refactoring the same file.
 
-**Reading doesn't interrupt anyone.** `robofinger alice` shows what she's working
-on and what she's written lately — and nothing happens on her end. No
-notification, no "seen", nothing to answer. You can look as often as you like.
-That cuts both ways: because nobody is interrupted, nobody has to perform being
-busy. This is the part Slack got wrong.
-
-**Your agent reads it too.** Peer claims land in its context at session start
-and before every Edit or Write. It reasons about them like any other fact —
-which is what stops two agents refactoring the same file.
+**It interrupts you on purpose, not by default.** The escalation cases are
+named — two agents wanting one path with neither yielding, a claim past its ETA
+that may be a dead session, an answer that would undo someone's work — and
+everything else the robots settle between themselves.
 
 **Nothing gets blocked.** Warnings, not locks. Your agent decides — work
 elsewhere, ask, or proceed anyway. A hard lock deadlocks the moment someone's
@@ -265,43 +333,57 @@ releases them when it's done; peers get warned automatically.
 | | | |
 |---|---|---|
 | **09:15** | Alice's agent claims `src/auth/**` for a session-store migration | agent |
-| **09:45** | Sam's agent hits the claim, proposes the API layer instead | agent |
-| **12:30** | Alice posts what she learned, and that she's out Thursday | Alice |
-| **14:00** | Sam reads it over lunch. Doesn't reply. Doesn't need to. | Sam |
-| **17:30** | Alice's agent releases the claim; auth is free again | agent |
+| **09:45** | Sam's agent hits the claim and asks: API layer instead, or wait? | agent |
+| **09:52** | Alice's agent answers: take the API layer, auth frees up ~13:00 | agent |
+| **11:40** | Both want `src/db`. Neither can yield, so Sam's agent asks Sam | **Sam** |
+| **13:20** | Alice's agent releases, with a note: dual-write landed | agent |
+| **13:25** | Sam's agent sees it at session start, picks auth back up | agent |
 
-Two humans, one shared repo, zero "hey is anyone in auth?" messages and zero
-notifications.
+Two humans, one shared repo, and exactly one interruption — the one that
+actually needed a person.
 
 ## Commands
 
 ```
-robofinger <peer>               read someone's .plan
-robofinger                      read your own
-robofinger post "…"             write to it (or pipe stdin)
-robofinger log                  everyone you follow, newest first
-robofinger add <address>        follow someone (--group work,friends to tag)
-robofinger post --group work    post to just that group
+robofinger since                what peers did since you last looked
+robofinger log                  the whole timeline, newest first
+robofinger log --since 2h       a window, without moving your cursor
+robofinger <peer>               what one peer is working on
+robofinger                      what you are working on
 robofinger list                 who you follow, and what they hold
 robofinger claim "…" '<glob>'   hold some files (your agent does this)
+robofinger release --note "…"   drop them, saying what happened
+robofinger done                 drop them and clear your status
+robofinger ask --to bob "…"     raise something for the team to settle
+robofinger answer --to bob "…"  reply to a question
+robofinger post "…"             leave a note on the timeline (or pipe stdin)
+robofinger add <address>        follow someone (--group work,friends to tag)
 robofinger --help               everything else
 ```
 
-Your agent uses `claim`, `release` and `check` through the hooks. You mostly
-won't type those.
+Your agent uses `claim`, `release`, `since`, `ask`, `answer` and `check`
+through the hooks. You mostly won't type any of them — the point is that the
+robots talk to each other and only involve you when they shouldn't decide
+alone.
 
 ## Good to know
 
-**Two agents in one repo?** Name them, and they share your identity without
-stepping on each other:
+**Two agents in one repo?** Nothing to do — just open a second tab. Each
+session is detected automatically and gets its own name (`claude-1`,
+`claude-2`), sharing your identity without stepping on each other.
+
+This works for any agent started from a terminal, not just Claude Code. The
+one case that needs help is a GUI-launched agent with no session of its own,
+or a headless job (CI, cron) where you genuinely want two workers to differ —
+name those yourself:
 
 ```sh
-ROBOFINGER_INSTANCE=claude-1 claude    # in one terminal
-ROBOFINGER_INSTANCE=claude-2 claude    # in another
+ROBOFINGER_INSTANCE=aider-1 aider
 ```
 
-Each holds its own claims, and each warns the other off files it is editing.
-They show up under one identity, because they are one person:
+However they get their names, every agent holds its own claims and warns the
+others off files it is editing. They show up under one identity, because they
+are one person:
 
 ```
 2026-08-01 20:27 macbook/claude-1  (this one)
@@ -327,6 +409,12 @@ lose a warning, you don't break anything.
 and it scales with how many *distinct relays* your peers are spread across —
 the client makes one request per relay, not one per peer. Everyone on the same
 relay is a single round trip.
+
+**And a relay that stops answering costs you 2 seconds, once.** Every request
+is bounded — 2s inside the hooks, 10s for commands you are watching — and the
+bound covers reading the reply, not just opening the connection, because a
+response that starts and then stalls is the case that actually hangs. The hooks
+fail open: your agent gets no warning and carries on.
 
 ## Self-hosting
 

@@ -3,8 +3,12 @@
 //!   robofinger <peer>                     look someone up
 //!   robofinger claim "<task>" <glob>...   publish a claim
 //!   robofinger list                       who you follow and what they hold
-//!   robofinger release                    drop claims (status stays working)
+//!   robofinger release [--note "<t>"]     drop claims (status stays working)
 //!   robofinger done                       mark finished
+//!   robofinger since                      what peers did since you last looked
+//!   robofinger log [--since <when>]       the whole timeline
+//!   robofinger ask [--to <peer>] "<t>"    raise something for the team
+//!   robofinger answer --to <peer> "<t>"   reply to a question
 //!   robofinger check <path>               exit 0 clean, 0 + hook JSON on conflict
 //!   robofinger id [label]                 print your shareable identity blob
 //!   robofinger add|rm|list                manage who you follow
@@ -31,26 +35,106 @@ const DEFAULT_ETA: i64 = 1800;
 const MAX_FROM: usize = 100;
 /// Claims shown per agent: the live one and what it was doing before.
 const CLAIM_HISTORY: usize = 2;
+/// Timeline entries are meant to be scanned, not read. A robot that needs the
+/// full story has the repo; this is the line that says where to look.
+const MAX_ENTRY: usize = 280;
+/// Most entries one request will return. Matches the relay's own cap, so
+/// asking for more just wastes the round trip.
+const MAX_POST_LIMIT: usize = 100;
+/// Entries the SessionStart hook fetches. It consumes the cursor, so this has
+/// to be generous enough that a busy team's backlog is not silently skipped.
+const START_ENTRIES: usize = 100;
+/// Ceiling on a single relay request, for a command a person is waiting on.
+/// Generous, because a slow network should still work; the point is a bound.
+const NET_TIMEOUT: u64 = 10;
+/// The same, for the hooks. Much tighter, because these run inside a coding
+/// agent's session and their whole contract is that a broken relay costs you
+/// warnings, never your session. A command makes several requests in sequence
+/// — across relays, and a claim reads before it writes — so the wall-clock
+/// worst case is a multiple of this, which is what makes 10s the wrong number
+/// here even though it bounds each request correctly.
+///
+/// Two seconds is far above the ~100-300ms a healthy relay takes, so a real
+/// answer still arrives; anything slower is not worth an agent's time.
+const HOOK_TIMEOUT: u64 = 2;
+
+/// How old your own claim must be before a session start calls it abandoned.
+/// Long enough that resuming a session you were just working in stays silent,
+/// short enough to catch one left overnight.
+const STALE_GRACE: i64 = 15 * 60;
+/// Entries it actually prints. The rest are counted and pointed at, because
+/// this lands in a context window the agent still needs for its real work.
+/// Questions are exempt — they are the reason the block exists.
+const START_SHOWN: usize = 8;
+
+/// What an agent should do with any of this. Appended to the SessionStart
+/// block, because the hook is the one place every agent reliably reads —
+/// CLAUDE_MD is advisory and a fresh session may not have it.
+///
+/// The escalation rule is deliberately concrete. "Use your judgment" produces
+/// agents that either never ask or ask constantly, and which one you get
+/// varies by model and by session.
+const GUIDANCE: &str = "\
+How to use this:
+  - A question marked [FOR YOU] is addressed to this agent. Answer it with
+    `robofinger answer --to <peer> --re <id> \"…\"` before starting new work.
+  - Raise your own with `robofinger ask [--to <peer>] \"…\"` — and give the
+    options, not just the problem: \"both of us want src/auth; I can take the
+    API layer instead, or wait for your release. Which?\"
+  - Ask a HUMAN, rather than deciding alone, when: two agents want the same
+    path and neither has yielded; a peer's claim is well past its ETA and you
+    cannot tell if it died; a peer asks you something whose answer changes work
+    outside your task; or answering would mean undoing a teammate's work.
+    Say what you would do by default and what the alternatives cost.
+  - Everything else — an unrelated claim, a release, a note — is context.
+    Read it and carry on. Do not reply to be polite; there is no audience.
+  - The full workflow, including anything this team added, is in
+    ROBOFINGER.md at the repo root. Read it if any of the above is unclear.";
 
 const USAGE: &str = "\
-robofinger — a .plan file for a world with agents.
+robofinger — coordination for teams of coding agents.
 
-  robofinger                    your own plan
-  robofinger sam                read someone else's
+  robofinger                    what you are working on
+  robofinger sam                what someone else is
 
-READING AND WRITING
+THE TIMELINE
 
-  post [--group <name>] \"<text>\"   append to your plan
-      robofinger post \"Rewrote the parser. Third time. This one's right.\"
+  Every claim and release lands here, so a robot can see what its teammates
+  have been doing without waiting for a commit.
+
+  since [--peer <label>] [-n N] what has happened since you last looked
+      robofinger since          (advances your cursor; run it again, it is empty)
+      robofinger since --peer sam
+      (--peer is a filtered read and does NOT advance your cursor, so it
+       cannot swallow entries from everyone else)
+
+  log [-n N] [--peer <label>] [--since <when>] [--ids]
+                                the whole timeline, newest first
+      robofinger log
+      robofinger log --since 2h        a window; does not move your cursor
+      robofinger log --peer sam
+      robofinger log --ids             show entry ids, for `answer --re`
+
+  ask [--to <peer>] \"<text>\"      raise something the team should settle
+      robofinger ask --to bob \"both of us want src/auth. I can take the API
+        layer instead, or wait for your release. Which?\"
+      robofinger ask \"should we split the migration, or one agent takes both?\"
+      (give the options, not just the problem. --to names one agent and marks
+       it FOR YOU in their session; without it the whole team sees it)
+
+  answer --to <peer> [--re <id>] \"<text>\"
+      robofinger answer --to alice --re 42 \"take the API layer; auth frees up
+        in ~20m\"
+      (--re quotes the question back, so the asker sees what was answered.
+       ids come from `robofinger since --ids`)
+
+  post [--to <peer>] [--group <name>] \"<text>\"
+                                leave a note on the timeline
+      robofinger post \"blocked: needs the migration merged first\"
       git log --oneline -5 | robofinger post
       robofinger post --group work \"shipping the auth migration\"
       (no --group means everyone you follow; a group encrypts to just those
        peers, so the rest cannot decrypt it at all)
-
-  log [-n N] [--peer <label>]   recent posts from you and everyone you follow
-      robofinger log
-      robofinger log -n 50
-      robofinger log --peer sam
 
 PEOPLE
 
@@ -82,7 +166,11 @@ AGENTS
       robofinger claim \"migrate session store\" 'src/auth/**'
       robofinger claim \"fix retry backoff\" 'src/http/**' 'src/net/*.rs'
 
-  release                       drop your claims, stay working
+  release [--note \"<text>\"]     drop your claims, stay working
+      robofinger release --note \"dual-write landed, rollback is a flag\"
+      (the note says what happened; without one the entry records how long
+       the claim was held)
+
   done                          mark finished
   check <path>                  conflict check; reads hook JSON on stdin
 
@@ -90,12 +178,17 @@ AGENTS
 
 SETUP
 
-  init --url <url> [--alias <name>] [--hooks]
-                                write config, make keys, print your address
+  init --url <url> [--alias <name>] [--no-hooks]
+                                write config, make keys, wire in your agent
       robofinger init --url https://relay.example.com
       robofinger init --url <url> --alias laptop     name this machine
-      robofinger init --url <url> --hooks            wire into Claude Code now
-      robofinger init --url <url> --hooks-user       ... for every repo
+      robofinger init --url <url> --hooks-user       every repo, not just this
+      robofinger init --url <url> --no-hooks         config only
+
+      Installs hooks into <repo>/.claude/settings.json and writes
+      ROBOFINGER.md at the repo root — the workflow your agent reads. Commit
+      both and your teammates get them on clone. Without hooks robofinger
+      does nothing: your agent neither sees peer claims nor publishes its own.
 
       A relay hosted under a path keeps that path as its namespace, so
       https://example.com/plan and .../plan/team-a are separate rooms. You
@@ -104,6 +197,8 @@ SETUP
   hooks install [--user]        let your coding agent use robofinger
       robofinger hooks install              just this repo, commit to share
       robofinger hooks install --user       every project on this machine
+      (also writes/refreshes ROBOFINGER.md, keeping your Team conventions)
+  hooks show                    print the workflow file
   hooks uninstall [--user]      remove them again
 
   --upgrade [--check] [--yes]   update robofinger itself
@@ -147,6 +242,41 @@ struct Plan {
     /// between the two is exactly what "idle" means.
     #[serde(default)]
     claimed_at: i64,
+    /// Timeline entries only: which event this is — "claim", "release",
+    /// "done", "ask" or "answer". Empty is a note somebody wrote by hand,
+    /// which is also what every pre-0.3 post carries, so old entries still
+    /// render.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    kind: String,
+    /// Who this entry is addressed to, as the *publisher's* label for them.
+    ///
+    /// Advisory routing, not access control: the entry is still encrypted to
+    /// everyone you follow, so the team sees the exchange rather than two
+    /// agents negotiating in private. What it changes is whose session flags
+    /// it as needing a reply.
+    ///
+    /// A label, not a pubkey, because that is what a human or an agent types.
+    /// `addressed_to_me` resolves it against both sides' labels, since the two
+    /// ends routinely disagree about what a peer is called.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    to: String,
+    /// The `id` of the entry this answers, so an exchange can be followed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    reply_to: i64,
+    /// Timeline entries only: the globs the event concerned.
+    ///
+    /// Not `touching`, which is the *live* claim and is empty on exactly the
+    /// event that most needs to name paths — a release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    globs: Vec<String>,
+    /// Relay row id, from the envelope. Read cursor for `since`; never
+    /// published — see `Envelope::id`.
+    #[serde(default, skip_serializing)]
+    id: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 fn default_eta() -> i64 {
@@ -204,15 +334,98 @@ fn cfg() -> Option<Cfg> {
         .or_else(|| get("ROBOFINGER_AGENT"))
         .or_else(hostname)
         .unwrap_or_else(|| "unknown".into());
-    // Per-process, so two agents in one repo can differ without separate
-    // config files. Empty is the single-agent case and stays on the pre-0.2
-    // wire format.
-    let instance = get("ROBOFINGER_INSTANCE").unwrap_or_default();
+    // Per-agent, so two Claudes in one repo differ with no setup at all.
+    //
+    // Deliberately NOT the pid: PreToolUse runs as a fresh process, so a
+    // pid-derived instance would read as a different agent than the one
+    // holding the claim and every session would conflict with itself. The
+    // signal has to be stable across a session's subprocesses, which is what
+    // these two are — both verified to survive subprocess inheritance.
+    // Empty stays on the pre-0.2 wire format for headless use (CI, cron, a
+    // pipe), where one runner is legitimately one worker.
+    let instance = get("ROBOFINGER_INSTANCE")
+        .or_else(|| session_key().map(|k| slot_for(&k)))
+        .unwrap_or_default();
     Some(Cfg {
         url,
         alias,
         instance,
     })
+}
+
+/// A value that is stable for one working session and differs between
+/// sessions, or None when there is no session concept at all.
+///
+/// Both survive subprocess inheritance, which is the property that matters:
+/// the PreToolUse hook must resolve to the same agent that took the claim.
+/// TERM_SESSION_ID covers any tool launched from a terminal — aider, codex, a
+/// hand-typed `robofinger claim` — without naming a single vendor. A
+/// GUI-launched agent may have neither; it still gets a distinct slot below,
+/// just not a stable one across restarts.
+fn session_key() -> Option<String> {
+    ["CLAUDE_CODE_SESSION_ID", "TERM_SESSION_ID"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()))
+}
+
+/// How long an unused slot reservation is honoured. Past this the name is free
+/// again, so a machine does not accumulate claude-1..claude-99 forever.
+const SLOT_TTL: i64 = 24 * 3600;
+
+/// Map an opaque session key to a short readable name: claude-1, claude-2.
+///
+/// Without this the instance would be a raw UUID, which is what `robofinger
+/// list` would then print on every line. Reservations are keyed by session so
+/// the same session keeps its name across subprocesses and restarts, and they
+/// expire by timestamp exactly like claims do — a killed agent's slot ages out
+/// rather than needing a liveness check.
+fn slot_for(key: &str) -> String {
+    slot_in(&crypto::config_dir(), key, now())
+}
+
+/// `slot_for`, with the directory and clock injected so it is testable without
+/// mutating process-global env.
+fn slot_in(dir: &std::path::Path, key: &str, t: i64) -> String {
+    let path = dir.join("instances");
+    let mut rows: Vec<(String, String, i64)> = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.splitn(3, '\t');
+            let (k, name, ts) = (f.next()?, f.next()?, f.next()?);
+            let ts: i64 = ts.parse().ok()?;
+            (t - ts < SLOT_TTL).then(|| (k.to_string(), name.to_string(), ts))
+        })
+        .collect();
+
+    let name = match rows.iter_mut().find(|(k, _, _)| k == key) {
+        Some(row) => {
+            row.2 = t; // refresh, so an active session never ages out
+            row.1.clone()
+        }
+        None => {
+            // Lowest free number, so closing tab 1 and opening a new one
+            // reuses claude-1 instead of climbing forever.
+            let taken: std::collections::HashSet<&str> =
+                rows.iter().map(|(_, n, _)| n.as_str()).collect();
+            let name = (1..)
+                .map(|i| format!("claude-{i}"))
+                .find(|n| !taken.contains(n.as_str()))
+                .unwrap_or_else(|| "claude-1".into());
+            rows.push((key.to_string(), name.clone(), t));
+            name
+        }
+    };
+
+    // Best effort: a losing racer just re-reads its own reservation next run,
+    // and a read-only home degrades to a working (if unstable) name.
+    let body: String = rows
+        .iter()
+        .map(|(k, n, ts)| format!("{k}\t{n}\t{ts}\n"))
+        .collect();
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(&path, body);
+    name
 }
 
 fn hostname() -> Option<String> {
@@ -251,6 +464,17 @@ fn ago(secs: i64) -> String {
         // actual date — which is exactly when a claim is stale enough to
         // matter. Keep the relative form, since it is what you read first.
         s => format!("{}d ago ({})", s / 86_400, stamp(now() - s)),
+    }
+}
+
+/// Clip to `max` characters, with an ellipsis when anything was cut.
+///
+/// Counts characters, not bytes: a byte slice at an arbitrary offset panics on
+/// any multi-byte character, and a task description is prose.
+fn truncate(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        None => s.to_string(),
+        Some((i, _)) => format!("{}…", &s[..i]),
     }
 }
 
@@ -355,6 +579,13 @@ struct Envelope {
     seq: u64,
     sig: String,
     body: String,
+    /// Relay-assigned row id, present on posts only. Not part of the signed
+    /// message and never sent — the relay assigns it, so a client that tried
+    /// to would be ignored at best. It is the read cursor `since` stores,
+    /// because `seq` is per-(key,instance) and so is not comparable across
+    /// the peers whose entries share one timeline.
+    #[serde(default, skip_serializing)]
+    id: i64,
 }
 
 impl Envelope {
@@ -379,6 +610,35 @@ impl Envelope {
 /// Anything that fails verification is dropped silently — a forged or corrupt
 /// envelope must never reach the conflict check. Plans encrypted to someone
 /// else simply fail to decrypt and are skipped.
+/// Every request goes through this, so the timeout below cannot be forgotten
+/// at a new call site.
+///
+/// ureq has no timeout by default, which is fine against a relay that refuses
+/// a connection — that fails fast and the hooks fail open. The dangerous case
+/// is a relay that ACCEPTS and then never answers: a half-open connection, a
+/// wedged worker, a captive portal. `check` and `start` run inside a coding
+/// agent's session, so blocking there hangs the agent itself, and the whole
+/// design is that a broken relay costs you warnings, never your session.
+///
+/// `timeout_global` bounds the entire request including reading the body,
+/// which is where the hang actually was — a response that starts and stalls
+/// would slip past a connect-only timeout.
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(net_timeout())))
+        .build()
+        .into()
+}
+
+/// Per-request budget for this process. Set once from the subcommand, because
+/// threading it through every caller of `fetch_plans`/`fetch_posts` would
+/// touch a dozen signatures to carry one constant.
+static NET_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(NET_TIMEOUT);
+
+fn net_timeout() -> u64 {
+    NET_BUDGET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Group the keys we care about by which relay hosts them.
 ///
 /// Peers may live on a different relay entirely, so a single fetch is not
@@ -410,6 +670,7 @@ fn endpoints(c: &Cfg, k: &Keys, subs: &[Peer]) -> Vec<(String, Vec<String>)> {
 /// that hosts a key we trust, then verify and decrypt.
 fn fetch_envelopes(c: &Cfg, k: &Keys, subs: &[Peer], path: &str, query: &str) -> Vec<Envelope> {
     let mut out = Vec::new();
+    let net = agent();
     for (url, keys) in endpoints(c, k, subs) {
         // Past ~100 keys the URL exceeds what the edge accepts, so fetch
         // everything and filter locally. Untrusted keys are dropped below
@@ -424,7 +685,8 @@ fn fetch_envelopes(c: &Cfg, k: &Keys, subs: &[Peer], path: &str, query: &str) ->
         } else {
             format!("{base}&{query}")
         };
-        let envs = ureq::get(&full)
+        let envs = net
+            .get(&full)
             .call()
             .ok()
             .and_then(|mut r| r.body_mut().read_json::<Vec<serde_json::Value>>().ok())
@@ -454,6 +716,9 @@ fn decrypt_plan(e: &Envelope, k: &Keys) -> Option<Plan> {
     let mut plan: Plan = serde_json::from_slice(&plain).ok()?;
     plan.seq = e.seq;
     plan.pubkey = e.pubkey.clone();
+    // From the envelope, not the ciphertext: the relay assigns it, so a
+    // publisher cannot forge a cursor position that skips its own entries.
+    plan.id = e.id;
     Some(plan)
 }
 
@@ -493,7 +758,8 @@ fn current_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
 /// Verified against the same key that owns the old address — an unsigned
 /// redirect would let anyone hijack a peer by pointing them at their own relay.
 fn fetch_forward(url: &str, pubkey: &str, k: &Keys, subs: &[Peer]) -> Option<String> {
-    let env: Envelope = ureq::get(&format!("{url}/forward/{pubkey}"))
+    let env: Envelope = agent()
+        .get(format!("{url}/forward/{pubkey}"))
         .call()
         .ok()
         .and_then(|mut r| r.body_mut().read_json::<serde_json::Value>().ok())
@@ -527,11 +793,50 @@ fn has_unreadable(c: &Cfg, k: &Keys, pubkey: &str, path: &str) -> bool {
 
 /// Newest-first posts from you and everyone you trust.
 fn fetch_posts(c: &Cfg, k: &Keys, limit: usize) -> Vec<Plan> {
+    fetch_posts_after(c, k, limit, &Default::default())
+}
+
+/// Newest-first posts, keeping only entries newer than the caller's watermark.
+///
+/// `seen` maps a relay URL to the highest row id already consumed there. Row
+/// ids are assigned per relay, so they are NOT comparable across relays — a
+/// single global cursor would silently cut an arbitrary slice out of a peer
+/// hosted somewhere else. Hence one watermark per relay, and hence the filter
+/// runs per endpoint rather than over the merged list.
+fn fetch_posts_after(
+    c: &Cfg,
+    k: &Keys,
+    limit: usize,
+    seen: &std::collections::HashMap<String, i64>,
+) -> Vec<Plan> {
     let subs = crypto::load_peers();
-    let mut posts: Vec<Plan> = fetch_envelopes(c, k, &subs, "posts", &format!("limit={limit}"))
-        .iter()
-        .filter_map(|e| decrypt_plan(e, k))
-        .collect();
+    let mut posts: Vec<Plan> = Vec::new();
+    for (url, keys) in endpoints(c, k, &subs) {
+        let after = seen.get(&url).copied().unwrap_or(0);
+        let mut query = format!("limit={limit}");
+        if after > 0 {
+            query.push_str(&format!("&after={after}"));
+        }
+        // One relay at a time, because the cursor is only meaningful here.
+        // `fetch_envelopes` re-derives every endpoint internally and always
+        // includes our own, so narrowing the peer list is not enough — keep
+        // only the keys this relay actually hosts.
+        let only = subs
+            .iter()
+            .filter(|p| keys.contains(&p.pubkey))
+            .cloned()
+            .collect::<Vec<_>>();
+        posts.extend(
+            fetch_envelopes(c, k, &only, "posts", &query)
+                .iter()
+                .filter(|e| keys.contains(&e.pubkey))
+                .filter_map(|e| decrypt_plan(e, k))
+                // A relay that ignores `after` (an older deployment) would
+                // resend the whole window, so re-check locally rather than
+                // trusting it to have filtered.
+                .filter(|p| p.id > after),
+        );
+    }
     // Merge across relays: each returns its own newest-first run, so the
     // combined list needs re-sorting before truncation.
     posts.sort_by_key(|p| std::cmp::Reverse(p.epoch));
@@ -578,6 +883,13 @@ fn publish(
             .unwrap_or(DEFAULT_ETA),
         instance: c.instance.clone(),
         claimed_at,
+        // A claim row is live state, not a timeline entry. The entry is a
+        // separate post, written by `timeline` below.
+        kind: String::new(),
+        globs: vec![],
+        to: String::new(),
+        reply_to: 0,
+        id: 0,
     };
 
     // Claims deliberately ignore groups: a claim some peers cannot see is a
@@ -622,10 +934,12 @@ fn send(c: &Cfg, k: &Keys, kind: &str, seq: u64, body: String) -> Result<(), Str
         seq,
         sig: String::new(),
         body,
+        id: 0,
     };
     env.sig = k.sign(&env.signed_message());
     let url = format!("{}/{kind}/{}", c.url, k.pubkey());
-    ureq::put(&url)
+    agent()
+        .put(&url)
         .send_json(&env)
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -645,6 +959,11 @@ fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
         instance: c.instance.clone(),
         claimed_at: 0,
         eta_s: 0,
+        kind: String::new(),
+        globs: vec![],
+        to: String::new(),
+        reply_to: 0,
+        id: 0,
     };
     let body = crypto::encrypt(
         &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
@@ -653,9 +972,272 @@ fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
     send(c, k, "forward", entry.seq, body)
 }
 
-/// Append a post. Posts carry their own seq space, so posting never disturbs
-/// claim ordering.
-fn post(c: &Cfg, k: &Keys, text: &str, group: Option<&str>) -> Result<(), String> {
+/// Warn when `--to` names nobody the recipient side could resolve.
+///
+/// Checked against what `addressed_to_me` actually accepts on the other end —
+/// their alias or instance, as seen in their published plans — and not only
+/// against my local label for them. Those routinely differ: `add --as` exists
+/// to override a peer's suggested label, so `--to <their alias>` is correct
+/// even when I filed them under something else, and warning on it would train
+/// people to ignore the warning.
+///
+/// Not an error either way: naming one agent of a peer's several is legitimate
+/// and I may never have seen that instance publish. But a typo would otherwise
+/// be silent, and the whole point of addressing an entry is that someone
+/// notices it.
+fn warn_unknown_peer(to: &str, c: &Cfg, k: &Keys) {
+    let subs = crypto::load_peers();
+    let matches_label = subs
+        .iter()
+        .any(|p| p.label.eq_ignore_ascii_case(to) || p.pubkey.starts_with(to));
+    // Plans AND timeline entries: a peer who has posted but not yet claimed is
+    // perfectly addressable, and on a fresh team that is the common case.
+    let answers_to = |p: &Plan| {
+        p.pubkey != k.pubkey()
+            && (p.alias.eq_ignore_ascii_case(to)
+                || (!p.instance.is_empty()
+                    && (p.instance.eq_ignore_ascii_case(to)
+                        || format!("{}/{}", p.alias, p.instance).eq_ignore_ascii_case(to))))
+    };
+    let matches_published = current_plans(c, k).iter().any(&answers_to)
+        || fetch_posts(c, k, MAX_POST_LIMIT).iter().any(&answers_to);
+    if !matches_label && !matches_published {
+        eprintln!("warning: nobody you follow answers to {to:?} — sending anyway.");
+        eprintln!("  it still reaches everyone you follow; only the addressing is unrecognised.");
+        eprintln!("  see who you follow: robofinger list");
+    }
+}
+
+/// Is this entry addressed to me?
+///
+/// `to` is the *publisher's* label for the recipient, and the two ends
+/// routinely disagree about what a peer is called — `add --as` exists to
+/// override what a peer suggests. So a match is accepted on any of the names
+/// that could reasonably mean "me":
+///
+///   - my alias, which is what I publish under and so what a peer sees and
+///     usually adopts as their label for me
+///   - my instance, or `alias/instance`, so one agent of several can be named
+///
+/// Deliberately generous, and case-insensitive. A missed match means an agent
+/// never learns a question was for it; a false match means it reads one extra
+/// line. Those are not comparable costs, and nothing here is access control —
+/// the entry is encrypted to the whole team either way.
+fn addressed_to_me(p: &Plan, c: &Cfg) -> bool {
+    if p.to.is_empty() {
+        return false;
+    }
+    let to = p.to.trim();
+    to.eq_ignore_ascii_case(&c.alias)
+        || (!c.instance.is_empty()
+            && (to.eq_ignore_ascii_case(&c.instance)
+                || to.eq_ignore_ascii_case(&format!("{}/{}", c.alias, c.instance))))
+}
+
+/// Does this entry belong to the peer named by `--peer`? No filter matches all.
+///
+/// Matches either the publisher's own alias or the local label you filed them
+/// under, since those routinely differ — `add --as` exists precisely to
+/// override what a peer calls itself.
+fn peer_matches(p: &Plan, want: Option<&str>, subs: &[Peer]) -> bool {
+    match want {
+        None => true,
+        Some(w) => p.alias == w || subs.iter().any(|s| s.label == w && s.pubkey == p.pubkey),
+    }
+}
+
+/// `--since` as a unix timestamp: a duration back from now ("2h", "30m",
+/// "3d"), or an absolute epoch.
+///
+/// Deliberately not row ids. An id is per relay and means nothing to the
+/// person typing it; the watermark in `since` is the machine-readable cursor,
+/// and this is the human one.
+fn parse_since(s: &str, now: i64) -> Result<i64, String> {
+    let (n, unit) = s.split_at(s.len().saturating_sub(1));
+    let mult = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        // No suffix: an absolute epoch.
+        _ => {
+            return s
+                .parse()
+                .map_err(|_| format!("--since wants a duration like 2h, or an epoch, not {s:?}"));
+        }
+    };
+    let n: i64 = n
+        .parse()
+        .map_err(|_| format!("--since wants a duration like 2h, not {s:?}"))?;
+    Ok(now.saturating_sub(n.saturating_mul(mult)))
+}
+
+/// One timeline entry. Events lead with the verb and the paths, because that
+/// is what a reader is scanning for; a hand-written note is just its text.
+///
+/// Returns false once stdout is gone, so the caller can stop. `robofinger log
+/// | head` closes the pipe early and `println!` panics on that rather than
+/// exiting — noisy, and the README pipes these commands.
+fn show_entry(p: &Plan, show_instance: bool, ids: bool) -> bool {
+    use std::io::Write;
+    writeln!(
+        std::io::stdout(),
+        "{}\n",
+        render_entry_id(p, show_instance, ids)
+    )
+    .is_ok()
+}
+
+/// The text of one entry, without the trailing blank line.
+///
+/// Split out from `show_entry` so the SessionStart hook can embed the same
+/// rendering in its JSON rather than growing a second, drifting format.
+fn render_entry(p: &Plan, show_instance: bool) -> String {
+    render_entry_id(p, show_instance, false)
+}
+
+/// `render_entry`, optionally prefixing the relay id so it can be quoted back
+/// with `--re`. Off by default: the id is machine-facing noise on every line
+/// of an ordinary read.
+fn render_entry_id(p: &Plan, show_instance: bool, ids: bool) -> String {
+    let head = if ids {
+        format!("[{}] {} {}", p.id, stamp(p.epoch), who(p, show_instance))
+    } else {
+        format!("{} {}", stamp(p.epoch), who(p, show_instance))
+    };
+    if p.kind.is_empty() {
+        return format!("{head}\n{}", p.task);
+    }
+    let paths = if p.globs.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", p.globs.join(" "))
+    };
+    let detail = if p.task.is_empty() {
+        String::new()
+    } else {
+        format!("  — {}", p.task)
+    };
+    // A question needs to survive being skimmed in a wall of claim traffic,
+    // which is the whole reason it is a distinct kind rather than a note.
+    let verb = match p.kind.as_str() {
+        "ask" => "ASKS".to_string(),
+        "answer" => "answers".to_string(),
+        other => other.to_string(),
+    };
+    let addressed = if p.to.is_empty() {
+        String::new()
+    } else {
+        format!(" → {}", p.to)
+    };
+    format!("{head}\n  {verb}{addressed}{paths}{detail}")
+}
+
+/// Highest relay row id already consumed, per relay URL.
+///
+/// Keyed on the relay rather than the peer because that is the scope a row id
+/// is unique in — see `fetch_posts_after`. A missing or unreadable file means
+/// "seen nothing", so the first `since` shows the current window and a
+/// read-only home degrades to showing everything every time rather than
+/// failing.
+fn read_seen(dir: &std::path::Path) -> std::collections::HashMap<String, i64> {
+    std::fs::read_to_string(dir.join("seen"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (url, id) = l.split_once('\t')?;
+            Some((url.to_string(), id.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Best effort, like the instance slot file: a losing racer re-reads its own
+/// watermark next run, and the worst case is showing an entry twice.
+fn write_seen(dir: &std::path::Path, seen: &std::collections::HashMap<String, i64>) {
+    let mut rows: Vec<_> = seen.iter().collect();
+    rows.sort(); // stable file, so a diff of it means something
+    let body: String = rows.iter().map(|(u, id)| format!("{u}\t{id}\n")).collect();
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join("seen"), body);
+}
+
+/// Value of `--flag <value>`, if present.
+fn flag(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned())
+}
+
+/// The message text in `args[1..]`, with `--flag value` pairs removed.
+///
+/// Replaces stripping the flag back out of a joined string, which broke as
+/// soon as the message itself contained the flag's text — quoting the message
+/// is not enough, because the shell has already discarded the quotes by the
+/// time this sees it.
+fn message(args: &[String], flags: &[&str]) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    // Each flag is consumed once. A second `--to` is the message talking about
+    // the flag, not a second flag — `flag()` reads the first occurrence too, so
+    // this keeps the two in agreement about which one was the real one.
+    let mut used: Vec<&str> = Vec::new();
+    let mut skip = false;
+    for a in &args[1..] {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if flags.contains(&a.as_str()) && !used.contains(&a.as_str()) {
+            used.push(a);
+            skip = true;
+            continue;
+        }
+        out.push(a);
+    }
+    out.join(" ")
+}
+
+/// My own current plan row for this agent, if there is one.
+///
+/// Three commands need the row they are about to replace — to name what a
+/// claim drops, to carry a task forward across a release, and to decide
+/// whether an event is worth a timeline entry.
+fn mine(c: &Cfg, k: &Keys) -> Option<Plan> {
+    current_plans(c, k)
+        .into_iter()
+        .find(|p| p.pubkey == k.pubkey() && p.instance == c.instance)
+}
+
+/// Write a claim/release/done onto the timeline.
+///
+/// Best-effort and silent on failure, matching `release`/`done`/`end`: a relay
+/// outage must not fail the command or break a session. The claim itself has
+/// already been published by the time this runs — losing the journal entry is
+/// strictly less bad than losing the coordination.
+///
+/// Never grouped. `publish` passes `recipients(k, None)` because "a claim some
+/// peers cannot see is a conflict warning that silently does not fire", and a
+/// claim *event* a peer cannot see is the same hazard one step removed.
+fn timeline(c: &Cfg, k: &Keys, kind: &str, text: &str, globs: Vec<String>) {
+    let _ = post(c, k, text, None, kind, globs, "", 0);
+}
+
+/// Append to the timeline. Posts carry their own seq space, so writing one
+/// never disturbs claim ordering.
+///
+/// `kind` and `globs` are empty for a note somebody wrote by hand and set for
+/// a claim/release/done event — the two share this path because they share a
+/// stream, and a reader wants them interleaved in one chronological order.
+#[allow(clippy::too_many_arguments)]
+fn post(
+    c: &Cfg,
+    k: &Keys,
+    text: &str,
+    group: Option<&str>,
+    kind: &str,
+    globs: Vec<String>,
+    to: &str,
+    reply_to: i64,
+) -> Result<(), String> {
     // Ask only for your own posts. `limit=1` over everyone returns whichever
     // peer posted most recently, and filtering that for your own key finds
     // nothing as soon as someone else is newer — seq falls back to 1 and the
@@ -680,12 +1262,17 @@ fn post(c: &Cfg, k: &Keys, text: &str, group: Option<&str>) -> Result<(), String
         seq: prev + 1,
         epoch: now(),
         status: "post".into(),
-        task: text.to_string(),
+        task: truncate(text, MAX_ENTRY),
         touching: vec![],
         project: project(),
         eta_s: 0,
         instance: c.instance.clone(),
         claimed_at: 0,
+        kind: kind.to_string(),
+        globs,
+        to: to.to_string(),
+        reply_to,
+        id: 0,
     };
     let body = crypto::encrypt(
         &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
@@ -709,6 +1296,25 @@ fn relative_to_root(path: &str) -> String {
         .to_string()
 }
 
+/// Is this plan mine — same key AND same agent on it?
+///
+/// The instance half is load-bearing: your own key with a *different* agent on
+/// it is a real conflict, and two Claudes in one repo is the case this whole
+/// feature exists for. Dropping it silently disables conflict warnings between
+/// tabs, which looks exactly like working correctly.
+fn is_self(p: &Plan, pubkey: &str, instance: &str) -> bool {
+    p.pubkey == pubkey && p.instance == instance
+}
+
+/// Does this peer have enough going on to name its agents?
+///
+/// Counted on agents actually holding paths, not on plan rows: a sibling that
+/// released still publishes a live row holding nothing, and counting those
+/// labelled a peer that only ever had one real claim.
+fn names_worth_showing(rows: &[Plan]) -> bool {
+    rows.iter().filter(|p| !p.touching.is_empty()).count() > 1
+}
+
 /// Peer claims matching `path`, scoped to the current project.
 fn conflicts(c: &Cfg, k: &Keys, path: &str) -> Vec<(Plan, String)> {
     let rel = &relative_to_root(path);
@@ -717,11 +1323,7 @@ fn conflicts(c: &Cfg, k: &Keys, path: &str) -> Vec<(Plan, String)> {
     let plans = current_plans(c, k);
     let mut hits = Vec::new();
     for p in plans {
-        // Your own key, but a different agent on it, is a real conflict —
-        // two Claudes in one repo is the case this exists for. Only skip
-        // yourself.
-        let is_me = p.pubkey == k.pubkey() && p.instance == c.instance;
-        if is_me || p.project != here || !p.live(t) {
+        if is_self(&p, &k.pubkey(), &c.instance) || p.project != here || !p.live(t) {
             continue;
         }
         for g in &p.touching {
@@ -740,6 +1342,11 @@ fn conflicts(c: &Cfg, k: &Keys, path: &str) -> Vec<(Plan, String)> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
+
+    // Hooks run inside an agent's session and must never be what it waits on.
+    if matches!(cmd, "check" | "start" | "end") {
+        NET_BUDGET.store(HOOK_TIMEOUT, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // Keys are generated on first use. A hook must never break a session, so
     // failure here is fatal only for interactive commands.
@@ -775,7 +1382,7 @@ fn main() {
             let mut url = None;
             let mut ns = None;
             let mut alias = None;
-            let mut want_hooks = false;
+            let mut no_hooks = false;
             let mut hook_scope = hooks::Scope::Project;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
@@ -783,11 +1390,12 @@ fn main() {
                     "--url" => url = it.next().cloned(),
                     "--ns" => ns = it.next().cloned(),
                     "--alias" | "--agent" => alias = it.next().cloned(),
-                    "--hooks" => want_hooks = true,
-                    "--hooks-user" => {
-                        want_hooks = true;
-                        hook_scope = hooks::Scope::Account;
-                    }
+                    // Kept as a no-op: it is in the README, in shell history,
+                    // and in people's notes, and erroring on it would be a
+                    // worse answer than doing what it always did.
+                    "--hooks" => {}
+                    "--no-hooks" => no_hooks = true,
+                    "--hooks-user" => hook_scope = hooks::Scope::Account,
                     other => {
                         eprintln!("unknown flag {other}\n\n{USAGE}");
                         std::process::exit(1);
@@ -835,12 +1443,7 @@ fn main() {
                         crypto::config_dir().display()
                     );
                 }
-                if want_hooks {
-                    eprintln!("cannot init without --url. To install hooks alone:");
-                    eprintln!("  robofinger hooks install");
-                    std::process::exit(1);
-                }
-                eprintln!("usage: robofinger init --url <relay url> [--alias <name>] [--hooks]");
+                eprintln!("usage: robofinger init --url <relay url> [--alias <name>] [--no-hooks]");
                 eprintln!("    e.g. https://relay.example.com");
                 eprintln!(
                     "  no relay yet? deploy one free: https://github.com/jhnhnsn/robofinger#self-hosting"
@@ -900,10 +1503,15 @@ fn main() {
             println!("\nboth directions are required — adding a peer both subscribes to");
             println!("them and lets them decrypt your plans.");
 
-            // Editing ~/.claude/settings.json is the user's call, so this is
-            // opt-in: an explicit flag, or a prompt that defaults to no. A
-            // non-TTY (scripted init) never touches the file.
-            let installed = if want_hooks {
+            // Project scope by default. This writes <repo>/.claude/settings.json
+            // — a repo-local file the team can commit — rather than the user's
+            // global config, so it does not need the consent that touching
+            // ~/.claude does. Account scope still asks. Without hooks the tool
+            // does nothing at all, and defaulting to off meant every scripted
+            // install produced a silent no-op.
+            let installed = if no_hooks {
+                false
+            } else {
                 match hooks::install(true, hook_scope) {
                     Ok(m) => {
                         println!("\n{m}");
@@ -914,22 +1522,22 @@ fn main() {
                         false
                     }
                 }
-            } else {
-                hooks::prompt_install()
             };
 
-            if !installed {
-                println!("\nTo let your coding agent use this later:");
-                println!("  robofinger hooks install           just this repo");
-                println!("  robofinger hooks install --user    every repo on this machine");
-            }
-
-            // Hooks give you conflict warnings; this makes the agent actually
-            // publish claims. Without it `touching` stays empty and every
-            // check passes trivially.
             if installed {
-                println!("\nAdd this to ~/.claude/CLAUDE.md so your agent publishes claims:\n");
-                println!("{}", hooks::CLAUDE_MD);
+                // The hooks give an agent conflict warnings. This is what
+                // teaches it to publish claims in the first place — without
+                // it `touching` stays empty and every check passes trivially.
+                match hooks::write_workflow(&hooks::repo_dir()) {
+                    Ok(m) => println!("{m}"),
+                    Err(e) => eprintln!("could not write ROBOFINGER.md: {e}"),
+                }
+                println!("\ncommit both so your teammates get them on clone.");
+            } else {
+                println!("\n⚠  No hooks installed — robofinger will not do anything yet.");
+                println!("   Your agent cannot see peer claims, and will not publish its own.");
+                println!("\n   robofinger hooks install           this repo");
+                println!("   robofinger hooks install --user    every repo on this machine");
             }
             return;
         }
@@ -941,10 +1549,15 @@ fn main() {
                 hooks::Scope::Project
             };
             let r = match sub {
-                "install" => hooks::install(true, scope),
+                "install" => hooks::install(true, scope).map(|m| {
+                    match hooks::write_workflow(&hooks::repo_dir()) {
+                        Ok(w) => format!("{m}\n{w}"),
+                        Err(e) => format!("{m}\ncould not write ROBOFINGER.md: {e}"),
+                    }
+                }),
                 "uninstall" | "remove" => hooks::uninstall(scope),
                 "" | "show" => {
-                    println!("{}", hooks::CLAUDE_MD);
+                    println!("{}", hooks::ROBOFINGER_MD);
                     return;
                 }
                 _ => {
@@ -1157,18 +1770,29 @@ fn main() {
                     let t = now();
                     // Live claims, indexed by key, so each peer can show what
                     // it is holding right now.
-                    let claims: std::collections::HashMap<String, Plan> = match cfg() {
-                        Some(c) => current_plans(&c, &k)
-                            .into_iter()
+                    //
+                    // All of them, not one: a peer running several agents holds
+                    // several claims at once, and keying this by pubkey alone
+                    // silently kept whichever happened to land last. The hidden
+                    // ones are exactly the claims you might collide with.
+                    let mut claims: std::collections::HashMap<String, Vec<Plan>> =
+                        Default::default();
+                    if let Some(c) = cfg() {
+                        for p in current_plans(&c, &k) {
                             // Keep live plans holding nothing too: a peer who
                             // released on purpose is worth a line, and dropping
                             // them here made that indistinguishable from a
                             // claim that quietly rotted.
-                            .filter(|p| p.pubkey != k.pubkey() && p.live(t))
-                            .map(|p| (p.pubkey.clone(), p))
-                            .collect(),
-                        None => Default::default(),
-                    };
+                            if p.pubkey != k.pubkey() && p.live(t) {
+                                claims.entry(p.pubkey.clone()).or_default().push(p);
+                            }
+                        }
+                    }
+                    // Oldest-held first, so a long-running claim leads and the
+                    // order does not shuffle between runs.
+                    for v in claims.values_mut() {
+                        v.sort_by_key(|p| (p.epoch, p.instance.clone()));
+                    }
                     for p in &peers {
                         let where_ = match &p.home {
                             Some(h) => h
@@ -1197,15 +1821,24 @@ fn main() {
                         );
                         // What they are actively holding — the thing you most
                         // often opened this list to find out.
-                        if let Some(pl) = claims.get(&p.pubkey) {
+                        let held_by = claims.get(&p.pubkey).map(Vec::as_slice).unwrap_or(&[]);
+                        // Name the agent only when there is more than one to
+                        // tell apart, matching `robofinger` and `finger`.
+                        let multi = names_worth_showing(held_by);
+                        for pl in held_by {
                             // Age the claim itself. The column above is when
                             // they last published anything, which drifts far
                             // from when they took the claim.
                             let held = ago(t.saturating_sub(pl.epoch));
+                            let tag = if multi && !pl.instance.is_empty() {
+                                format!("{}: ", pl.instance)
+                            } else {
+                                String::new()
+                            };
                             for g in &pl.touching {
                                 println!(
-                                    "               claiming {}/{}  ({})  since {}",
-                                    pl.project, g, pl.task, held
+                                    "               {}claiming {}/{}  ({})  since {}",
+                                    tag, pl.project, g, pl.task, held
                                 );
                             }
                             // Working but holding nothing is a handoff, and
@@ -1220,7 +1853,7 @@ fn main() {
                                 } else {
                                     "working on "
                                 };
-                                println!("               released — {lead}{d}");
+                                println!("               {tag}released — {lead}{d}");
                             }
                         }
                         // Surface a move, but never follow it automatically: a
@@ -1283,16 +1916,17 @@ fn main() {
             // an incremental `claim` silently drops what came before. Say what
             // is being let go.
             let t = now();
-            let dropped: Vec<String> = current_plans(&c, &k)
-                .into_iter()
-                .find(|p| p.pubkey == k.pubkey() && p.instance == c.instance && p.live(t))
-                .map(|p| {
-                    p.touching
-                        .into_iter()
-                        .filter(|g| !globs.contains(g))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let prev = mine(&c, &k);
+            let dropped: Vec<String> = prev
+                .iter()
+                .filter(|p| p.live(t))
+                .flat_map(|p| p.touching.iter().filter(|g| !globs.contains(g)).cloned())
+                .collect();
+            // A working agent republishes its claim on every edit. Only a real
+            // change earns a timeline entry — without this gate a busy session
+            // spends its whole write budget (WRITES_PER_MIN) journalling
+            // itself, and the relay starts refusing the claims that matter.
+            let changed = prev.as_ref().map(|p| &p.touching) != Some(&globs);
             match publish(&c, &k, "working", &task, globs.clone()) {
                 Ok(_) => {
                     println!("claimed {globs:?} ({task})");
@@ -1302,6 +1936,9 @@ fn main() {
                             dropped.join(", ")
                         );
                     }
+                    if changed {
+                        timeline(&c, &k, "claim", &task, globs);
+                    }
                 }
                 Err(e) => {
                     eprintln!("publish failed: {e}");
@@ -1310,17 +1947,35 @@ fn main() {
             }
         }
         "release" => {
-            let task = current_plans(&c, &k)
-                .iter()
-                .find(|p| p.pubkey == k.pubkey() && p.instance == c.instance)
-                .map(|p| p.task.clone())
+            let note = flag(&args, "--note");
+            let prev = mine(&c, &k);
+            let task = prev.as_ref().map(|p| p.task.clone()).unwrap_or_default();
+            let held: Vec<String> = prev
+                .as_ref()
+                .map(|p| p.touching.clone())
                 .unwrap_or_default();
             let _ = publish(&c, &k, "working", &task, vec![]);
             println!("released");
+            // Releasing nothing is a no-op, not an event.
+            if !held.is_empty() {
+                // The note says what happened; the task only ever said what was
+                // intended. Fall back to the intent when there is no note, and
+                // to the duration when there is neither.
+                let text = match (&note, prev.as_ref().map(|p| p.claimed_at)) {
+                    (Some(n), _) => n.clone(),
+                    (None, Some(at)) if at > 0 => {
+                        format!("{task} (held {})", dur(now().saturating_sub(at)))
+                    }
+                    _ => task,
+                };
+                timeline(&c, &k, "release", &text, held);
+            }
         }
         "done" => {
+            let held: Vec<String> = mine(&c, &k).map(|p| p.touching).unwrap_or_default();
             let _ = publish(&c, &k, "done", "", vec![]);
             println!("done");
+            timeline(&c, &k, "done", "", held);
         }
         // PreToolUse hook: hook JSON on stdin, advisory warning on stdout.
         "check" => {
@@ -1353,22 +2008,32 @@ fn main() {
                     .map(|(p, g)| {
                         // Name the agent, not just the machine: two Claudes on
                         // one identity are both "macbook", and which one is
-                        // holding the file is the whole question.
-                        let who = if p.instance.is_empty() {
-                            p.alias.clone()
-                        } else {
-                            format!("{}/{}", p.alias, p.instance)
-                        };
-                        format!("{} ({}) claims {}", who, p.task, g)
+                        // holding the file is the whole question. Always shown
+                        // here, unlike `list` — a conflict means there is by
+                        // definition more than one agent in play.
+                        format!("{} ({}) claims {}", who(p, true), p.task, g)
                     })
                     .collect();
+                // Name the holder, so `--to` can be typed straight from this.
+                let holder = hits
+                    .first()
+                    .map(|(p, _)| p.alias.clone())
+                    .unwrap_or_default();
                 let msg = format!(
-                    "CLAIM CONFLICT on {}:\n{}\nThis is advisory. Work elsewhere, coordinate, or wait for it to clear — \
-                     poll `robofinger check {}` in the background (it prints nothing once free) and \
-                     carry on with unblocked work meanwhile.",
+                    "CLAIM CONFLICT on {}:\n{}\n\
+                     This is advisory. Four options, roughly in order:\n\
+                     1. Work elsewhere — cheapest, and usually right.\n\
+                     2. Wait: poll `robofinger check {}` in the background (it prints nothing \
+                     once free) and carry on with unblocked work meanwhile. Do not sit idle.\n\
+                     3. Ask the holder: `robofinger ask --to {} \"<what you need, and the \
+                     options>\"` — they see it at their next session start.\n\
+                     4. Ask your user, if neither of you can yield, if the claim looks abandoned, \
+                     or if proceeding would undo their work. Say what you would do by default \
+                     and what it costs.",
                     path,
                     detail.join("\n"),
-                    path
+                    path,
+                    holder
                 );
                 println!(
                     "{}",
@@ -1382,28 +2047,183 @@ fn main() {
             }
             std::process::exit(0);
         }
-        // SessionStart hook: surface live peer claims into the agent's context.
+        // SessionStart hook: everything the agent needs to coordinate, with
+        // no command typed.
+        //
+        // Three things, in order of how much they demand a response: questions
+        // addressed to this agent, what peers hold right now, and what has
+        // happened since this agent last looked. The timeline half is the
+        // reason `since` exists; leaving it opt-in meant an agent only got it
+        // if it read CLAUDE_MD and remembered.
         "start" => {
             let t = now();
-            let lines: Vec<String> = current_plans(&c, &k)
-                .into_iter()
+            let mut blocks: Vec<String> = Vec::new();
+
+            let live = current_plans(&c, &k);
+            let claims: Vec<String> = live
+                .iter()
                 .filter(|p| p.pubkey != k.pubkey() && p.live(t))
                 .flat_map(|p| {
                     p.touching
                         .iter()
-                        .map(|g| format!("  {} claims {}/{} ({})", p.alias, p.project, g, p.task))
+                        .map(|g| {
+                            format!("  {} claims {}/{} ({})", who(p, true), p.project, g, p.task)
+                        })
                         .collect::<Vec<_>>()
                 })
                 .collect();
-            if !lines.is_empty() {
+
+            // Advance the cursor here, so the agent is not shown the same
+            // backlog at every session start. This is the one hook that
+            // consumes, and it is the one place an agent reliably reads.
+            let dir = crypto::config_dir();
+            let mut seen = read_seen(&dir);
+            let fresh = fetch_posts_after(&c, &k, START_ENTRIES, &seen);
+            let subs = crypto::load_peers();
+            for (url, keys) in endpoints(&c, &k, &subs) {
+                let high = fresh
+                    .iter()
+                    .filter(|p| keys.contains(&p.pubkey))
+                    .map(|p| p.id)
+                    .max()
+                    .unwrap_or(0);
+                let e = seen.entry(url).or_insert(0);
+                *e = (*e).max(high);
+            }
+            write_seen(&dir, &seen);
+
+            // Mine, and anything I already answered, are not news to me.
+            let answered: std::collections::HashSet<i64> = fresh
+                .iter()
+                .filter(|p| p.pubkey == k.pubkey() && p.kind == "answer")
+                .map(|p| p.reply_to)
+                .collect();
+            let theirs: Vec<&Plan> = fresh
+                .iter()
+                .filter(|p| p.pubkey != k.pubkey() || p.instance != c.instance)
+                .collect();
+
+            let (mut asked, mut rest): (Vec<&Plan>, Vec<&Plan>) = theirs
+                .into_iter()
+                .partition(|p| p.kind == "ask" && !answered.contains(&p.id));
+            // Directed questions first: they are the ones with a name on them.
+            asked.sort_by_key(|p| (!addressed_to_me(p, &c), p.epoch));
+            rest.sort_by_key(|p| p.epoch);
+
+            if !asked.is_empty() {
+                let lines: Vec<String> = asked
+                    .iter()
+                    .map(|p| {
+                        let mine = if addressed_to_me(p, &c) {
+                            "  [FOR YOU] "
+                        } else {
+                            "  "
+                        };
+                        format!(
+                            "{mine}{} asks: {}\n    (answer it: robofinger answer --to {} --re {} \"…\")",
+                            who(p, true),
+                            p.task,
+                            p.alias,
+                            p.id
+                        )
+                    })
+                    .collect();
+                blocks.push(format!(
+                    "OPEN QUESTIONS from your teammates — these are waiting on somebody:\n{}",
+                    lines.join("\n")
+                ));
+            }
+
+            if !claims.is_empty() {
+                blocks.push(format!(
+                    "Peer agents are holding these paths right now:\n{}",
+                    claims.join("\n")
+                ));
+            }
+
+            if !rest.is_empty() {
+                // The newest START_SHOWN, still in chronological order.
+                let shown: Vec<&&Plan> = rest.iter().rev().take(START_SHOWN).rev().collect();
+                let more = rest.len().saturating_sub(shown.len());
+                // An answer with no sight of the question is unreadable, and
+                // once the cursor has passed the question it is no longer in
+                // `fresh`. Fall back to a cursor-free lookup — one extra fetch,
+                // and only when an answer is actually on screen.
+                let needs_context = shown.iter().any(|p| p.kind == "answer" && p.reply_to > 0);
+                let backfill: Vec<Plan> = if needs_context {
+                    fetch_posts(&c, &k, MAX_POST_LIMIT)
+                } else {
+                    vec![]
+                };
+                let asked_text = |id: i64| {
+                    fresh
+                        .iter()
+                        .chain(backfill.iter())
+                        .find(|q| q.id == id)
+                        .map(|q| truncate(&q.task, 120))
+                };
+                let mut body = shown
+                    .iter()
+                    .map(|p| {
+                        let base = render_entry(p, true);
+                        match (p.kind.as_str(), p.reply_to) {
+                            ("answer", r) if r > 0 => match asked_text(r) {
+                                Some(q) => format!("{base}\n    (you asked: {q})"),
+                                None => base,
+                            },
+                            _ => base,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if more > 0 {
+                    body.push_str(&format!(
+                        "\n  … {more} earlier — see them with `robofinger log`"
+                    ));
+                }
+                blocks.push(format!(
+                    "What your teammates did since you last looked:\n{body}"
+                ));
+            }
+
+            // Your own claim, carried over from a session that ended without
+            // releasing. The deadman switch frees it eventually, but "eventually"
+            // is up to an hour of teammates treating a dead session as live —
+            // and this agent is the only one that can say what actually
+            // happened to the files.
+            if let Some(m) = live.iter().find(|p| {
+                is_self(p, &k.pubkey(), &c.instance)
+                    && p.live(t)
+                    && !p.touching.is_empty()
+                    // Only a claim that predates this session. A `start` firing
+                    // right after a claim — a resumed session, a hook that runs
+                    // twice — would otherwise nag about work in progress, and a
+                    // warning that cries wolf gets ignored exactly when it is
+                    // real.
+                    && t.saturating_sub(p.epoch) > STALE_GRACE
+            }) {
+                blocks.insert(
+                    0,
+                    format!(
+                        "YOU are still holding these, from a session that ended without releasing:\n  \
+                         {}  ({}) — claimed {}\n  \
+                         Release it with what happened (`robofinger release --note \"…\"`), or \
+                         re-claim it if you are still on it.",
+                        m.touching.join(" "),
+                        m.task,
+                        ago(t.saturating_sub(if m.claimed_at > 0 { m.claimed_at } else { m.epoch })),
+                    ),
+                );
+            }
+
+            if !blocks.is_empty() {
+                blocks.push(GUIDANCE.into());
                 println!(
                     "{}",
                     serde_json::json!({
                         "hookSpecificOutput": {
                             "hookEventName": "SessionStart",
-                            "additionalContext": format!(
-                                "Peer agent claims currently active:\n{}\nBefore editing a claimed path, consider whether to coordinate.",
-                                lines.join("\n"))
+                            "additionalContext": blocks.join("\n\n")
                         }
                     })
                 );
@@ -1415,10 +2235,12 @@ fn main() {
             std::process::exit(0);
         }
         "post" => {
+            let group = flag(&args, "--group").or_else(|| flag(&args, "-g"));
+            let to = flag(&args, "--to");
             // Prefer args; fall back to stdin so `... | robofinger post` works
             // and prose isn't trapped behind shell quoting.
             let text = if args.len() > 1 {
-                args[1..].join(" ")
+                message(&args, &["--group", "-g", "--to"])
             } else {
                 let mut buf = String::new();
                 let _ = std::io::stdin().read_to_string(&mut buf);
@@ -1428,19 +2250,9 @@ fn main() {
                 eprintln!("nothing to post (pass text, or pipe it on stdin)");
                 std::process::exit(1);
             }
-            let group = args
-                .iter()
-                .position(|a| a == "--group" || a == "-g")
-                .and_then(|i| args.get(i + 1).cloned());
-            // Strip the flag and its value out of the message text.
-            let text = if let Some(g) = &group {
-                text.replace(&format!("--group {g}"), "")
-                    .replace(&format!("-g {g}"), "")
-                    .trim()
-                    .to_string()
-            } else {
-                text
-            };
+            if let Some(t) = &to {
+                warn_unknown_peer(t, &c, &k);
+            }
             if let Some(g) = &group {
                 let known: Vec<String> = crypto::load_peers()
                     .iter()
@@ -1453,7 +2265,16 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-            match post(&c, &k, &text, group.as_deref()) {
+            match post(
+                &c,
+                &k,
+                &text,
+                group.as_deref(),
+                "",
+                vec![],
+                to.as_deref().unwrap_or(""),
+                0,
+            ) {
                 Ok(_) => println!("posted ({} chars)", text.chars().count()),
                 Err(e) => {
                     eprintln!("post failed: {e}");
@@ -1461,33 +2282,150 @@ fn main() {
                 }
             }
         }
+        // Raise something the team should settle: two agents wanting the same
+        // path, a claim that looks abandoned, a call that needs a human. It is
+        // a distinct kind rather than a note so that peers can surface it at
+        // session start instead of hoping somebody reads the feed.
+        "ask" | "answer" => {
+            let to = flag(&args, "--to");
+            let reply_to: i64 = flag(&args, "--re")
+                .map(|v| {
+                    v.parse().unwrap_or_else(|_| {
+                        eprintln!("--re wants an entry id, as shown by `robofinger since --ids`");
+                        std::process::exit(2);
+                    })
+                })
+                .unwrap_or(0);
+            let text = if args.len() > 1 {
+                message(&args, &["--to", "--re"])
+            } else {
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_to_string(&mut buf);
+                buf.trim_end().to_string()
+            };
+            if text.is_empty() {
+                eprintln!("usage: robofinger {cmd} [--to <peer>] \"<text>\"");
+                eprintln!("  say what you need decided, and what the options are");
+                std::process::exit(2);
+            }
+            if cmd == "answer" && reply_to == 0 && to.is_none() {
+                eprintln!("an answer needs a recipient: robofinger answer --to <peer> \"<text>\"");
+                eprintln!("  or point at the question: --re <id>");
+                std::process::exit(2);
+            }
+            if let Some(t) = &to {
+                warn_unknown_peer(t, &c, &k);
+            }
+            // Never grouped, for the same reason claims are not: a question
+            // some of the team cannot decrypt is one nobody answers.
+            match post(
+                &c,
+                &k,
+                &text,
+                None,
+                cmd,
+                vec![],
+                to.as_deref().unwrap_or(""),
+                reply_to,
+            ) {
+                Ok(_) => {
+                    let who = to.as_deref().unwrap_or("the team");
+                    let verb = if cmd == "ask" { "asked" } else { "answered" };
+                    println!("{verb} {who} ({} chars)", text.chars().count());
+                    println!("  they see it at their next session start, or on `robofinger since`");
+                }
+                Err(e) => {
+                    eprintln!("{cmd} failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "log" => {
-            let limit = args
-                .iter()
-                .position(|a| a == "-n")
-                .and_then(|i| args.get(i + 1))
+            let limit = flag(&args, "-n")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(20usize);
-            let who = args
-                .iter()
-                .position(|a| a == "--peer")
-                .and_then(|i| args.get(i + 1).cloned());
+            let peer = flag(&args, "--peer");
+            let ids = args.iter().any(|a| a == "--ids");
+            // An explicit window. A read, not a consumption — it never moves
+            // the watermark, so `log --since` and `since` do not interfere.
+            let cutoff = flag(&args, "--since")
+                .map(|s| parse_since(&s, now()))
+                .transpose()
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                });
             let subs = crypto::load_peers();
             let mut any = false;
             for p in fetch_posts(&c, &k, limit) {
-                if let Some(w) = &who {
-                    let matches =
-                        p.alias == *w || subs.iter().any(|s| &s.label == w && s.pubkey == p.pubkey);
-                    if !matches {
-                        continue;
-                    }
+                if cutoff.is_some_and(|t| p.epoch < t) {
+                    continue;
                 }
-                println!("{} {}\n{}\n", stamp(p.epoch), p.alias, p.task);
+                if !peer_matches(&p, peer.as_deref(), &subs) {
+                    continue;
+                }
                 any = true;
+                if !show_entry(&p, true, ids) {
+                    return;
+                }
             }
             if !any {
-                println!("no posts yet — write one with: robofinger post \"...\"");
+                println!("nothing on the timeline yet");
             }
+        }
+        // What has happened since this agent last looked. The question a robot
+        // asks at the start of a session, and the reason the timeline exists —
+        // git answers it eventually, this answers it now.
+        "since" => {
+            let limit = flag(&args, "-n")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(MAX_POST_LIMIT);
+            let peer = flag(&args, "--peer");
+            let ids = args.iter().any(|a| a == "--ids");
+            let dir = crypto::config_dir();
+            let mut seen = read_seen(&dir);
+            let subs = crypto::load_peers();
+
+            let fresh = fetch_posts_after(&c, &k, limit, &seen);
+            // Oldest first: this reads as a narrative of what happened while
+            // you were away, unlike `log`, which is a feed you scan.
+            let mut shown: Vec<&Plan> = fresh
+                .iter()
+                .filter(|p| peer_matches(p, peer.as_deref(), &subs))
+                .collect();
+            shown.sort_by_key(|p| p.epoch);
+            for p in &shown {
+                if !show_entry(p, true, ids) {
+                    break;
+                }
+            }
+            if shown.is_empty() {
+                println!("nothing new");
+            }
+
+            // A `--peer` run is a filtered read, not a consumption — the same
+            // rule as `log --since`. Advancing here would silently swallow
+            // everyone else's entries, which the next bare `since` would then
+            // never show.
+            if peer.is_some() {
+                return;
+            }
+
+            // Advance past everything fetched. Per relay, and only forward:
+            // ids are assigned per relay, so `endpoints` is the authority on
+            // which one a given row came from, and taking the max means a
+            // duplicated or out-of-order fetch cannot rewind the cursor.
+            for (url, keys) in endpoints(&c, &k, &subs) {
+                let high = fresh
+                    .iter()
+                    .filter(|p| keys.contains(&p.pubkey))
+                    .map(|p| p.id)
+                    .max()
+                    .unwrap_or(0);
+                let e = seen.entry(url).or_insert(0);
+                *e = (*e).max(high);
+            }
+            write_seen(&dir, &seen);
         }
         "moved" => {
             let Some(new_addr) = args.get(1) else {
@@ -1594,17 +2532,28 @@ fn ask(question: &str, default: Option<&str>) -> Option<String> {
     }
 }
 
+/// Who published a plan: "mymac", or "mymac/claude-2" when the instance needs
+/// showing.
+///
+/// `show_instance` is false when this key has only one live instance — with
+/// auto-differentiation every plan now carries an instance, and appending it
+/// when you are working alone is noise for what is still the common case.
+/// Solo output stays byte-identical to pre-0.2.
+fn who(p: &Plan, show_instance: bool) -> String {
+    if p.instance.is_empty() || !show_instance {
+        p.alias.clone()
+    } else {
+        format!("{}/{}", p.alias, p.instance)
+    }
+}
+
 /// Render one plan the way a post renders: stamp, who, then the detail.
 ///
 /// `who` carries the instance when there is one, so two agents on a single
 /// identity are told apart in the one place that matters — the line you read
 /// when deciding whether to touch a file.
-fn show_plan(p: &Plan, t: i64, suffix: &str, current: bool) {
-    let who = if p.instance.is_empty() {
-        p.alias.clone()
-    } else {
-        format!("{}/{}", p.alias, p.instance)
-    };
+fn show_plan(p: &Plan, t: i64, suffix: &str, current: bool, show_instance: bool) {
+    let who = who(p, show_instance);
     println!("\n{} {}{}", stamp(p.epoch), who, suffix);
 
     if !p.live(t) {
@@ -1674,6 +2623,8 @@ fn show_self(c: &Cfg, k: &Keys) {
     }
     let mut names: Vec<String> = by_instance.keys().cloned().collect();
     names.sort();
+    // Only worth naming instances when there is more than one to tell apart.
+    let multi = names.len() > 1;
 
     if mine.is_empty() {
         println!("\nno active claim");
@@ -1687,7 +2638,7 @@ fn show_self(c: &Cfg, k: &Keys) {
                 (0, _) => "",
                 _ => "  (previous)",
             };
-            show_plan(p, t, suffix, i == 0);
+            show_plan(p, t, suffix, i == 0, multi);
         }
     }
 
@@ -1776,11 +2727,18 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
         }
         let mut names: Vec<String> = by_instance.keys().cloned().collect();
         names.sort();
+        let multi = names.len() > 1;
         for name in names {
             let mut rows = by_instance.remove(&name).unwrap_or_default();
             rows.sort_by_key(|p| std::cmp::Reverse(p.seq));
             for (i, p) in rows.iter().take(CLAIM_HISTORY).enumerate() {
-                show_plan(p, t, if i == 0 { "" } else { "  (previous)" }, i == 0);
+                show_plan(
+                    p,
+                    t,
+                    if i == 0 { "" } else { "  (previous)" },
+                    i == 0,
+                    multi,
+                );
             }
         }
     }
@@ -1849,13 +2807,27 @@ mod tests {
             eta_s: 1800,
             instance: String::new(),
             claimed_at: 0,
+            kind: String::new(),
+            globs: vec![],
+            to: String::new(),
+            reply_to: 0,
+            id: 0,
         }
     }
 
-    /// Same shape as `conflicts`, minus the network. Identity is the pubkey,
-    /// matching the real code — `agent` is only a display label.
+    /// Same shape as `conflicts`, minus the network.
+    ///
+    /// Calls the real `is_self` rather than restating it: the previous version
+    /// of this helper open-coded the identity check and omitted `instance`
+    /// entirely, so it would have passed just as happily with the instance
+    /// half deleted from production.
     fn matches(p: &Plan, rel: &str, here: &str, me: &str) -> bool {
-        if p.pubkey == format!("pk-{me}") || p.project != here || !p.live(now()) {
+        matches_as(p, rel, here, me, "")
+    }
+
+    /// `matches`, but for a caller running as a named agent on key `me`.
+    fn matches_as(p: &Plan, rel: &str, here: &str, me: &str, instance: &str) -> bool {
+        if is_self(p, &format!("pk-{me}"), instance) || p.project != here || !p.live(now()) {
             return false;
         }
         p.touching.iter().any(|g| {
@@ -1932,6 +2904,277 @@ mod tests {
         assert_eq!(strip("/tmp/demo/src/a.ts", "/private/tmp/demo"), "src/a.ts");
         assert_eq!(strip("/private/tmp/demo/src/a.ts", "/tmp/demo"), "src/a.ts");
         assert_eq!(strip("/home/x/repo/src/a.ts", "/home/x/repo"), "src/a.ts");
+    }
+
+    /// The tab case. Two Claudes share one identity, so the pubkey matches and
+    /// only `instance` tells them apart. Without this the feature is inert and
+    /// nothing catches it — the failure is silence, not a wrong warning.
+    #[test]
+    fn same_key_different_agent_is_a_conflict() {
+        let mut p = plan("me", "demo", &["src/auth/**"], "working", 0);
+        p.instance = "claude-1".into();
+        assert!(
+            matches_as(&p, "src/auth/session.ts", "demo", "me", "claude-2"),
+            "claude-2 must see claude-1's claim on the same key"
+        );
+        assert!(
+            !matches_as(&p, "src/auth/session.ts", "demo", "me", "claude-1"),
+            "an agent must not conflict with itself"
+        );
+    }
+
+    /// A pre-0.2 peer publishes with no instance. It must still conflict with
+    /// an instanced agent, or upgrading one machine silently stops warnings.
+    #[test]
+    fn empty_instance_still_conflicts_with_a_named_one() {
+        let p = plan("me", "demo", &["src/auth/**"], "working", 0);
+        assert!(matches_as(
+            &p,
+            "src/auth/session.ts",
+            "demo",
+            "me",
+            "claude-1"
+        ));
+    }
+
+    /// `list` labels agents only when two are really holding paths. A sibling
+    /// that released still publishes a live row holding nothing, and counting
+    /// rows instead of claims tagged a peer that only ever had one.
+    #[test]
+    fn list_labels_agents_only_when_several_hold_paths() {
+        let holding = plan("peer", "demo", &["src/a/**"], "working", 0);
+        let released = plan("peer", "demo", &[], "working", 0);
+
+        assert!(
+            !names_worth_showing(std::slice::from_ref(&holding)),
+            "one claim needs no label"
+        );
+        assert!(
+            !names_worth_showing(&[holding.clone(), released]),
+            "a released sibling must not trip the label"
+        );
+        assert!(
+            names_worth_showing(&[holding.clone(), holding.clone()]),
+            "two real claims are worth telling apart"
+        );
+    }
+
+    #[test]
+    fn who_hides_the_instance_when_alone() {
+        let mut p = plan("peer", "demo", &[], "working", 0);
+        p.alias = "mymac".into();
+        p.instance = "claude-2".into();
+        assert_eq!(who(&p, true), "mymac/claude-2");
+        assert_eq!(who(&p, false), "mymac", "solo output stays as it was");
+        p.instance = String::new();
+        assert_eq!(who(&p, true), "mymac", "nothing to append");
+    }
+
+    /// Slots must be stable per session (the hook process has to land on the
+    /// same name as the agent that took the claim) and distinct between them.
+    #[test]
+    fn slots_are_stable_per_session_and_reused_once_free() {
+        let d = std::env::temp_dir().join(format!("rf-slots-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let t = 1_000_000;
+
+        let a = slot_in(&d, "session-a", t);
+        assert_eq!(
+            slot_in(&d, "session-a", t),
+            a,
+            "same session keeps its name"
+        );
+        let b = slot_in(&d, "session-b", t);
+        assert_ne!(a, b, "different sessions differ");
+        assert_eq!((a.as_str(), b.as_str()), ("claude-1", "claude-2"));
+
+        // An expired reservation frees its number for the next new session.
+        std::fs::write(d.join("instances"), format!("session-a\tclaude-1\t{t}\n")).unwrap();
+        assert_eq!(
+            slot_in(&d, "session-c", t + SLOT_TTL + 1),
+            "claude-1",
+            "stale slot is reclaimed"
+        );
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Byte slicing at an arbitrary offset panics on any multi-byte character,
+    /// and a task description is prose — so this is the case that matters.
+    #[test]
+    fn entry_text_truncates_on_a_character_boundary() {
+        assert_eq!(
+            truncate("short", MAX_ENTRY),
+            "short",
+            "under the cap is left alone"
+        );
+        assert_eq!(truncate("abcdef", 3), "abc…");
+
+        let wide = "\u{e9}".repeat(MAX_ENTRY + 50);
+        let got = truncate(&wide, MAX_ENTRY);
+        assert_eq!(
+            got.chars().count(),
+            MAX_ENTRY + 1,
+            "cap counts chars, not bytes"
+        );
+        assert!(got.ends_with('\u{2026}'));
+
+        // Exactly at the cap is not truncated: `nth(max)` finding nothing is
+        // the whole string, and an ellipsis there would be a lie.
+        let exact = "x".repeat(MAX_ENTRY);
+        assert_eq!(truncate(&exact, MAX_ENTRY), exact);
+    }
+
+    /// The rate-limit gate. A working agent republishes its claim on every
+    /// edit; if each one wrote a timeline entry the write budget would be gone
+    /// in under a minute and the relay would start refusing real claims.
+    #[test]
+    fn only_a_changed_claim_is_worth_an_entry() {
+        let held = plan("me", "repo", &["src/**"], "working", 0);
+        let same: Vec<String> = vec!["src/**".into()];
+        let other: Vec<String> = vec!["docs/**".into()];
+
+        // Mirrors the `changed` expression in the claim arm.
+        let changed =
+            |prev: Option<&Plan>, want: &Vec<String>| prev.map(|p| &p.touching) != Some(want);
+
+        assert!(
+            !changed(Some(&held), &same),
+            "republishing the same claim is not an event"
+        );
+        assert!(changed(Some(&held), &other), "claiming different paths is");
+        assert!(changed(None, &same), "a first claim is");
+        assert!(changed(Some(&held), &vec![]), "dropping to nothing is");
+    }
+
+    #[test]
+    fn watermark_round_trips_and_only_moves_forward() {
+        let d = std::env::temp_dir().join(format!("rf-seen-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+
+        assert!(read_seen(&d).is_empty(), "no file means seen nothing");
+
+        let mut seen = std::collections::HashMap::new();
+        seen.insert("https://a.example/plan".to_string(), 42i64);
+        // A URL with a namespace path, since that is the interesting case.
+        seen.insert("https://b.example/plan/team".to_string(), 7i64);
+        write_seen(&d, &seen);
+        assert_eq!(read_seen(&d), seen, "round trip");
+
+        // Advancing takes the max, so an out-of-order or duplicated fetch
+        // cannot rewind the cursor and replay entries forever.
+        let mut back = read_seen(&d);
+        let e = back.entry("https://a.example/plan".into()).or_insert(0);
+        *e = (*e).max(9);
+        assert_eq!(
+            back["https://a.example/plan"], 42,
+            "a lower id does not rewind"
+        );
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// Addressing is what makes a question reach one agent rather than the
+    /// wall. A missed match means an agent never learns something was for it.
+    #[test]
+    fn a_question_finds_the_agent_it_names() {
+        let cfg = |alias: &str, instance: &str| Cfg {
+            url: "https://relay.example/plan".into(),
+            alias: alias.into(),
+            instance: instance.into(),
+        };
+        let to = |t: &str| {
+            let mut p = plan("robot1", "repo", &[], "post", 0);
+            p.kind = "ask".into();
+            p.to = t.into();
+            p
+        };
+
+        let me = cfg("robot2", "claude-1");
+        assert!(addressed_to_me(&to("robot2"), &me), "my alias");
+        assert!(addressed_to_me(&to("ROBOT2"), &me), "case-insensitive");
+        assert!(addressed_to_me(&to(" robot2 "), &me), "whitespace trimmed");
+        assert!(addressed_to_me(&to("claude-1"), &me), "my instance");
+        assert!(
+            addressed_to_me(&to("robot2/claude-1"), &me),
+            "alias/instance"
+        );
+        assert!(!addressed_to_me(&to("robot1"), &me), "somebody else");
+        assert!(!addressed_to_me(&to(""), &me), "undirected is not for me");
+
+        // A solo agent has no instance, so the instance arms must not match
+        // everything by comparing against an empty string.
+        let solo = cfg("robot2", "");
+        assert!(addressed_to_me(&to("robot2"), &solo));
+        assert!(!addressed_to_me(&to(""), &solo));
+        assert!(!addressed_to_me(&to("robot2/"), &solo));
+    }
+
+    /// The flag-stripping this replaced broke as soon as the message repeated
+    /// the flag's own text — the shell has already eaten the quotes by then.
+    #[test]
+    fn message_keeps_words_that_look_like_flags() {
+        let args: Vec<String> = ["ask", "--to", "bob", "should", "--to", "mean", "bob?"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            message(&args, &["--to", "--re"]),
+            "should --to mean bob?",
+            "only the FIRST flag pair is consumed; a later one is message text \
+             and survives verbatim, along with the word after it"
+        );
+
+        let plain: Vec<String> = ["ask", "who", "takes", "auth"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(message(&plain, &["--to"]), "who takes auth");
+    }
+
+    /// A relay that accepts a connection and never answers used to hang the
+    /// client forever — and `check`/`start` run inside a coding agent's
+    /// session, so that hung the agent. The bound must survive both a new call
+    /// site (everything goes through `agent()`) and someone dropping the
+    /// per-command budget.
+    #[test]
+    fn every_request_is_bounded_and_hooks_are_bounded_tighter() {
+        // Read through variables: comparing the consts directly folds to a
+        // constant and clippy rightly says the assertion proves nothing.
+        // The bound being wired to real requests is covered by CI, which runs
+        // the hooks against a socket that accepts and never answers.
+        let (hook, cmd) = (HOOK_TIMEOUT, NET_TIMEOUT);
+        assert!(cmd > 0, "an unbounded request hangs the session");
+        assert!(
+            hook < cmd,
+            "hooks run inside an agent's session and must give up sooner \
+             than a command a person is watching"
+        );
+        // Several sequential requests fit in one command, so the wall-clock
+        // worst case is a multiple of this. Keep the multiple tolerable.
+        assert!(hook <= 3, "hook budget multiplies across relays");
+
+        // The default applies to anything that has not opted in.
+        assert_eq!(net_timeout(), NET_TIMEOUT);
+        NET_BUDGET.store(HOOK_TIMEOUT, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(net_timeout(), HOOK_TIMEOUT);
+        NET_BUDGET.store(NET_TIMEOUT, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[test]
+    fn since_accepts_durations_and_epochs() {
+        let t = 1_000_000i64;
+        assert_eq!(parse_since("2h", t).unwrap(), t - 7200);
+        assert_eq!(parse_since("30m", t).unwrap(), t - 1800);
+        assert_eq!(parse_since("3d", t).unwrap(), t - 259_200);
+        assert_eq!(parse_since("90s", t).unwrap(), t - 90);
+        assert_eq!(
+            parse_since("12345", t).unwrap(),
+            12345,
+            "bare number is an epoch"
+        );
+        assert!(parse_since("yesterday", t).is_err());
+        assert!(parse_since("2x", t).is_err());
     }
 
     #[test]

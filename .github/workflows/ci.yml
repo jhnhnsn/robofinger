@@ -50,6 +50,46 @@ jobs:
           [ $fail -eq 0 ] && echo "hook safety: OK"
           exit $fail
 
+      # A relay that ACCEPTS a connection and never answers is the case a
+      # refused connection does not cover: it fails fast, this hangs forever.
+      # The hooks run inside a coding agent's session, so an unbounded request
+      # hangs the agent itself. Only a real socket proves the bound is wired
+      # to the actual requests rather than just declared in a constant.
+      - name: hooks give up on a wedged relay
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          BIN=./target/release/robofinger
+          export ROBOFINGER_HOME="$RUNNER_TEMP/rf-bh"
+          mkdir -p "$ROBOFINGER_HOME"
+          echo "ROBOFINGER_URL=http://127.0.0.1:8791" > "$ROBOFINGER_HOME/config"
+
+          python3 - <<'EOF' &
+          import socket
+          s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          s.bind(("127.0.0.1", 8791)); s.listen(16)
+          held = []
+          while True:
+              c, _ = s.accept()
+              held.append(c)   # accept, then never answer
+          EOF
+          BH=$!
+          trap 'kill $BH 2>/dev/null' EXIT
+          sleep 1
+
+          fail=0
+          for cmd in check start end; do
+            start=$SECONDS
+            "$BIN" "$cmd" /tmp/x.rs >/dev/null 2>&1 </dev/null
+            rc=$?; took=$(( SECONDS - start ))
+            [ $rc -eq 0 ] || { echo "FAIL: $cmd exited $rc against a wedged relay"; fail=1; }
+            [ $took -le 10 ] || { echo "FAIL: $cmd took ${took}s — the timeout is not wired up"; fail=1; }
+            echo "  $cmd: ${took}s"
+          done
+          [ $fail -eq 0 ] && echo "wedged-relay safety: OK"
+          exit $fail
+
       # Keys must round-trip and identities must be stable across loads —
       # a regenerated key silently breaks every peer relationship.
       - name: identity is stable
@@ -86,3 +126,9 @@ jobs:
       - run: npm ci
       - name: wrangler dry-run (config + bindings valid)
         run: npx wrangler deploy --dry-run
+      # The trim and paging SQL is the part that has been wrong before, and a
+      # dry-run does not execute a single query. Both run against real sqlite.
+      - name: sql (trim + cursor)
+        run: |
+          ./test_trim.sh
+          ./test_cursor.sh

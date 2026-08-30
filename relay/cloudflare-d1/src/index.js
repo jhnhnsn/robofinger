@@ -36,6 +36,12 @@ const MAX_INSTANCE = 64;
 /// Claims republish on every edit, so this is deliberately shallow — the
 /// client only writes a new row when what it holds actually changes.
 const MAX_PLANS_PER_INSTANCE = 3;
+/// Instances kept per identity. Since 0.3 every session gets its own instance
+/// automatically, so a heavy tab user retires instances steadily and the
+/// per-instance trim above never touches them — it is scoped to one instance.
+/// Without this bound a `plans` fetch grows with lifetime session count.
+/// Retired instances are dropped oldest-first by their newest claim.
+const MAX_INSTANCES_PER_KEY = 10;
 const DEFAULT_POST_LIMIT = 20;
 const MAX_POST_LIMIT = 100;
 
@@ -223,7 +229,15 @@ async function getPlans(db, ns, from) {
     .filter((r) => r && typeof r.pubkey === "string");
 }
 
-async function getPosts(db, ns, from, limit, before) {
+/// `before` pages backwards through history; `after` is the mirror, and is what
+/// a client polling for "what is new since I last looked" sends.
+///
+/// Ordering stays `id DESC` for both, so `after` with more new rows than
+/// `limit` returns the NEWEST window rather than the oldest — a caller that has
+/// been away a long time advances its cursor to the highest id it saw and calls
+/// again. Paging forward from the oldest instead would make the common case
+/// (nothing or a handful new) walk the whole backlog to reach the present.
+async function getPosts(db, ns, from, limit, before, after) {
   const want = fromList(from);
   if (want && want.length === 0) return [];
 
@@ -237,6 +251,10 @@ async function getPosts(db, ns, from, limit, before) {
   if (before) {
     clauses.push("id < ?");
     args.push(before);
+  }
+  if (after) {
+    clauses.push("id > ?");
+    args.push(after);
   }
   args.push(limit);
 
@@ -342,6 +360,24 @@ async function putPlan(db, ns, pubkey, request) {
        ) - 1`,
     )
     .bind(ns, pubkey, instance, ns, pubkey, instance, MAX_PLANS_PER_INSTANCE)
+    .run();
+
+  // Then bound the number of instances themselves. Ranked by newest claim, so
+  // "oldest" means least recently active rather than first ever seen — an
+  // agent you still use every day is never evicted by one you opened once.
+  //
+  // Ranked on `epoch`, NOT `seq`: seq restarts at 1 for every new instance, so
+  // it counts how often an agent has published rather than how recently. That
+  // would rank a fresh tab below a retired chatty one and evict the row just
+  // written. epoch is wall-clock and comparable across instances.
+  await db
+    .prepare(
+      `DELETE FROM plans WHERE ns=? AND pubkey=? AND instance NOT IN (
+         SELECT instance FROM plans WHERE ns=? AND pubkey=?
+         GROUP BY instance ORDER BY MAX(epoch) DESC LIMIT ?
+       )`,
+    )
+    .bind(ns, pubkey, ns, pubkey, MAX_INSTANCES_PER_KEY)
     .run();
 
   return json({ ok: true, seq });
@@ -483,6 +519,7 @@ export default {
             url.searchParams.get("from"),
             Number(url.searchParams.get("limit")) || DEFAULT_POST_LIMIT,
             Number(url.searchParams.get("before")) || null,
+            Number(url.searchParams.get("after")) || null,
           ),
         );
       }
@@ -492,7 +529,7 @@ export default {
         return json({
           pubkey: key,
           plans: await getPlans(db, ns, key),
-          posts: await getPosts(db, ns, key, DEFAULT_POST_LIMIT, null),
+          posts: await getPosts(db, ns, key, DEFAULT_POST_LIMIT, null, null),
           forward: await getForward(db, ns, key),
         });
       }

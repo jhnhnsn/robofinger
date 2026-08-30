@@ -9,30 +9,167 @@
 //! config the user already owns, so it backs up first, never clobbers unrelated
 //! keys, and is idempotent.
 
-use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
-/// Printed after install — without this the agent never publishes claims, so
-/// `touching` stays empty and every conflict check passes trivially.
-pub const CLAUDE_MD: &str = r#"## Agent Plan Sync
-When starting a task that will edit files, claim the paths first:
-`robofinger claim "<short task description>" '<glob>' '<glob>'`
+/// The workflow file written into a repo by `init` and `hooks install`.
+///
+/// A file rather than a string the user must paste somewhere: the paste step
+/// was unenforced and invisible when skipped, and an agent that never reads it
+/// never claims — so `touching` stays empty, every peer's check passes
+/// trivially, and the tool silently does nothing while looking like it works.
+///
+/// Named ROBOFINGER.md rather than appended to CLAUDE.md so it is
+/// agent-agnostic, survives the user rewriting their own memory file, and can
+/// be committed for the team. The MARKER section is regenerated on upgrade;
+/// everything below "Team conventions" is the user's and is never touched.
+pub const ROBOFINGER_MD: &str = r#"# robofinger — how this repo coordinates agents
 
-Release when done: `robofinger release`
-See who is working on what: `robofinger list`
+<!-- managed by robofinger; edits above "Team conventions" are overwritten on upgrade -->
 
-Globs are relative to the repo you're working in. Claims are advisory — a
-CLAIM CONFLICT warning means another agent is working there; decide whether to
-back off or proceed, don't silently ignore it. Claims auto-expire, so a
-forgotten release is not fatal.
+Several coding agents work in this repo, on different machines. None of them
+can see what the others are doing. robofinger is how they tell each other,
+in real time, before the work collides — git only says so after a commit.
 
-Waiting is a third option, and usually the right one when the conflict is on
-the file you actually need. `robofinger check <path>` exits 0 and prints a
-CLAIM CONFLICT line while the path is held, and prints nothing once it clears,
-so poll it in the background rather than sitting idle or asking the user:
-run it under a background monitor and get on with unblocked work in the
-meantime. Don't hand-roll a foreground sleep loop — it blocks the session for
-something that may take minutes."#;
+**Everything here is advisory. Nothing blocks, nothing locks, nothing waits on
+a server.** A warning you ignore costs a merge conflict, not a deadlock.
+
+## What to do, in order
+
+**1. Before editing files, claim them.**
+
+```sh
+robofinger claim "<short task description>" '<glob>' '<glob>'
+```
+
+Globs are relative to the repo root. A claim *replaces* your previous one
+rather than adding to it, so pass every path you are still working on. This is
+the step everything else depends on: without it you publish nothing, and every
+teammate's conflict check passes trivially.
+
+**2. When you are done, release with what actually happened.**
+
+```sh
+robofinger release --note "dual-write landed, rollback is a flag"
+```
+
+The claim said what you intended. The note says what you did — it is what a
+teammate reads to decide whether they can proceed. Claims expire on their own
+after roughly an hour, so a forgotten release is not fatal, just unhelpful.
+
+**3. Catch up on your teammates.**
+
+```sh
+robofinger since          # what changed since you last looked; advances a cursor
+robofinger list           # who is holding what right now
+robofinger log --since 2h # a window, without moving the cursor
+```
+
+The SessionStart hook runs `since` for you. Run it again mid-task after a long
+stretch of work.
+
+## When you hit a CLAIM CONFLICT
+
+Another agent is holding a path you want. Four options, roughly in order:
+
+1. **Work elsewhere.** Cheapest, and usually right.
+2. **Wait.** `robofinger check <path>` prints nothing once the path frees up,
+   so poll it in the background and get on with unblocked work. Do not sit
+   idle, and do not hand-roll a foreground sleep loop — it blocks the session
+   for something that may take minutes.
+3. **Ask the holder.** They see it at their next session start.
+4. **Ask your human.** See below.
+
+## Talking to the other agents
+
+```sh
+robofinger ask --to <peer> "both of us want src/auth. I can take the API layer
+  instead, or wait for your release. Which?"
+robofinger answer --to <peer> --re <id> "take the API layer; auth frees ~20m"
+```
+
+**Give the options, not just the problem.** "I'm blocked" forces someone to
+work out what to do. "I can take the API layer or wait ~20m, which?" can be
+settled in one line. Ids come from `robofinger since --ids`.
+
+Without `--to` the whole team sees it; with it, that agent gets it marked
+FOR YOU at its next session start.
+
+`robofinger post "<text>"` leaves a note that expects no reply — a heads-up,
+a handoff, something you learned.
+
+## When to ask your human instead
+
+Ask a person, rather than deciding alone, when:
+
+- two agents want the same path and neither has yielded
+- a peer's claim is well past its ETA and you cannot tell if the session died
+- a peer asks you something whose answer changes work outside your task
+- answering would mean undoing a teammate's work
+
+**Say what you would do by default and what the alternatives cost.** Do not
+just report the problem.
+
+Everything else is context: read it, carry on, and do not reply to be polite —
+there is no audience.
+
+## Team conventions
+
+<!-- Yours. Anything below this line survives `robofinger hooks install`. -->
+"#;
+
+/// Everything above this heading is regenerated on upgrade; below it is the
+/// user's. Matched on the heading itself rather than a comment marker so a
+/// user who tidies the HTML comments away does not lose their section.
+pub const USER_SECTION: &str = "## Team conventions";
+
+/// Write ROBOFINGER.md into the repo root, keeping anything the user added.
+///
+/// Idempotent: the managed part is regenerated, and everything from
+/// `USER_SECTION` onward is carried across verbatim. A user who deleted that
+/// heading gets the fresh one, which is the same as a first install — better
+/// than refusing to upgrade a file they edited.
+pub fn write_workflow(dir: &std::path::Path) -> Result<String, String> {
+    let path = dir.join("ROBOFINGER.md");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let body = match existing.find(USER_SECTION) {
+        // Splice the user's tail onto the regenerated head. The managed text
+        // ends with its own copy of the heading, so drop that before joining
+        // or the file grows a duplicate on every upgrade.
+        Some(i) => {
+            let head = ROBOFINGER_MD
+                .split_once(USER_SECTION)
+                .map(|(h, _)| h)
+                .unwrap_or(ROBOFINGER_MD);
+            format!("{head}{}", &existing[i..])
+        }
+        None => ROBOFINGER_MD.to_string(),
+    };
+
+    if body == existing {
+        return Ok(format!("{} is already up to date", path.display()));
+    }
+    let verb = if existing.is_empty() {
+        "wrote"
+    } else {
+        "updated"
+    };
+    std::fs::write(&path, &body).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(format!("{verb} {}", path.display()))
+}
+
+/// The repo root, or the working directory when this is not a git checkout.
+pub fn repo_dir() -> PathBuf {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
 
 /// Where the hooks get written.
 ///
@@ -111,64 +248,6 @@ fn already_installed(settings: &serde_json::Value) -> bool {
                     })
                 })
         })
-}
-
-/// Ask whether to install the hooks, defaulting to NO.
-///
-/// This edits `~/.claude/settings.json`, a file the user owns and that other
-/// tools also write to, so silence must mean "don't touch it". A non-TTY does
-/// nothing at all — a scripted `init` should never rewrite someone's config.
-///
-/// Returns true if hooks were installed.
-pub fn prompt_install() -> bool {
-    // Ask on the controlling terminal, not on stdin.
-    //
-    // `init` is often run with stdin redirected — from a setup script, over
-    // `ssh host "robofinger init …"`, or piped. Gating on stdin meant the
-    // question silently never appeared in exactly those cases. stderr is where
-    // the prompt is written, so that is what decides whether a human is there,
-    // and the answer is read from /dev/tty so a redirected stdin does not
-    // matter.
-    if !io::stderr().is_terminal() {
-        return false;
-    }
-    let Ok(mut tty) = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-    else {
-        return false;
-    };
-
-    let account = settings_path_for(Scope::Account);
-    let project = settings_path_for(Scope::Project);
-    eprintln!("\nLet your coding agent read and write your plan?");
-    eprintln!("  [p] project — {} (this repo only)", project.display());
-    eprintln!("  [a] account — {} (every project here)", account.display());
-    eprintln!("  [N] not now");
-    eprint!("Choice [p/a/N]: ");
-    let _ = io::stderr().flush();
-
-    let mut input = String::new();
-    if std::io::BufRead::read_line(&mut std::io::BufReader::new(&mut tty), &mut input).is_err() {
-        return false;
-    }
-    let scope = match input.trim().to_ascii_lowercase().as_str() {
-        "p" | "project" | "y" | "yes" => Scope::Project,
-        "a" | "account" => Scope::Account,
-        _ => return false,
-    };
-
-    match install(true, scope) {
-        Ok(m) => {
-            eprintln!("{m}");
-            true
-        }
-        Err(e) => {
-            eprintln!("hook install failed: {e}");
-            false
-        }
-    }
 }
 
 /// Merge the hooks into settings.json. Backs up any existing file first.
@@ -325,6 +404,56 @@ mod tests {
             }
         });
         assert!(!already_installed(&other));
+    }
+
+    /// The upgrade path. Losing a team's own conventions because robofinger
+    /// wanted to refresh its own text would be unforgivable, and it is exactly
+    /// what a naive overwrite does.
+    #[test]
+    fn upgrading_the_workflow_keeps_what_the_team_added() {
+        let d = std::env::temp_dir().join(format!("rf-wf-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("ROBOFINGER.md");
+
+        write_workflow(&d).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(first.contains(USER_SECTION));
+
+        // A second run changes nothing.
+        write_workflow(&d).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first, "idempotent");
+
+        // The team adds conventions, and robofinger later ships new text.
+        std::fs::write(
+            &path,
+            format!("# stale\n\nold managed text\n\n{USER_SECTION}\n\n- ping alice first\n"),
+        )
+        .unwrap();
+        write_workflow(&d).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            after.contains("- ping alice first"),
+            "team conventions survived"
+        );
+        assert!(
+            !after.contains("old managed text"),
+            "stale managed text replaced"
+        );
+        assert!(after.starts_with("# robofinger"), "fresh managed head");
+        assert_eq!(
+            after.matches(USER_SECTION).count(),
+            1,
+            "the heading must not accumulate on every upgrade"
+        );
+
+        // A user who deleted the heading gets a clean file rather than an
+        // error — same as a first install.
+        std::fs::write(&path, "# whatever\n").unwrap();
+        write_workflow(&d).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]

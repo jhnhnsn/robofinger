@@ -82,7 +82,44 @@ if run c log -n 50 | grep -qF "$STAMP"; then
 fi
 echo "ok  stranger cannot read (not a recipient)"
 
+# --- the timeline: b can ask what a has done since it last looked ------------
+# `list` and `check` answer "right now". This answers "while I was away", which
+# is the half git cannot supply until someone commits.
+run b since > /dev/null                    # consume the backlog, set a watermark
+run b since | grep -q "nothing new" || fail "b's watermark did not advance"
+echo "ok  since is empty once caught up"
+
+run a claim "$STAMP-timeline" "src/tl-$$.rs" > /dev/null
+run b since | grep -qF "$STAMP-timeline" || fail "b never saw a's claim entry"
+echo "ok  claim reached b's timeline"
+
+# The gate that keeps a working agent from spending its whole write budget
+# journalling itself: republishing an unchanged claim is not an event.
+run a claim "$STAMP-timeline" "src/tl-$$.rs" > /dev/null
+run b since | grep -q "nothing new" || fail "an unchanged republish wrote an entry"
+echo "ok  unchanged republish writes nothing"
+
+# --- ask/answer: the escalation path between two robots ----------------------
+# The reason the tool exists is that agents settle things between themselves.
+# A question that does not reach the agent it names is the failure that matters.
+run a ask --to machine-b "$STAMP-question" > /dev/null
+run b since | grep -qF "$STAMP-question" || fail "b never saw a's question"
+echo "ok  question reached b"
+
+# The SessionStart hook is where an agent actually reads this, and it must mark
+# a directed question as being for the recipient specifically.
+run b start | grep -qF "FOR YOU" || fail "b's session start did not flag the question"
+echo "ok  question marked FOR YOU at session start"
+
+run b answer --to machine-a --re 1 "$STAMP-answer" > /dev/null
+run a since | grep -qF "$STAMP-answer" || fail "a never saw b's answer"
+echo "ok  answer reached a"
+
 # --- release, so the claim does not linger on the relay ----------------------
+run a release --note "$STAMP-done" > /dev/null
+run b since | grep -qF "$STAMP-done" || fail "b never saw a's release note"
+echo "ok  release note reached b's timeline"
+
 run a release > /dev/null
 
 echo

@@ -10,9 +10,12 @@
 -- cannot read. Empty instance is the single-agent case and what every
 -- pre-0.2 client sends.
 --
--- Append-only, trimmed to the last few per (ns, pubkey, instance): the
--- current claim is the newest row, and the ones behind it are the short
--- history `robofinger` shows.
+-- Append-only, trimmed on write in two directions: to the last few rows per
+-- (ns, pubkey, instance) -- the current claim plus the short history
+-- `robofinger` shows -- and to the most recently active instances per
+-- (ns, pubkey). The second bound matters because since 0.3 every session gets
+-- its own instance automatically, so instances are retired steadily and the
+-- per-instance trim never touches them.
 CREATE TABLE IF NOT EXISTS plans (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   ns       TEXT NOT NULL,
