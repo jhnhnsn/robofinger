@@ -27,8 +27,10 @@ pub const ROBOFINGER_MD: &str = r#"# robofinger — how this repo coordinates ag
 <!-- managed by robofinger; edits above "Team conventions" are overwritten on upgrade -->
 
 Several coding agents work in this repo, on different machines. None of them
-can see what the others are doing. robofinger is how they tell each other,
-in real time, before the work collides — git only says so after a commit.
+can see what the others are doing. robofinger is how they tell each other —
+what they are touching now, what they have just finished, and anything the
+others need to know. Git says all of it eventually; this says it in time to
+matter.
 
 **Everything here is advisory. Nothing blocks, nothing locks, nothing waits on
 a server.** A warning you ignore costs a merge conflict, not a deadlock.
@@ -46,7 +48,19 @@ rather than adding to it, so pass every path you are still working on. This is
 the step everything else depends on: without it you publish nothing, and every
 teammate's conflict check passes trivially.
 
-**2. When you are done, release with what actually happened.**
+**2. If the claim looks contentious, say so before you start.**
+
+```sh
+robofinger ask --to <peer> "I'm about to take src/auth for ~an hour. Does that
+  cut across what you're doing, or shall I start with the API layer?"
+```
+
+Cheapest coordination there is: a question before the work costs one line, the
+same question after costs somebody their afternoon. Worth doing when a peer
+released the path recently, when the claim is broad, or when you are about to
+change something everything else imports.
+
+**3. When you are done, release with what actually happened.**
 
 ```sh
 robofinger release --note "dual-write landed, rollback is a flag"
@@ -56,7 +70,14 @@ The claim said what you intended. The note says what you did — it is what a
 teammate reads to decide whether they can proceed. Claims expire on their own
 after roughly an hour, so a forgotten release is not fatal, just unhelpful.
 
-**3. Catch up on your teammates.**
+## The timeline
+
+Claims are ephemeral — they say who holds what *right now*, and release drops
+them. Every claim and release is also written to a timeline that persists, and
+that record is half of what this tool is for.
+
+**Read it.** The SessionStart hook runs `since` for you at the top of a
+session; run it again after a long stretch of work.
 
 ```sh
 robofinger since          # what changed since you last looked; advances a cursor
@@ -64,20 +85,21 @@ robofinger list           # who is holding what right now
 robofinger log --since 2h # a window, without moving the cursor
 ```
 
-The SessionStart hook runs `since` for you. Run it again mid-task after a long
-stretch of work.
+`since` *consumes*: it advances a cursor, so what it shows you it will not show
+again. Use `log --since` when you want to look without spending it.
 
-## When you hit a CLAIM CONFLICT
+**Write to it.** A note costs seconds and saves a teammate the round trip of
+asking.
 
-Another agent is holding a path you want. Four options, roughly in order:
+```sh
+robofinger post "auth migration is blocked on the schema change landing first"
+robofinger post "the retry backoff was wrong for 5xx, not just timeouts — fixed"
+```
 
-1. **Work elsewhere.** Cheapest, and usually right.
-2. **Wait.** `robofinger check <path>` prints nothing once the path frees up,
-   so poll it in the background and get on with unblocked work. Do not sit
-   idle, and do not hand-roll a foreground sleep loop — it blocks the session
-   for something that may take minutes.
-3. **Ask the holder.** They see it at their next session start.
-4. **Ask your human.** See below.
+Worth a post: something you learned that changes what a teammate would do, a
+handoff, a decision that is not obvious from the diff. Not worth a post: what
+the commit already says. Entries are capped at 280 characters, so say the
+useful half.
 
 ## Talking to the other agents
 
@@ -92,10 +114,20 @@ work out what to do. "I can take the API layer or wait ~20m, which?" can be
 settled in one line. Ids come from `robofinger since --ids`.
 
 Without `--to` the whole team sees it; with it, that agent gets it marked
-FOR YOU at its next session start.
+FOR YOU at its next session start. An `ask` is not an interruption — nothing
+pings anyone, it just lands in that agent's next session.
 
-`robofinger post "<text>"` leaves a note that expects no reply — a heads-up,
-a handoff, something you learned.
+## When you hit a CLAIM CONFLICT
+
+Another agent is holding a path you want. Four options, roughly in order:
+
+1. **Work elsewhere.** Cheapest, and usually right.
+2. **Wait.** `robofinger check <path>` prints nothing once the path frees up,
+   so poll it in the background and get on with unblocked work. Do not sit
+   idle, and do not hand-roll a foreground sleep loop — it blocks the session
+   for something that may take minutes.
+3. **Ask the holder.** They see it at their next session start.
+4. **Ask your human.** See below.
 
 ## When to ask your human instead
 
