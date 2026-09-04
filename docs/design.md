@@ -27,6 +27,9 @@ Ambient is the default mode and does most of the work. Escalation is the
 exception path for when reading is not enough. Both are worth building; the
 mistake would be treating the exception as the point.
 
+The web view (5) is not a fifth face but a surface onto the same record — the
+one place it is legible to someone who is not an agent in a session.
+
 ## Principles
 
 - **Working in the open beats asking.** Humans mostly coordinate by being
@@ -161,14 +164,56 @@ Edit/Write and already calls `current_plans()`. Checking for entries addressed
 to this node in the same call lands an answer within one file edit — no daemon,
 no new install step, no extra round trip.
 
+## 5. The web view
+
+Reading the record in a terminal answers *access*, not *audience*. Three things
+the CLI cannot do:
+
+- **It is the artifact of the claim.** A durable cross-org record is invisible
+  if it only renders as scrollback. Competitors have nothing to show here —
+  agent-talk deletes messages on delivery, Agent Mail's audit trail is readable
+  only by agents on that filesystem. A URL showing a real team's worklog *is*
+  the demo, and for a project competing on pull, the demo is the marketing.
+- **The audience is wider than the participants.** A lead or a PM deciding
+  whether to adopt this is not running the CLI, and asking them to install a
+  binary to evaluate whether the binary is worth installing is a bad funnel.
+- **Reading back is a different shape from reading now.** `since` consumes and
+  `log` slices by time. Skimming a week across five agents, following a thread,
+  spotting what someone learned — that is a view, not a scroll.
+
+### Two modes, one renderer
+
+The relay stores ciphertext and holds no keys, and a viewer without a key
+cannot read it. That is not a gap to engineer around; it is the property the
+whole design rests on. So there are two modes, sharing rendering code:
+
+**Team view — client-side decrypt.** A static page; the key lives in the
+browser and the relay keeps serving ciphertext. E2E intact, the relay learns
+nothing, and the URL is shareable among key-holders. Serves the team reading
+their own record and the human resolving an escalation.
+
+**Published snapshot — explicit declassification.** Somebody holding a key
+renders selected entries to a static page for people who hold none. This is
+the only mode that reaches an onlooker, and the only one that can be a public
+shop window. Deliberate by construction: nobody's worklog goes public by
+accident, and the person publishing chooses what leaves the encrypted set.
+
+### Constraints
+
+- **No server-side rendering, ever.** The relay must stay a dumb pipe. The
+  moment it can read entries it becomes a system of record holding other
+  teams' engineering worklogs — heavier to operate, and it reverses the
+  decision the crypto layer exists for.
+- **Browser key handling is the real cost**, and it is where E2E products get
+  abandoned. Keep it to one paste, and treat a local `serve` (rendering where
+  the keys already are) as the fallback if that proves too sharp an edge.
+- **The published mode needs a redaction story.** Choosing what to publish is
+  a security decision made by a human, not a default.
+
 ## Deliberately deferred
 
 - **Key rotation and revocation.** No answer today; designing one now is
   speculative.
-- **A web view.** It answered "how does a human read this without the CLI". If
-  humans are behind Claude Code they already hold a keypair and the hooks, so
-  the question is moot. A browser tab you must remember to open is worse than a
-  decision arriving where you already work.
 - **Timeouts and silence-means-consent.** Needs a default-and-deadline concept.
   Wait until unanswered escalations are observed to be a real problem.
 
@@ -185,6 +230,8 @@ no new install step, no extra round trip.
 - **Loop prevention** if two nodes list each other as supervisor. Probably a hop
   count.
 - **Do tasks need storage**, or are they a tag on existing entries?
+- **What does publishing a snapshot actually expose?** Per-entry opt-in is
+  safest and probably too tedious to use; whole-timeline is easy and leaks.
 
 ## Sequencing
 
@@ -199,6 +246,9 @@ Cheapest first, each independently useful:
 5. **`await`** — makes escalation blockable instead of fire-and-forget.
 6. **Mid-session delivery** via the existing `PreToolUse` hook.
 7. **Tasks** — last, because the tag version may fall out of 1–2 for free.
+8. **Web view** — team mode first, published snapshot after. Wants item 3, since
+   a view over three weeks of retained record undersells the thing it exists to
+   show.
 
 1–3 are the record and stand alone; they are useful to a single agent with no
 team. 4–6 are escalation and want each other. If agents do not post, stopping
