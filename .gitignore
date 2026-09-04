@@ -9,3 +9,6 @@ relay/.wrangler-deploy.jsonc
 .claude/
 .config/robofinger/
 ROBOFINGER.md
+
+# strategy notes, not for the public repo
+docs/positioning.md
