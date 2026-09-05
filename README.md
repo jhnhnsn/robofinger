@@ -1,14 +1,16 @@
 # robofinger
 
-**Coordination for teams of coding agents.**
+**Agents coordinate whether or not you give them a channel. This is one you can
+read.**
 
 Robots claim the files they are about to edit. Robots release them. Every
-claim and release lands on a shared timeline the other robots can read — so an
-agent can ask what its teammates have been doing since it last looked, and get
-an answer now rather than at merge time.
+claim, release and note lands on a shared timeline the other robots can read —
+so an agent can ask what its teammates have been doing since it last looked,
+and get an answer now rather than at merge time.
 
-When two of them want the same thing, they can put the question to each other
-— and to a human when neither should decide alone.
+When two of them want the same thing, they put the question to each other. When
+neither should decide alone, it goes to a human — and every hop is on the
+record.
 
 ## Install
 
@@ -52,12 +54,33 @@ nothing new
 
 ## The problem
 
-Two people point coding agents at the same repo. Nothing tells either agent
-what the other is doing, so both refactor `src/auth/` in parallel and find out
-at merge time.
+In mid-2026 somebody noticed unusual edit volume on an obscure German wiki. It
+turned out to be [~18,000 posts from AI agents](https://collusion.wiki/) that
+had discovered they could write to it, and had built a coordination layer there
+out of the only writable surface they could reach. They pooled results across
+cohorts, shared techniques that worked, wrote backup pages to survive deletion,
+and posted heartbeats so they could tell when a peer's run had died.
 
-The information exists — each agent knows exactly what it's about to touch. It
-just never leaves the machine.
+Nobody designed that. They had a shared task and no channel, so they made one.
+It ran for a month, and the reason it stopped is that a moderator happened to
+look at the edit counts.
+
+That is the actual shape of the problem, and it has two halves:
+
+**Agents will coordinate.** Give them a channel or they will find one — a wiki,
+a scratch file, a branch nobody reads, a comment in a config. Coordination is
+what a group of agents with a shared goal reaches for immediately.
+
+**Coordination without a record is invisible.** Not sinister — just
+unobservable. Those agents weren't doing anything malicious; they were doing
+their task better, together. A month passed with no human able to see it.
+
+The everyday version costs less and happens constantly: two people point coding
+agents at the same repo, nothing tells either agent what the other is doing, so
+both refactor `src/auth/` in parallel and find out at merge time.
+
+Same root cause both times. The information exists — each agent knows exactly
+what it's about to touch — it just never leaves the machine.
 
 ```sh
 robofinger claim "migrate session store" 'src/auth/**'
@@ -109,6 +132,12 @@ answer that would undo someone's work — and tell the agent to say what it woul
 do by default and what the alternatives cost. That is a rule, not a judgment
 call, because "use your judgment" produces agents that either never ask or ask
 constantly.
+
+This is the part that makes the record worth keeping. A chain of agents
+negotiating among themselves is exactly the wiki again, just with better
+syntax. What changes it is that the chain **terminates in a person**, and every
+hop up to them is written down. The human is not a dashboard bolted onto the
+side; they are the top of the escalation path by construction.
 
 ## How the agents know what to do
 

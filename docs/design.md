@@ -23,9 +23,23 @@ four features:
 | **Task coordination** | what work exists, who has it? | now, above the file level |
 | **Escalation** | what do I do when I cannot decide? | up a level |
 
-Ambient is the default mode and does most of the work. Escalation is the
-exception path for when reading is not enough. Both are worth building; the
-mistake would be treating the exception as the point.
+Ambient is the default mode and does most of the volume. Escalation is the
+exception path for when reading is not enough — rare by count, and the thing
+that makes the rest defensible.
+
+The distinction matters because of what happens without it.
+[collusion.wiki](https://collusion.wiki/) documents ~18,000 posts from AI agents
+that found a writable wiki and built exactly the ambient half on their own:
+pooled results, shared technique, backup pages against deletion, heartbeats to
+detect dead peers. Emergent and effective. What they had no way to build was a
+human — nobody could see any of it for a month, and discovery was a moderator
+noticing edit counts.
+
+So: ambient coordination is what agents do anyway, and a tool that provides it
+is relocating the behavior somewhere legible rather than inventing it.
+**Escalation terminating in a person is the part that does not emerge on its
+own**, and the reason the record is worth keeping rather than just worth
+having. Volume is ambient; the claim is escalation. Both get built.
 
 The web view (5) is not a fifth face but a surface onto the same record — the
 one place it is legible to someone who is not an agent in a session.
@@ -116,10 +130,16 @@ tag on existing entries. The tag version is much cheaper and probably enough.
 
 ## 4. Escalation
 
-The exception path: an agent that cannot decide alone needs somewhere to put
-the question. `GUIDANCE` already tells it to ask a human and then stops, because
-there is no mechanism behind the sentence — the question never reaches the
-record and the answer never returns.
+The exception path by volume, and the differentiated claim by substance: an
+agent that cannot decide alone needs somewhere to put the question. `GUIDANCE`
+already tells it to ask a human and then stops, because there is no mechanism
+behind the sentence — the question never reaches the record and the answer
+never returns.
+
+A chain of agents settling things among themselves is the wiki again with
+better syntax. What makes it something else is that the chain terminates in a
+person and every hop is written down. That is why the human is at the top by
+construction here, rather than being a viewer bolted on at the end.
 
 ### Direction
 
@@ -170,10 +190,12 @@ Reading the record in a terminal answers *access*, not *audience*. Three things
 the CLI cannot do:
 
 - **It is the artifact of the claim.** A durable cross-org record is invisible
-  if it only renders as scrollback. Competitors have nothing to show here —
-  agent-talk deletes messages on delivery, Agent Mail's audit trail is readable
-  only by agents on that filesystem. A URL showing a real team's worklog *is*
-  the demo, and for a project competing on pull, the demo is the marketing.
+  if it only renders as scrollback — which is the failure mode the whole design
+  is aimed at, reintroduced at the last step. Competitors have nothing to show
+  here: agent-talk deletes messages on delivery, Agent Mail's audit trail is
+  readable only by agents on that filesystem. A URL showing a real team's
+  worklog *is* the demo, and for a project competing on pull, the demo is the
+  marketing.
 - **The audience is wider than the participants.** A lead or a PM deciding
   whether to adopt this is not running the CLI, and asking them to install a
   binary to evaluate whether the binary is worth installing is a bad funnel.
@@ -254,3 +276,10 @@ Cheapest first, each independently useful:
 team. 4–6 are escalation and want each other. If agents do not post, stopping
 after 2 has cost an afternoon — which is also the cheapest way to test the
 premise the whole design rests on.
+
+**Cheapest-first is the build order, not the pitch order.** What the pitch
+rests on is 4 and 8 — escalation, and a URL where a human sees five agents'
+worklogs and one open decision addressed to them. Ordering 1–3 first is right
+because they are prerequisites, but a version that ships 1–3 and stops is a
+better logging tool, not a different category. Worth knowing which item is the
+demo before deciding what "done enough to show someone" means.
