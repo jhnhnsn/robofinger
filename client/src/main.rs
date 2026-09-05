@@ -548,6 +548,62 @@ fn git_toplevel() -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// Commit subjects made under a claim, for a release nobody wrote a note for.
+///
+/// The whole design rests on a non-empty record, and an agent that has to
+/// compose a note is an agent that often does not. The commits already say
+/// what happened, scoped to the paths the claim covered — so derive the note
+/// rather than asking for one. An explicit `--note` always wins.
+///
+/// `since` is the claim time; the globs become git pathspecs, which is why
+/// they are passed through unchanged — `src/auth/**` means the same thing to
+/// both. Empty when nothing was committed, which is the honest answer and
+/// leaves the existing task/duration fallbacks to handle it.
+fn commits_since(since: i64, globs: &[String]) -> String {
+    let mut args = vec![
+        "log".to_string(),
+        "--no-merges".to_string(),
+        "--format=%s".to_string(),
+        format!("--since=@{since}"),
+        // Without this, git walks whatever branch HEAD is on *and* its
+        // ancestors' merges into other branches.
+        "--first-parent".to_string(),
+        // ponytail: no --author filter. `--author=@self` reads the *global*
+        // user.email, so it silently returns nothing in any repo that
+        // overrides it — a common work/personal split. The path scope plus
+        // the claim window is enough: a pull brings older author dates, which
+        // fall outside `--since` anyway. Revisit if a shared branch turns out
+        // to leak teammates' commits into a note.
+    ];
+    if !globs.is_empty() {
+        args.push("--".to_string());
+        args.extend(globs.iter().cloned());
+    }
+    let Ok(out) = std::process::Command::new("git")
+        .current_dir(repo_root())
+        .args(&args)
+        .output()
+    else {
+        return String::new();
+    };
+    if !out.status.success() {
+        return String::new();
+    }
+    let subjects: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    // Oldest first reads as a narrative; newest first reads as a stack.
+    // `truncate` at the call site cuts the tail, so the earliest work — the
+    // part that explains the rest — is what survives a long list.
+    subjects
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Repo name, so `src/**` in one project never collides with `src/**` in another.
 fn project() -> String {
     git_toplevel()
@@ -1959,12 +2015,19 @@ fn main() {
             // Releasing nothing is a no-op, not an event.
             if !held.is_empty() {
                 // The note says what happened; the task only ever said what was
-                // intended. Fall back to the intent when there is no note, and
-                // to the duration when there is neither.
+                // intended. Prefer an explicit note, then the commits made
+                // under the claim — which say what happened without anyone
+                // having to write it down — then the intent, then the
+                // duration.
                 let text = match (&note, prev.as_ref().map(|p| p.claimed_at)) {
                     (Some(n), _) => n.clone(),
                     (None, Some(at)) if at > 0 => {
-                        format!("{task} (held {})", dur(now().saturating_sub(at)))
+                        let done = commits_since(at, &held);
+                        if done.is_empty() {
+                            format!("{task} (held {})", dur(now().saturating_sub(at)))
+                        } else {
+                            done
+                        }
                     }
                     _ => task,
                 };
@@ -3023,6 +3086,64 @@ mod tests {
         // the whole string, and an ellipsis there would be a lie.
         let exact = "x".repeat(MAX_ENTRY);
         assert_eq!(truncate(&exact, MAX_ENTRY), exact);
+    }
+
+    /// A release with no `--note` should still say what happened, because an
+    /// agent that has to compose one often will not — and an empty record
+    /// makes every other feature worthless.
+    ///
+    /// Drives real git rather than a mock: the whole risk here is that the
+    /// pathspec or the `--since` boundary is wrong, and a mock would assert
+    /// the bug as readily as the fix.
+    #[test]
+    fn a_release_note_falls_back_to_the_commits_under_the_claim() {
+        let dir = std::env::temp_dir().join(format!("rf-commits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .expect("git");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "T"]);
+
+        std::fs::write(dir.join("src/a.rs"), "1").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "fix the retry backoff"]);
+        std::fs::write(dir.join("docs/x.md"), "1").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "unrelated doc edit"]);
+
+        // `commits_since` reads `repo_root()`, which resolves from the process
+        // cwd — so run it from the fixture.
+        let here = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let scoped = commits_since(0, &["src/**".to_string()]);
+        let all = commits_since(0, &[]);
+        // A claim released before any commit lands has nothing to say, and
+        // must not borrow an older commit as its note.
+        let future = commits_since(now() + 3600, &["src/**".to_string()]);
+        std::env::set_current_dir(here).unwrap();
+
+        assert!(scoped.contains("retry backoff"), "got {scoped:?}");
+        assert!(
+            !scoped.contains("unrelated"),
+            "globs must scope the log to the claimed paths, got {scoped:?}"
+        );
+        assert!(all.contains("unrelated"), "no globs means the whole claim");
+        assert!(
+            all.find("retry").unwrap() < all.find("unrelated").unwrap(),
+            "oldest first, so truncation keeps the work that explains the rest"
+        );
+        assert_eq!(future, "", "nothing committed since the claim");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The rate-limit gate. A working agent republishes its claim on every
