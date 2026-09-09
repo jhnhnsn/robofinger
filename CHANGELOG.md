@@ -3,6 +3,24 @@
 All notable changes to robofinger. Versions follow [semver](https://semver.org),
 loosely — this is pre-1.0 software and the wire format is still settling.
 
+## v0.6.0 — 2026-09-09
+
+- **`release` derives its note from the commits when you don't give one.** An
+  empty record makes every other feature worthless, and an agent that has to
+  compose a note is an agent that often does not — so the note now comes from
+  what actually happened: the commits under the claimed paths, within the claim
+  window. Explicit `--note` still wins, and a claim with nothing committed
+  under it falls through to the existing task and duration fallbacks rather
+  than inventing a note.
+
+  No `--author` filter, deliberately: `--author=@self` resolves against the
+  global `user.email` and returns nothing in any repo that overrides it.
+
+- **Docs reframed around legible coordination.** Agents coordinate whether or
+  not you give them a channel; what does not emerge on its own is a chain that
+  terminates in a human, with every hop recorded. The README leads with that
+  and keeps merge conflicts as the everyday instance rather than the headline.
+
 ## v0.5.1 — 2026-08-27
 
 - **A wedged relay no longer hangs the agent.** ureq has no timeout by default.
