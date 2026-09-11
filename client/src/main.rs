@@ -792,6 +792,15 @@ fn fetch_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
 ///
 /// `fetch_plans` returns history too, so anything asking about the present
 /// has to collapse it first. Newest seq wins per agent.
+/// Whether a peer's live claim is worth showing at session start.
+///
+/// Scoped to this repo, like `check`: a claim in another project can never
+/// conflict here, so showing it is noise in the one context window the agent
+/// still needs for its own work.
+fn worth_showing(p: &Plan, me: &str, here: &str, t: i64) -> bool {
+    p.pubkey != me && p.live(t) && p.project == here
+}
+
 fn current_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
     let mut best: std::collections::HashMap<(String, String), Plan> =
         std::collections::HashMap::new();
@@ -2123,9 +2132,11 @@ fn main() {
             let mut blocks: Vec<String> = Vec::new();
 
             let live = current_plans(&c, &k);
+            let here = project();
+            let me = k.pubkey();
             let claims: Vec<String> = live
                 .iter()
-                .filter(|p| p.pubkey != k.pubkey() && p.live(t))
+                .filter(|p| worth_showing(p, &me, &here, t))
                 .flat_map(|p| {
                     p.touching
                         .iter()
@@ -2929,6 +2940,22 @@ mod tests {
         assert!(
             !matches(&p, "README.md", "demo", "me"),
             "unclaimed is clean"
+        );
+    }
+
+    #[test]
+    fn session_start_hides_other_projects() {
+        let t = now();
+        let mine = plan("peer", "demo", &["src/**"], "working", 0);
+        let other = plan("peer", "Cura-2026", &["lib/**"], "working", 0);
+        assert!(worth_showing(&mine, "pk-me", "demo", t), "same project shows");
+        assert!(
+            !worth_showing(&other, "pk-me", "demo", t),
+            "another project is not this agent's business"
+        );
+        assert!(
+            !worth_showing(&mine, "pk-peer", "demo", t),
+            "your own claim is not news"
         );
     }
 
