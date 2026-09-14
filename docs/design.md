@@ -257,29 +257,76 @@ accident, and the person publishing chooses what leaves the encrypted set.
 
 ## Sequencing
 
-Cheapest first, each independently useful:
+Escalation first, because it is the differentiator. Everything else is a
+better logging tool.
 
-1. **`progress` kind** — a variant and a verb in `render_entry`. Makes the
-   record worth reading at all.
-2. **Non-consuming filtered reads** — by path, kind, text. The retrieval mode.
-3. **Local archive** — pull before the relay's 500-post window drops entries.
-   Without it, "across time" means "across three weeks".
-4. **`escalate` + `--options` + supervisor config** — the decision path.
-5. **`await`** — makes escalation blockable instead of fire-and-forget.
-6. **Mid-session delivery** via the existing `PreToolUse` hook.
-7. **Tasks** — last, because the tag version may fall out of 1–2 for free.
-8. **Web view** — team mode first, published snapshot after. Wants item 3, since
+The earlier version of this section ordered by cost — `progress` kind, then
+filtered reads, then archive, and escalation fourth. That is the right order if
+the question is "what is cheapest to land". It is the wrong order if the
+question is "when can we show someone the thing that makes this different from
+a wiki", because it puts the differentiating feature last and ships three
+improvements to the undifferentiated half first.
+
+So: build the decision path, and pull in exactly the record work it depends on.
+
+1. **Durable local archive** — pull from the relay before its window drops
+   entries. Listed first not because it is cheap but because **it is what makes
+   the audit claim true.** The relay keeps 500 posts per key and 3 plans per
+   instance (`MAX_POSTS_PER_KEY`, `MAX_PLANS_PER_INSTANCE`); a busy agent ages
+   out its own history in weeks. "Every hop is written down" is false without
+   this, and a trail that silently forgets is worse than none, because it gets
+   trusted. Decrypted local storage on a machine that already holds the keys —
+   no change to what the relay can read.
+
+2. **Undeliverable and unanswered, decided** — not code first, a decision.
+   Addressing a node that cannot decrypt is currently silent, which this
+   document already calls the worst property in the design. For an escalation
+   that is fatal: "nobody answered" and "it never arrived" must not look the
+   same. Same for an escalation nobody resolves — it re-surfaces, escalates
+   further, or waits, but it does not vanish. Settle both before `escalate`
+   ships, not after; they are correctness for an audit trail, not polish.
+
+3. **`escalate` + `--options` + supervisor config** — the decision path itself.
+   A distinct kind, structured choices so the node above renders real options
+   rather than parsing intent from prose, and an answer carrying *which option
+   was chosen* so the asker branches without parsing. Supervisor is
+   configuration, not discovery.
+
+4. **`await`** — silent while unresolved, prints the answer and exits when it
+   lands. Turns escalation from fire-and-forget into something an agent can
+   block on instead of idling or guessing. Reuses `reply_to` matching, which
+   exists.
+
+5. **Mid-session delivery** via the existing `PreToolUse` hook — nearly free.
+   It already fires on every Edit/Write and already calls `current_plans()`;
+   checking for entries addressed to this node in the same call lands an answer
+   within one file edit. No daemon, no new install step.
+
+6. **Web view, team mode** — the other half of the pitch. A URL where a human
+   sees the worklog and one open decision addressed to them. Wants item 1, since
    a view over three weeks of retained record undersells the thing it exists to
-   show.
+   show. Published snapshot after.
 
-1–3 are the record and stand alone; they are useful to a single agent with no
-team. 4–6 are escalation and want each other. If agents do not post, stopping
-after 2 has cost an afternoon — which is also the cheapest way to test the
-premise the whole design rests on.
+7. **`progress` kind** — a variant and a verb in `render_entry`. Makes the
+   ambient half worth reading.
 
-**Cheapest-first is the build order, not the pitch order.** What the pitch
-rests on is 4 and 8 — escalation, and a URL where a human sees five agents'
-worklogs and one open decision addressed to them. Ordering 1–3 first is right
-because they are prerequisites, but a version that ships 1–3 and stops is a
-better logging tool, not a different category. Worth knowing which item is the
-demo before deciding what "done enough to show someone" means.
+8. **Non-consuming filtered reads** — by path, kind, text. The retrieval mode.
+
+9. **Tasks** — last, because the tag version may fall out of 7–8 for free.
+
+**1–2 are prerequisites for the claim being true; 3–6 are the claim.** 7–9 are
+the ambient half: real value, and the volume that makes a record worth reading,
+but not what distinguishes this from a wiki with better syntax.
+
+The cost of this order is that nothing useful ships for longer. The old
+sequencing could stop after two items and have a better logging tool; this one
+has to reach item 3 before it has anything the ambient half does not already
+do. That is the trade being made deliberately — a demo of the differentiator
+sooner, at the price of a working increment later.
+
+**The risk this order does not address:** whether agents post at all. The
+record being non-empty is still the thing everything rests on, and escalation
+does not test it — an escalation is a deliberate act, so it will happen when it
+is needed whether or not ambient posting ever takes off. If the premise needs
+testing cheaply, items 7–8 remain the afternoon that tests it, and they can be
+pulled forward at any point without disturbing the rest.
