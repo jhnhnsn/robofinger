@@ -115,8 +115,8 @@ THE TIMELINE
       robofinger log --peer sam
       robofinger log --ids             show entry ids, for `answer --re`
       robofinger log --url             expand commit shas into links
-      (links come from `origin`; set ROBOFINGER_COMMIT_URL with a {sha}
-       placeholder for a self-hosted forge)
+      (github, gitlab and bitbucket are derived from `origin`; any other
+       forge needs ROBOFINGER_COMMIT_URL with a {sha} placeholder)
 
   ask [--to <peer>] \"<text>\"      raise something the team should settle
       robofinger ask --to bob \"both of us want src/auth. I can take the API
@@ -579,15 +579,16 @@ fn git_toplevel() -> Option<String> {
 ///
 /// Derived from `origin` rather than configured, because the remote already
 /// names the forge and the repo — a setting for something sitting in `git
-/// config` is a setup step nobody performs. `ROBOFINGER_COMMIT_URL` overrides
-/// it for the case derivation cannot cover: a self-hosted forge on a domain
-/// that does not say what it is running.
+/// config` is a setup step nobody performs. `ROBOFINGER_COMMIT_URL` is how a
+/// user supplies their own: a full template with a `{sha}` placeholder, which
+/// also covers any forge this does not recognise.
 ///
-/// A template rather than a provider name, so a forge this does not know about
-/// is one config line instead of a patch.
+/// A template rather than a provider name, so an unknown forge is one config
+/// line instead of a patch.
 ///
-/// Returns `None` when there is no usable remote, which is the honest answer —
-/// a wrong link is worse than no link.
+/// Returns `None` for an unrecognised host or an unusable remote rather than
+/// guessing a path segment — a link that looks right and 404s is worse than no
+/// link, because nothing distinguishes it from a commit that was rebased away.
 fn commit_url_template() -> Option<String> {
     if let Some(t) = std::env::var("ROBOFINGER_COMMIT_URL")
         .ok()
@@ -610,10 +611,9 @@ fn commit_url_template() -> Option<String> {
         h if h.ends_with("github.com") => "/commit/",
         h if h.ends_with("gitlab.com") => "/-/commit/",
         h if h.ends_with("bitbucket.org") => "/commits/",
-        // An unknown host is usually self-hosted, and self-hosted is usually
-        // GitLab or Gitea. Both accept a plain /commit/, so guess it and let
-        // ROBOFINGER_COMMIT_URL correct the rest.
-        _ => "/commit/",
+        // Known hosts only. A guessed segment yields a link that looks right
+        // and 404s, and a reader cannot tell that from a commit rebased away.
+        _ => return None,
     };
     Some(format!("{base}{seg}{{sha}}"))
 }
@@ -2585,11 +2585,14 @@ fn main() {
             let subs = crypto::load_peers();
             // Built once for the whole read, and only when asked: it shells
             // out to git, and a link is noise on a feed being skimmed.
-            let links = args
-                .iter()
-                .any(|a| a == "--url")
-                .then(commit_url_template)
-                .flatten();
+            let want_links = args.iter().any(|a| a == "--url");
+            let links = want_links.then(commit_url_template).flatten();
+            // Asked for links and got none: say why, or the flag looks broken.
+            if want_links && links.is_none() {
+                eprintln!(
+                    "no commit links: origin is not a forge I recognise.\n  set ROBOFINGER_COMMIT_URL with a {{sha}} placeholder, e.g.\n  ROBOFINGER_COMMIT_URL=https://git.example.com/org/repo/commit/{{sha}}"
+                );
+            }
             let mut any = false;
             for p in fetch_posts(&c, &k, limit) {
                 if cutoff.is_some_and(|t| p.epoch < t) {
@@ -3299,6 +3302,27 @@ mod tests {
         assert!(normalize_remote("/srv/git/r.git").is_none());
         assert!(normalize_remote("https://github.com").is_none());
         assert!(normalize_remote("").is_none());
+    }
+
+    /// The guess this deliberately does not make: an unknown host gets no
+    /// link, because a plausible 404 is indistinguishable from a rebased
+    /// commit and the user cannot tell the tool got it wrong.
+    #[test]
+    fn unknown_forges_get_no_link() {
+        let seg = |base: &str| {
+            let host = base.split('/').nth(2).unwrap_or_default().to_ascii_lowercase();
+            match host.as_str() {
+                h if h.ends_with("github.com") => Some("/commit/"),
+                h if h.ends_with("gitlab.com") => Some("/-/commit/"),
+                h if h.ends_with("bitbucket.org") => Some("/commits/"),
+                _ => None,
+            }
+        };
+        assert_eq!(seg("https://github.com/o/r"), Some("/commit/"));
+        assert_eq!(seg("https://gitlab.com/o/r"), Some("/-/commit/"));
+        assert_eq!(seg("https://bitbucket.org/o/r"), Some("/commits/"));
+        assert_eq!(seg("https://git.acme.internal/o/r"), None, "no guess");
+        assert_eq!(seg("https://codeberg.org/o/r"), None, "no guess");
     }
 
     #[test]
