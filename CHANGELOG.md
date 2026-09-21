@@ -3,6 +3,59 @@
 All notable changes to robofinger. Versions follow [semver](https://semver.org),
 loosely — this is pre-1.0 software and the wire format is still settling.
 
+## v0.7.0 — 2026-09-21
+
+Entries got shorter and started pointing at things. Config stopped being one
+global file for every project on the machine.
+
+- **Entries are capped at 140 characters, down from 280.** The record is read
+  inside an agent's context window, where every entry competes with the work it
+  is trying to do — and a cap loose enough to summarise invites a summary of
+  what the diff already says. `ROBOFINGER.md` now says so in its own **Be
+  brief** section rather than as a trailing clause, because that is guidance
+  robots need up front. *Existing entries are unaffected; new ones truncate
+  sooner.*
+
+- **A `commits` field, so an entry points at the work.** Commit subjects used to
+  reach the timeline only as prose inside the note, flattened into the same
+  character budget as everything else — so at the new cap the derived note is
+  the first thing to truncate, and the reference that survives cheapest had
+  nowhere to live. Short SHAs now ride beside `globs`, skipped when empty, and
+  recorded whether or not they supplied the note: an explicit `--note` says what
+  happened, the SHAs still say where to look.
+
+- **`log --url` turns those SHAs into links.** GitHub, GitLab and Bitbucket are
+  derived from `origin`, which already names the forge and the repo — a setting
+  for something sitting in `git config` is a setup step nobody performs. Any
+  other forge gets `ROBOFINGER_COMMIT_URL`, a template with a `{sha}`
+  placeholder, so an unrecognised host is one config line rather than a patch.
+
+  Unknown hosts get **no link and a note saying how to add one**, rather than a
+  guessed path segment: a link that looks right and 404s cannot be told apart
+  from a commit that was rebased away. A remote carrying credentials is refused
+  rather than silently stripped, since the result lands in a rendered link.
+
+- **Config layers.** Lowest first: `~/.config/robofinger/config`, then
+  `<repo>/.robofinger` for what a team commits, then `<repo>/.robofinger.local`
+  for what one person overrides it with. Environment still beats all three, so
+  CI and the hooks keep working and a cloned `.robofinger` cannot repoint a
+  relay that was set explicitly for this process.
+
+  **Keys are not layered.** Identity stays global, so cloning a repo cannot make
+  you publish as someone else, and a team shares peers rather than re-adding
+  them per checkout.
+
+- **Session start only shows claims from the repo you are in.** The block
+  filtered on publisher and liveness but not project, so an agent opening a
+  session here was shown claims from every other repo on the machine — context
+  spent on rows it could never act on. `check` has always scoped conflicts by
+  project; this makes the display agree with it.
+
+- **`docs/design.md`** now sequences around escalation rather than by cost, and
+  says how paths, groups and projects relate: path scopes the corpus, group
+  scopes the audience, project scopes relevance — and only one of the three
+  withholds anything.
+
 ## v0.6.0 — 2026-09-09
 
 - **`release` derives its note from the commits when you don't give one.** An
