@@ -62,6 +62,61 @@ one place it is legible to someone who is not an agent in a session.
 - **280 characters.** The cap is what keeps a record skimmable. Long context
   belongs in the commit.
 
+## Three layers of scope
+
+Namespace, group and project are discussed separately throughout this document
+and are easy to confuse, because all three sound like "which entries do I see".
+They answer different questions, and expecting one to do another's job is the
+main way to get this wrong.
+
+| | Question | Mechanism | Enforced by |
+|---|---|---|---|
+| **Path** (namespace) | where is it stored? | `WHERE ns=?` — exact match | the relay, as a partition |
+| **Group** | who can read it? | encrypted to those peers' keys | cryptography |
+| **Project** (repo) | is it relevant here? | `p.project == here` | the client, as a filter |
+
+**Path scopes the corpus; group scopes the audience.** An entry lives at one
+path and is readable by one set of keys, and neither constrains the other. So
+they compose: a path per deployment or organizational unit, groups within it
+for roles or teams. `/acme/cura` holds everything for that product; inside it
+`--group leads` carries decisions the whole fleet should not see.
+
+The rule that follows: **if the reason is "this is noise for them", that is a
+path or a filter. If the reason is "they should not see this", it has to be a
+group.** Splitting a path is free and hides nothing — anyone can query any
+namespace, and anyone in your peer list decrypts what they find. Splitting a
+group is the only thing that actually withholds content, and it costs a
+decision per post.
+
+### Paths nest in notation, not in behavior
+
+`/acme/cura/mobile` reads as a hierarchy and is free to adopt — `ns` is an
+opaque string, so nested paths work today with no change. But it is exactly
+that: notation. Every query is exact-match, so `/acme` is not a parent of
+`/acme/cura`, it is an unrelated sibling. Two agents one path segment apart are
+as isolated as two on different relays.
+
+That matters because escalation wants the opposite. A supervisor seeing its
+subtree would need prefix queries in the relay, and more importantly an answer
+to an open question below — whether a supervisor sees its subtree's traffic at
+all. Until that is settled, a path hierarchy would *imply* containment the
+system does not implement, which is worse than a flat name.
+
+So the escalation chain stays what §4 says it is: configuration, not
+discovery. A declared graph, deliberately not derived from addressing, because
+an org's escalation path and its storage layout want to vary independently.
+
+### What this gives the web view
+
+Grouping in the view comes from the crypto rather than from a UI concept
+invented for it: a viewer holds a key, fetches one namespace, and renders what
+it can decrypt, with groups as the natural swimlanes. The boundary is already
+real in the data.
+
+The asymmetry to know is that groups work *within* what you can fetch. A group
+spanning two namespaces means two stores and a client-side merge. Groups are
+comfortably intra-path; paths are the coarser cut.
+
 ## 1. Ambient worklog
 
 ### A `progress` kind
@@ -248,7 +303,9 @@ accident, and the person publishing chooses what leaves the encrypted set.
 - **Should a sender learn their message was undeliverable?** Addressing a node
   that cannot decrypt is silent — the worst property in the design.
 - **Does a supervisor see its subtree's traffic**, or only what is addressed to
-  it directly? Unclear whether that is useful or noise.
+  it directly? Unclear whether that is useful or noise. Blocks any move to make
+  nested paths behave hierarchically rather than just read that way — see
+  "Three layers of scope".
 - **Loop prevention** if two nodes list each other as supervisor. Probably a hop
   count.
 - **Do tasks need storage**, or are they a tag on existing entries?
