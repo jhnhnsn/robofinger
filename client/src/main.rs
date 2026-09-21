@@ -699,6 +699,15 @@ fn commit_shas(since: i64, globs: &[String]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
+fn commits_since_in(dir: &std::path::Path, since: i64, globs: &[String]) -> String {
+    git_log_in(dir, since, globs, "--format=%s")
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn commits_since(since: i64, globs: &[String]) -> String {
     // Oldest first reads as a narrative; newest first reads as a stack.
     // `truncate` at the call site cuts the tail, so the earliest work — the
@@ -712,6 +721,15 @@ fn commits_since(since: i64, globs: &[String]) -> String {
 
 /// One `git log` over the claim window, scoped to the claimed paths.
 fn git_log(since: i64, globs: &[String], format: &str) -> Vec<String> {
+    git_log_in(std::path::Path::new(&repo_root()), since, globs, format)
+}
+
+/// `git_log` against an explicit directory.
+///
+/// Split out so the tests can point at a fixture without mutating the process
+/// cwd — which is shared by every test in the binary, and on Windows resolves
+/// the temp dir through a path `git rev-parse` does not agree with.
+fn git_log_in(dir: &std::path::Path, since: i64, globs: &[String], format: &str) -> Vec<String> {
     let mut args = vec![
         "log".to_string(),
         "--no-merges".to_string(),
@@ -732,7 +750,7 @@ fn git_log(since: i64, globs: &[String], format: &str) -> Vec<String> {
         args.extend(globs.iter().cloned());
     }
     let Ok(out) = std::process::Command::new("git")
-        .current_dir(repo_root())
+        .current_dir(dir)
         .args(&args)
         .output()
     else {
@@ -3481,16 +3499,16 @@ mod tests {
         git(&["add", "-A"]);
         git(&["commit", "-qm", "unrelated doc edit"]);
 
-        // `commits_since` reads `repo_root()`, which resolves from the process
-        // cwd — so run it from the fixture.
-        let here = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&dir).unwrap();
-        let scoped = commits_since(0, &["src/**".to_string()]);
-        let all = commits_since(0, &[]);
+        // Against the fixture directly. Setting the process cwd would race
+        // every other test in the binary, and on Windows the temp dir is
+        // reached by a path `git rev-parse --show-toplevel` does not agree
+        // with — so `repo_root()` pointed somewhere with no commits and the
+        // log came back empty.
+        let scoped = commits_since_in(&dir, 0, &["src/**".to_string()]);
+        let all = commits_since_in(&dir, 0, &[]);
         // A claim released before any commit lands has nothing to say, and
         // must not borrow an older commit as its note.
-        let future = commits_since(now() + 3600, &["src/**".to_string()]);
-        std::env::set_current_dir(here).unwrap();
+        let future = commits_since_in(&dir, now() + 3600, &["src/**".to_string()]);
 
         assert!(scoped.contains("retry backoff"), "got {scoped:?}");
         assert!(
