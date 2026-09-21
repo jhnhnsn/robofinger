@@ -270,6 +270,18 @@ struct Plan {
     /// event that most needs to name paths — a release.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     globs: Vec<String>,
+    /// Timeline entries only: short SHAs of the commits this event covered.
+    ///
+    /// A pointer rather than prose. `task` is capped at `MAX_ENTRY` and a
+    /// derived note is the first thing to hit that cap, so the reference that
+    /// survives truncation has to live outside the text. The commit message is
+    /// already in git; what the record is missing is the way back to it.
+    ///
+    /// Short SHAs, not URLs: building a forge link means parsing `origin` and
+    /// knowing GitHub from GitLab, and a reader that already knows the repo can
+    /// construct it. The entry carries the ref, the viewer makes it clickable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    commits: Vec<String>,
     /// Relay row id, from the envelope. Read cursor for `since`; never
     /// published — see `Envelope::id`.
     #[serde(default, skip_serializing)]
@@ -560,11 +572,36 @@ fn git_toplevel() -> Option<String> {
 /// they are passed through unchanged — `src/auth/**` means the same thing to
 /// both. Empty when nothing was committed, which is the honest answer and
 /// leaves the existing task/duration fallbacks to handle it.
+/// Short SHAs of the commits a claim covered — the pointer form of
+/// `commits_since`, same window and same pathspecs.
+///
+/// Lives in its own field rather than the note because `task` is capped and a
+/// derived note is the first thing to hit that cap. A truncated sentence still
+/// leaves the commits findable.
+fn commit_shas(since: i64, globs: &[String]) -> Vec<String> {
+    git_log(since, globs, "--format=%h")
+        .into_iter()
+        .rev()
+        .collect()
+}
+
 fn commits_since(since: i64, globs: &[String]) -> String {
+    // Oldest first reads as a narrative; newest first reads as a stack.
+    // `truncate` at the call site cuts the tail, so the earliest work — the
+    // part that explains the rest — is what survives a long list.
+    git_log(since, globs, "--format=%s")
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// One `git log` over the claim window, scoped to the claimed paths.
+fn git_log(since: i64, globs: &[String], format: &str) -> Vec<String> {
     let mut args = vec![
         "log".to_string(),
         "--no-merges".to_string(),
-        "--format=%s".to_string(),
+        format.to_string(),
         format!("--since=@{since}"),
         // Without this, git walks whatever branch HEAD is on *and* its
         // ancestors' merges into other branches.
@@ -585,24 +622,16 @@ fn commits_since(since: i64, globs: &[String]) -> String {
         .args(&args)
         .output()
     else {
-        return String::new();
+        return vec![];
     };
     if !out.status.success() {
-        return String::new();
+        return vec![];
     }
-    let subjects: Vec<String> = String::from_utf8_lossy(&out.stdout)
+    String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
-        .collect();
-    // Oldest first reads as a narrative; newest first reads as a stack.
-    // `truncate` at the call site cuts the tail, so the earliest work — the
-    // part that explains the rest — is what survives a long list.
-    subjects
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("; ")
+        .collect()
 }
 
 /// Repo name, so `src/**` in one project never collides with `src/**` in another.
@@ -953,6 +982,7 @@ fn publish(
         // separate post, written by `timeline` below.
         kind: String::new(),
         globs: vec![],
+        commits: vec![],
         to: String::new(),
         reply_to: 0,
         id: 0,
@@ -1027,6 +1057,7 @@ fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
         eta_s: 0,
         kind: String::new(),
         globs: vec![],
+        commits: vec![],
         to: String::new(),
         reply_to: 0,
         id: 0,
@@ -1196,7 +1227,14 @@ fn render_entry_id(p: &Plan, show_instance: bool, ids: bool) -> String {
     } else {
         format!(" → {}", p.to)
     };
-    format!("{head}\n  {verb}{addressed}{paths}{detail}")
+    // Trailing, because it is a reference rather than something to read: the
+    // eye skips it until it is wanted.
+    let refs = if p.commits.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", p.commits.join(" "))
+    };
+    format!("{head}\n  {verb}{addressed}{paths}{detail}{refs}")
 }
 
 /// Highest relay row id already consumed, per relay URL.
@@ -1284,7 +1322,19 @@ fn mine(c: &Cfg, k: &Keys) -> Option<Plan> {
 /// peers cannot see is a conflict warning that silently does not fire", and a
 /// claim *event* a peer cannot see is the same hazard one step removed.
 fn timeline(c: &Cfg, k: &Keys, kind: &str, text: &str, globs: Vec<String>) {
-    let _ = post(c, k, text, None, kind, globs, "", 0);
+    let _ = post(c, k, text, None, kind, globs, vec![], "", 0);
+}
+
+/// `timeline`, for the one event that can name the commits it covered.
+fn timeline_with_commits(
+    c: &Cfg,
+    k: &Keys,
+    kind: &str,
+    text: &str,
+    globs: Vec<String>,
+    commits: Vec<String>,
+) {
+    let _ = post(c, k, text, None, kind, globs, commits, "", 0);
 }
 
 /// Append to the timeline. Posts carry their own seq space, so writing one
@@ -1301,6 +1351,7 @@ fn post(
     group: Option<&str>,
     kind: &str,
     globs: Vec<String>,
+    commits: Vec<String>,
     to: &str,
     reply_to: i64,
 ) -> Result<(), String> {
@@ -1336,6 +1387,7 @@ fn post(
         claimed_at: 0,
         kind: kind.to_string(),
         globs,
+        commits,
         to: to.to_string(),
         reply_to,
         id: 0,
@@ -2029,9 +2081,18 @@ fn main() {
                 // under the claim — which say what happened without anyone
                 // having to write it down — then the intent, then the
                 // duration.
-                let text = match (&note, prev.as_ref().map(|p| p.claimed_at)) {
+                let at = prev.as_ref().map(|p| p.claimed_at).unwrap_or(0);
+                // The commits are recorded whether or not they supplied the
+                // note: an explicit --note says what happened, and the SHAs
+                // still say where to look.
+                let shas = if at > 0 {
+                    commit_shas(at, &held)
+                } else {
+                    vec![]
+                };
+                let text = match (&note, at) {
                     (Some(n), _) => n.clone(),
-                    (None, Some(at)) if at > 0 => {
+                    (None, at) if at > 0 => {
                         let done = commits_since(at, &held);
                         if done.is_empty() {
                             format!("{task} (held {})", dur(now().saturating_sub(at)))
@@ -2041,7 +2102,7 @@ fn main() {
                     }
                     _ => task,
                 };
-                timeline(&c, &k, "release", &text, held);
+                timeline_with_commits(&c, &k, "release", &text, held, shas);
             }
         }
         "done" => {
@@ -2347,6 +2408,7 @@ fn main() {
                 group.as_deref(),
                 "",
                 vec![],
+                vec![],
                 to.as_deref().unwrap_or(""),
                 0,
             ) {
@@ -2399,6 +2461,7 @@ fn main() {
                 &text,
                 None,
                 cmd,
+                vec![],
                 vec![],
                 to.as_deref().unwrap_or(""),
                 reply_to,
@@ -2884,6 +2947,7 @@ mod tests {
             claimed_at: 0,
             kind: String::new(),
             globs: vec![],
+            commits: vec![],
             to: String::new(),
             reply_to: 0,
             id: 0,
@@ -3114,6 +3178,35 @@ mod tests {
         // the whole string, and an ellipsis there would be a lie.
         let exact = "x".repeat(MAX_ENTRY);
         assert_eq!(truncate(&exact, MAX_ENTRY), exact);
+    }
+
+    /// SHAs ride in their own field so a truncated note still leaves the work
+    /// findable — the whole reason `commits` is not folded into the text.
+    #[test]
+    fn commits_survive_a_truncated_note() {
+        let mut p = plan("me", "demo", &[], "post", 0);
+        p.kind = "release".into();
+        p.task = "x".repeat(MAX_ENTRY + 40);
+        p.commits = vec!["a1b2c3d".into(), "e4f5a6b".into()];
+
+        let entry = Plan {
+            task: truncate(&p.task, MAX_ENTRY),
+            ..p.clone()
+        };
+        let out = render_entry(&entry, false);
+        assert!(
+            entry.task.chars().count() <= MAX_ENTRY + 1,
+            "note is capped"
+        );
+        assert!(out.contains("a1b2c3d"), "first sha survives: {out}");
+        assert!(out.contains("e4f5a6b"), "second sha survives: {out}");
+
+        // And an entry with no commits gains no brackets.
+        let bare = Plan {
+            commits: vec![],
+            ..entry
+        };
+        assert!(!render_entry(&bare, false).contains('['));
     }
 
     /// A release with no `--note` should still say what happened, because an
