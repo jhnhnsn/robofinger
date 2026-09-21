@@ -633,7 +633,11 @@ fn commit_url_template() -> Option<String> {
     let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let base = normalize_remote(&raw)?;
     // The three big forges agree on everything but one path segment.
-    let host = base.split('/').nth(2).unwrap_or_default().to_ascii_lowercase();
+    let host = base
+        .split('/')
+        .nth(2)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let seg = match host.as_str() {
         h if h.ends_with("github.com") => "/commit/",
         h if h.ends_with("gitlab.com") => "/-/commit/",
@@ -652,19 +656,18 @@ fn commit_url_template() -> Option<String> {
 /// what the user meant.
 fn normalize_remote(raw: &str) -> Option<String> {
     let raw = raw.trim().trim_end_matches('/');
-    let rest = if let Some(r) = raw.strip_prefix("git@") {
+    let rest = match raw.strip_prefix("git@") {
         // scp-style: host:path
-        let (host, path) = r.split_once(':')?;
-        format!("{host}/{}", path.trim_start_matches('/'))
-    } else if let Some(r) = raw
-        .strip_prefix("https://")
-        .or_else(|| raw.strip_prefix("http://"))
-        .or_else(|| raw.strip_prefix("ssh://git@"))
-        .or_else(|| raw.strip_prefix("git://"))
-    {
-        r.to_string()
-    } else {
-        return None;
+        Some(r) => {
+            let (host, path) = r.split_once(':')?;
+            format!("{host}/{}", path.trim_start_matches('/'))
+        }
+        None => raw
+            .strip_prefix("https://")
+            .or_else(|| raw.strip_prefix("http://"))
+            .or_else(|| raw.strip_prefix("ssh://git@"))
+            .or_else(|| raw.strip_prefix("git://"))?
+            .to_string(),
     };
     if rest.contains('@') {
         return None;
@@ -3148,7 +3151,10 @@ mod tests {
         let t = now();
         let mine = plan("peer", "demo", &["src/**"], "working", 0);
         let other = plan("peer", "Cura-2026", &["lib/**"], "working", 0);
-        assert!(worth_showing(&mine, "pk-me", "demo", t), "same project shows");
+        assert!(
+            worth_showing(&mine, "pk-me", "demo", t),
+            "same project shows"
+        );
         assert!(
             !worth_showing(&other, "pk-me", "demo", t),
             "another project is not this agent's business"
@@ -3325,8 +3331,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let w = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
-        w("global", "ROBOFINGER_URL=https://global\nROBOFINGER_ALIAS=macbook\n");
-        w(".robofinger", "ROBOFINGER_URL=https://project\nROBOFINGER_COMMIT_URL=https://forge/{sha}\n");
+        w(
+            "global",
+            "ROBOFINGER_URL=https://global\nROBOFINGER_ALIAS=macbook\n",
+        );
+        w(
+            ".robofinger",
+            "ROBOFINGER_URL=https://project\nROBOFINGER_COMMIT_URL=https://forge/{sha}\n",
+        );
         w(".robofinger.local", "ROBOFINGER_URL=https://mine\n");
 
         let mut merged = parse_config(&dir.join("global"));
@@ -3361,7 +3373,10 @@ mod tests {
         assert_eq!(ok("https://github.com/o/r"), "https://github.com/o/r");
         assert_eq!(ok("git@github.com:o/r.git"), "https://github.com/o/r");
         assert_eq!(ok("ssh://git@gitlab.com/o/r.git"), "https://gitlab.com/o/r");
-        assert_eq!(ok("git@git.acme.dev:team/sub/r.git"), "https://git.acme.dev/team/sub/r");
+        assert_eq!(
+            ok("git@git.acme.dev:team/sub/r.git"),
+            "https://git.acme.dev/team/sub/r"
+        );
         // Trailing slash, and a bare .git in the repo name.
         assert_eq!(ok("https://github.com/o/r.git/"), "https://github.com/o/r");
 
@@ -3378,7 +3393,11 @@ mod tests {
     #[test]
     fn unknown_forges_get_no_link() {
         let seg = |base: &str| {
-            let host = base.split('/').nth(2).unwrap_or_default().to_ascii_lowercase();
+            let host = base
+                .split('/')
+                .nth(2)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             match host.as_str() {
                 h if h.ends_with("github.com") => Some("/commit/"),
                 h if h.ends_with("gitlab.com") => Some("/-/commit/"),
