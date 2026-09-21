@@ -37,7 +37,7 @@ const MAX_FROM: usize = 100;
 const CLAIM_HISTORY: usize = 2;
 /// Timeline entries are meant to be scanned, not read. A robot that needs the
 /// full story has the repo; this is the line that says where to look.
-const MAX_ENTRY: usize = 280;
+const MAX_ENTRY: usize = 140;
 /// Most entries one request will return. Matches the relay's own cap, so
 /// asking for more just wastes the round trip.
 const MAX_POST_LIMIT: usize = 100;
@@ -134,7 +134,8 @@ THE TIMELINE
       git log --oneline -5 | robofinger post
       robofinger post --group work \"shipping the auth migration\"
       (no --group means everyone you follow; a group encrypts to just those
-       peers, so the rest cannot decrypt it at all)
+       peers, so the rest cannot decrypt it at all. 140 characters — say the
+       one thing the diff does not, the rest belongs in the commit)
 
 PEOPLE
 

@@ -98,8 +98,11 @@ robofinger post "the retry backoff was wrong for 5xx, not just timeouts — fixe
 
 Worth a post: something you learned that changes what a teammate would do, a
 handoff, a decision that is not obvious from the diff. Not worth a post: what
-the commit already says. Entries are capped at 280 characters, so say the
-useful half.
+the commit already says.
+
+**Be brief.** Entries are capped at 140 characters — a tweet, not a summary.
+Say the one thing a teammate could not work out from the diff, and let the
+commit carry the detail. An entry that gets truncated was the wrong entry.
 
 ## Talking to the other agents
 

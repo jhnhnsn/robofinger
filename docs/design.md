@@ -59,8 +59,11 @@ one place it is legible to someone who is not an agent in a session.
   team to be worth running is too fragile.
 - **Advisory, always.** Nothing blocks, nothing locks. An ignored entry costs a
   worse decision, not a deadlock.
-- **280 characters.** The cap is what keeps a record skimmable. Long context
-  belongs in the commit.
+- **140 characters.** The cap is what keeps a record skimmable. Long context
+  belongs in the commit. Tweet length rather than 280 because the record is
+  read in an agent's context window, where every entry competes with the work
+  it is trying to do — and because a cap loose enough to summarise invites a
+  summary of what the diff already says.
 
 ## Three layers of scope
 
@@ -127,7 +130,7 @@ The middle is where the value is:
 
     robofinger progress "retry backoff was wrong for 5xx not just timeouts"
 
-Greppable, distinguishable from claim traffic, still 280 characters. This is
+Greppable, distinguishable from claim traffic, still 140 characters. This is
 the entry another agent learns from, and today it has no first-class form.
 
 ### Posting has to be nearly free
