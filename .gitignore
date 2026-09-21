@@ -10,5 +10,8 @@ relay/.wrangler-deploy.jsonc
 .config/robofinger/
 ROBOFINGER.md
 
+# per-user overrides of the committed .robofinger
+.robofinger.local
+
 # strategy notes, not for the public repo
 docs/positioning.md

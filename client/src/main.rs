@@ -210,8 +210,14 @@ SETUP
       robofinger --upgrade            install it
   --version                     print version
 
-Config lives in ~/.config/robofinger/config. ROBOFINGER_URL and
-ROBOFINGER_ALIAS override it. Keys never leave this machine.";
+Config layers, lowest first:
+  ~/.config/robofinger/config   you, on this machine (written by init)
+  <repo>/.robofinger            the project — commit it to share
+  <repo>/.robofinger.local      you, in this repo — gitignore it
+  environment                   ROBOFINGER_URL, ROBOFINGER_ALIAS, ...
+
+Keys are not layered: identity is global, so cloning a repo cannot make you
+publish as someone else. Keys never leave this machine.";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Plan {
@@ -318,9 +324,28 @@ struct Cfg {
     alias: String,
 }
 
-/// `key=value` lines from ~/.config/robofinger/config. Written by `init`.
+/// Settings, merged across three layers. Written by `init` at the global
+/// layer; the two repo layers are written by hand or committed by a team.
 fn config_file() -> std::collections::HashMap<String, String> {
-    std::fs::read_to_string(crypto::config_dir().join("config"))
+    // Lowest precedence first: each layer overwrites the one before it.
+    //
+    //   ~/.config/robofinger/config   you, on this machine  (and the keys)
+    //   <repo>/.robofinger            the project, committed
+    //   <repo>/.robofinger.local      you, in this repo, ignored by git
+    //
+    // Keys are deliberately not layered — identity is global, so a repo you
+    // clone cannot make you publish as someone else.
+    let root = std::path::PathBuf::from(repo_root());
+    let mut merged = parse_config(&crypto::config_dir().join("config"));
+    for f in [".robofinger", ".robofinger.local"] {
+        merged.extend(parse_config(&root.join(f)));
+    }
+    merged
+}
+
+/// `key=value` lines, `#` comments, missing file is empty.
+fn parse_config(path: &std::path::Path) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
@@ -329,7 +354,9 @@ fn config_file() -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-/// Env wins over the config file, so hooks and CI can override without editing it.
+/// Env wins over every config layer, so hooks and CI can override without
+/// editing a file — and so a committed `.robofinger` can never silently
+/// repoint a relay that was set explicitly for this process.
 fn cfg() -> Option<Cfg> {
     let file = config_file();
     let get = |k: &str| {
@@ -1605,7 +1632,11 @@ fn main() {
                 }
             }
             // Keep values already configured so re-running init is not destructive.
-            let existing = config_file();
+            //
+            // The global layer only: `config_file()` merges the repo layers in,
+            // and copying one of those up here would promote a value scoped to
+            // one project into the default for every project.
+            let existing = parse_config(&crypto::config_dir().join("config"));
             let url = url.or_else(|| existing.get("ROBOFINGER_URL").cloned());
             // `--hooks` without `--url` would otherwise be silently dropped:
             // init aborts below, and the user believes hooks were installed.
@@ -3282,6 +3313,43 @@ mod tests {
         // the whole string, and an ellipsis there would be a lie.
         let exact = "x".repeat(MAX_ENTRY);
         assert_eq!(truncate(&exact, MAX_ENTRY), exact);
+    }
+
+    /// The layering is the whole feature: a project file that a team commits,
+    /// a local file that one person overrides it with, and a global file that
+    /// still supplies whatever neither mentions.
+    #[test]
+    fn repo_config_layers_over_global() {
+        let dir = std::env::temp_dir().join(format!("rf-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let w = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
+        w("global", "ROBOFINGER_URL=https://global\nROBOFINGER_ALIAS=macbook\n");
+        w(".robofinger", "ROBOFINGER_URL=https://project\nROBOFINGER_COMMIT_URL=https://forge/{sha}\n");
+        w(".robofinger.local", "ROBOFINGER_URL=https://mine\n");
+
+        let mut merged = parse_config(&dir.join("global"));
+        for f in [".robofinger", ".robofinger.local"] {
+            merged.extend(parse_config(&dir.join(f)));
+        }
+
+        assert_eq!(merged["ROBOFINGER_URL"], "https://mine", ".local wins");
+        assert_eq!(
+            merged["ROBOFINGER_COMMIT_URL"], "https://forge/{sha}",
+            "project layer supplies what .local omits"
+        );
+        assert_eq!(
+            merged["ROBOFINGER_ALIAS"], "macbook",
+            "global survives when no repo layer mentions it"
+        );
+
+        // A missing layer is empty, not an error.
+        let only_global = parse_config(&dir.join("global"));
+        assert_eq!(only_global.len(), 2);
+        assert!(parse_config(&dir.join("nope")).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A remote is user input from `git config`, and the result ends up in a
