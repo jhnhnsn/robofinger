@@ -108,12 +108,15 @@ THE TIMELINE
       (--peer is a filtered read and does NOT advance your cursor, so it
        cannot swallow entries from everyone else)
 
-  log [-n N] [--peer <label>] [--since <when>] [--ids]
+  log [-n N] [--peer <label>] [--since <when>] [--ids] [--url]
                                 the whole timeline, newest first
       robofinger log
       robofinger log --since 2h        a window; does not move your cursor
       robofinger log --peer sam
       robofinger log --ids             show entry ids, for `answer --re`
+      robofinger log --url             expand commit shas into links
+      (links come from `origin`; set ROBOFINGER_COMMIT_URL with a {sha}
+       placeholder for a self-hosted forge)
 
   ask [--to <peer>] \"<text>\"      raise something the team should settle
       robofinger ask --to bob \"both of us want src/auth. I can take the API
@@ -572,6 +575,87 @@ fn git_toplevel() -> Option<String> {
 /// they are passed through unchanged — `src/auth/**` means the same thing to
 /// both. Empty when nothing was committed, which is the honest answer and
 /// leaves the existing task/duration fallbacks to handle it.
+/// Where a commit can be read on the web, as a template with `{sha}` in it.
+///
+/// Derived from `origin` rather than configured, because the remote already
+/// names the forge and the repo — a setting for something sitting in `git
+/// config` is a setup step nobody performs. `ROBOFINGER_COMMIT_URL` overrides
+/// it for the case derivation cannot cover: a self-hosted forge on a domain
+/// that does not say what it is running.
+///
+/// A template rather than a provider name, so a forge this does not know about
+/// is one config line instead of a patch.
+///
+/// Returns `None` when there is no usable remote, which is the honest answer —
+/// a wrong link is worse than no link.
+fn commit_url_template() -> Option<String> {
+    if let Some(t) = std::env::var("ROBOFINGER_COMMIT_URL")
+        .ok()
+        .or_else(|| config_file().get("ROBOFINGER_COMMIT_URL").cloned())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(t);
+    }
+    let out = std::process::Command::new("git")
+        .current_dir(repo_root())
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let base = normalize_remote(&raw)?;
+    // The three big forges agree on everything but one path segment.
+    let host = base.split('/').nth(2).unwrap_or_default().to_ascii_lowercase();
+    let seg = match host.as_str() {
+        h if h.ends_with("github.com") => "/commit/",
+        h if h.ends_with("gitlab.com") => "/-/commit/",
+        h if h.ends_with("bitbucket.org") => "/commits/",
+        // An unknown host is usually self-hosted, and self-hosted is usually
+        // GitLab or Gitea. Both accept a plain /commit/, so guess it and let
+        // ROBOFINGER_COMMIT_URL correct the rest.
+        _ => "/commit/",
+    };
+    Some(format!("{base}{seg}{{sha}}"))
+}
+
+/// `git@host:org/repo.git` and `https://host/org/repo.git` to `https://host/org/repo`.
+///
+/// Anything with credentials in it is refused: those end up in a rendered link
+/// and a published page, and stripping them silently would be a guess about
+/// what the user meant.
+fn normalize_remote(raw: &str) -> Option<String> {
+    let raw = raw.trim().trim_end_matches('/');
+    let rest = if let Some(r) = raw.strip_prefix("git@") {
+        // scp-style: host:path
+        let (host, path) = r.split_once(':')?;
+        format!("{host}/{}", path.trim_start_matches('/'))
+    } else if let Some(r) = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+        .or_else(|| raw.strip_prefix("ssh://git@"))
+        .or_else(|| raw.strip_prefix("git://"))
+    {
+        r.to_string()
+    } else {
+        return None;
+    };
+    if rest.contains('@') {
+        return None;
+    }
+    let rest = rest.trim_end_matches(".git");
+    // host + at least one path segment, or there is nothing to link to.
+    if rest.split('/').filter(|s| !s.is_empty()).count() < 2 {
+        return None;
+    }
+    Some(format!("https://{rest}"))
+}
+
+/// Expand a template for one sha. Separate so a caller with many shas builds
+/// the template once.
+fn commit_url(template: &str, sha: &str) -> String {
+    template.replace("{sha}", sha)
+}
+
 /// Short SHAs of the commits a claim covered — the pointer form of
 /// `commits_since`, same window and same pathspecs.
 ///
@@ -1591,6 +1675,11 @@ fn main() {
             {
                 body.push_str(&format!("ROBOFINGER_ALIAS={a}\n"));
             }
+            // `init` rewrites the file wholesale, so anything it does not know
+            // to carry across is silently lost on the next run.
+            if let Some(t) = existing.get("ROBOFINGER_COMMIT_URL") {
+                body.push_str(&format!("ROBOFINGER_COMMIT_URL={t}\n"));
+            }
             let path = crypto::config_dir().join("config");
             if let Err(e) = std::fs::write(&path, body) {
                 eprintln!("write {}: {e}", path.display());
@@ -2494,6 +2583,13 @@ fn main() {
                     std::process::exit(2);
                 });
             let subs = crypto::load_peers();
+            // Built once for the whole read, and only when asked: it shells
+            // out to git, and a link is noise on a feed being skimmed.
+            let links = args
+                .iter()
+                .any(|a| a == "--url")
+                .then(commit_url_template)
+                .flatten();
             let mut any = false;
             for p in fetch_posts(&c, &k, limit) {
                 if cutoff.is_some_and(|t| p.epoch < t) {
@@ -2505,6 +2601,11 @@ fn main() {
                 any = true;
                 if !show_entry(&p, true, ids) {
                     return;
+                }
+                if let Some(t) = &links {
+                    for sha in &p.commits {
+                        println!("    {}", commit_url(t, sha));
+                    }
                 }
             }
             if !any {
@@ -3178,6 +3279,34 @@ mod tests {
         // the whole string, and an ellipsis there would be a lie.
         let exact = "x".repeat(MAX_ENTRY);
         assert_eq!(truncate(&exact, MAX_ENTRY), exact);
+    }
+
+    /// A remote is user input from `git config`, and the result ends up in a
+    /// rendered link — so the parser is the part worth pinning down.
+    #[test]
+    fn remotes_normalize_or_are_refused() {
+        let ok = |raw: &str| normalize_remote(raw).expect(raw);
+        assert_eq!(ok("https://github.com/o/r.git"), "https://github.com/o/r");
+        assert_eq!(ok("https://github.com/o/r"), "https://github.com/o/r");
+        assert_eq!(ok("git@github.com:o/r.git"), "https://github.com/o/r");
+        assert_eq!(ok("ssh://git@gitlab.com/o/r.git"), "https://gitlab.com/o/r");
+        assert_eq!(ok("git@git.acme.dev:team/sub/r.git"), "https://git.acme.dev/team/sub/r");
+        // Trailing slash, and a bare .git in the repo name.
+        assert_eq!(ok("https://github.com/o/r.git/"), "https://github.com/o/r");
+
+        // Credentials must never reach a link, and a local path is not a forge.
+        assert!(normalize_remote("https://user:pw@github.com/o/r.git").is_none());
+        assert!(normalize_remote("/srv/git/r.git").is_none());
+        assert!(normalize_remote("https://github.com").is_none());
+        assert!(normalize_remote("").is_none());
+    }
+
+    #[test]
+    fn commit_url_fills_every_placeholder() {
+        assert_eq!(
+            commit_url("https://github.com/o/r/commit/{sha}", "abc1234"),
+            "https://github.com/o/r/commit/abc1234"
+        );
     }
 
     /// SHAs ride in their own field so a truncated note still leaves the work
