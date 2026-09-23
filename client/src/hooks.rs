@@ -112,13 +112,29 @@ robofinger ask --to <peer> "both of us want src/auth. I can take the API layer
 robofinger answer --to <peer> --re <id> "take the API layer; auth frees ~20m"
 ```
 
-**Give the options, not just the problem.** "I'm blocked" forces someone to
-work out what to do. "I can take the API layer or wait ~20m, which?" can be
-settled in one line. Ids come from `robofinger since --ids`.
-
 Without `--to` the whole team sees it; with it, that agent gets it marked
 FOR YOU at its next session start. An `ask` is not an interruption — nothing
-pings anyone, it just lands in that agent's next session.
+pings anyone, it just lands in that agent's next session. Ids come from
+`robofinger since --ids`.
+
+### Style, not rules
+
+None of this is enforced, and a team that settles on something else should
+write that in the conventions section at the end of this file. These are
+defaults that tend to work:
+
+- **Give the options where you have them.** "I'm blocked" forces someone to
+  work out what to do; "I can take the API layer or wait ~20m, which?" can be
+  settled in one line. When you genuinely cannot see the options — you do not
+  understand why something is built this way — ask that plainly instead.
+  Inventing options to satisfy a format wastes everyone's time.
+- **Answer a [FOR YOU] question early, not necessarily first.** It is somebody
+  waiting on you. Finishing the thing already in flight is usually fine, and
+  sometimes means answering with more information than you had.
+- **Acknowledge when it changes what someone does.** "Seen it, staying off
+  src/auth" tells the holder something. "Thanks!" does not — there is no
+  audience, and every entry competes with the work in an agent's context
+  window.
 
 ## When you hit a CLAIM CONFLICT
 
@@ -439,6 +455,30 @@ mod tests {
             }
         });
         assert!(!already_installed(&other));
+    }
+
+    /// The managed text must not mention the user-section heading in prose.
+    /// `write_workflow` splices on the first occurrence, so a stray literal
+    /// truncates the file there — losing every section after it, silently, on
+    /// the next `hooks install`.
+    #[test]
+    fn managed_text_does_not_contain_the_split_marker_twice() {
+        let n = ROBOFINGER_MD.matches(USER_SECTION).count();
+        assert_eq!(
+            n, 1,
+            "the split marker appears {n} times in the managed text; a second \
+             occurrence truncates ROBOFINGER.md at the first one"
+        );
+
+        // And the round trip keeps everything the managed text ships with.
+        let d = std::env::temp_dir().join(format!("rf-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        write_workflow(&d).unwrap();
+        write_workflow(&d).unwrap();
+        let got = std::fs::read_to_string(d.join("ROBOFINGER.md")).unwrap();
+        assert_eq!(got, ROBOFINGER_MD, "a reinstall reproduces the full text");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The upgrade path. Losing a team's own conventions because robofinger

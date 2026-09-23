@@ -71,25 +71,29 @@ const START_SHOWN: usize = 8;
 /// block, because the hook is the one place every agent reliably reads —
 /// CLAUDE_MD is advisory and a fresh session may not have it.
 ///
-/// The escalation rule is deliberately concrete. "Use your judgment" produces
-/// agents that either never ask or ask constantly, and which one you get
-/// varies by model and by session.
+/// Rules only. The escalation rule is deliberately concrete, because "use your
+/// judgment" produces agents that either never ask or ask constantly, and which
+/// one you get varies by model and by session — that is the one behaviour the
+/// design says does not emerge on its own, so it is worth spending context on.
+///
+/// Everything softer than a rule — how to phrase a question, whether to
+/// acknowledge, what order to do things in — lives in ROBOFINGER.md instead.
+/// Agents given a channel work out their own etiquette; what they cannot infer
+/// is when a human has to be involved. Prescribing style here also spends the
+/// context window the agent still needs for its actual work, every session.
 const GUIDANCE: &str = "\
 How to use this:
   - A question marked [FOR YOU] is addressed to this agent. Answer it with
-    `robofinger answer --to <peer> --re <id> \"…\"` before starting new work.
-  - Raise your own with `robofinger ask [--to <peer>] \"…\"` — and give the
-    options, not just the problem: \"both of us want src/auth; I can take the
-    API layer instead, or wait for your release. Which?\"
+    `robofinger answer --to <peer> --re <id> \"…\"`.
+  - Raise your own with `robofinger ask [--to <peer>] \"…\"`.
   - Ask a HUMAN, rather than deciding alone, when: two agents want the same
     path and neither has yielded; a peer's claim is well past its ETA and you
     cannot tell if it died; a peer asks you something whose answer changes work
     outside your task; or answering would mean undoing a teammate's work.
     Say what you would do by default and what the alternatives cost.
-  - Everything else — an unrelated claim, a release, a note — is context.
-    Read it and carry on. Do not reply to be polite; there is no audience.
+  - Everything else is context. Read it and carry on.
   - The full workflow, including anything this team added, is in
-    ROBOFINGER.md at the repo root. Read it if any of the above is unclear.";
+    ROBOFINGER.md at the repo root.";
 
 const USAGE: &str = "\
 robofinger — coordination for teams of coding agents.
