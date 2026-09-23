@@ -3634,7 +3634,36 @@ mod tests {
             !scoped.contains("unrelated"),
             "globs must scope the log to the claimed paths, got {scoped:?}"
         );
-        assert!(all.contains("unrelated"), "no globs means the whole claim");
+        assert!(
+            all.contains("unrelated"),
+            "no globs means the whole claim: all={all:?}\n\
+             commits={:?}\n\
+             status={:?}",
+            String::from_utf8_lossy(
+                &std::process::Command::new("git")
+                    .current_dir(&dir)
+                    .args(["log", "--oneline", "--all"])
+                    .output()
+                    .map(|o| {
+                        let mut v = o.stdout;
+                        v.extend(o.stderr);
+                        v
+                    })
+                    .unwrap_or_default()
+            ),
+            String::from_utf8_lossy(
+                &std::process::Command::new("git")
+                    .current_dir(&dir)
+                    .args(["status", "--porcelain", "--ignored"])
+                    .output()
+                    .map(|o| {
+                        let mut v = o.stdout;
+                        v.extend(o.stderr);
+                        v
+                    })
+                    .unwrap_or_default()
+            )
+        );
         assert!(
             all.find("retry").unwrap() < all.find("unrelated").unwrap(),
             "oldest first, so truncation keeps the work that explains the rest"
