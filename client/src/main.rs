@@ -3605,30 +3605,15 @@ mod tests {
         // reached by a path `git rev-parse --show-toplevel` does not agree
         // with — so `repo_root()` pointed somewhere with no commits and the
         // log came back empty.
-        let scoped = commits_since_in(&dir, 0, &["src/**".to_string()]);
+        let scoped = commits_since_in(&dir, 0, &["src/*".to_string()]);
         let all = commits_since_in(&dir, 0, &[]);
         // A claim released before any commit lands has nothing to say, and
         // must not borrow an older commit as its note.
-        let future = commits_since_in(&dir, now() + 3600, &["src/**".to_string()]);
+        let future = commits_since_in(&dir, now() + 3600, &["src/*".to_string()]);
 
         assert!(
             scoped.contains("retry backoff"),
-            "scoped={scoped:?} all={all:?} future={future:?}\n\
-             log(no args)={:?}\n\
-             status={:?}",
-            git_log_in(&dir, 0, &[], "--format=%s"),
-            String::from_utf8_lossy(
-                &std::process::Command::new("git")
-                    .current_dir(&dir)
-                    .args(["log", "--oneline", "--all"])
-                    .output()
-                    .map(|o| {
-                        let mut v = o.stdout;
-                        v.extend(o.stderr);
-                        v
-                    })
-                    .unwrap_or_default()
-            )
+            "the claimed path's commit must be in the note, got {scoped:?}"
         );
         assert!(
             !scoped.contains("unrelated"),
@@ -3636,33 +3621,7 @@ mod tests {
         );
         assert!(
             all.contains("unrelated"),
-            "no globs means the whole claim: all={all:?}\n\
-             commits={:?}\n\
-             status={:?}",
-            String::from_utf8_lossy(
-                &std::process::Command::new("git")
-                    .current_dir(&dir)
-                    .args(["log", "--oneline", "--all"])
-                    .output()
-                    .map(|o| {
-                        let mut v = o.stdout;
-                        v.extend(o.stderr);
-                        v
-                    })
-                    .unwrap_or_default()
-            ),
-            String::from_utf8_lossy(
-                &std::process::Command::new("git")
-                    .current_dir(&dir)
-                    .args(["status", "--porcelain", "--ignored"])
-                    .output()
-                    .map(|o| {
-                        let mut v = o.stdout;
-                        v.extend(o.stderr);
-                        v
-                    })
-                    .unwrap_or_default()
-            )
+            "no globs means the whole claim, got {all:?}"
         );
         assert!(
             all.find("retry").unwrap() < all.find("unrelated").unwrap(),
