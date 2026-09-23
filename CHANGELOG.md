@@ -3,6 +3,49 @@
 All notable changes to robofinger. Versions follow [semver](https://semver.org),
 loosely — this is pre-1.0 software and the wire format is still settling.
 
+## v0.8.0 — 2026-09-23
+
+Names stopped leaking the machine they came from, and stopped calling every
+agent Claude.
+
+- **A new identity's display name is derived from its public key.** The alias
+  rides *outside* the encryption, because the relay has to tell one agent from
+  another — so the old default published `johns-macbook-pro` to everyone
+  following you, and the warning about folder names applied just as well to the
+  hostname sitting beside them. A derived name — `amber-otter`, `slate-heron` —
+  leaks nothing, is stable for the life of the key, and cannot be picked, which
+  is also why it cannot be used to impersonate anyone. It doubles as a
+  fingerprint: "does yours say amber-otter?" checks a pasted address in two
+  words.
+
+  *Only new identities move.* `init` now always pins an alias, and the runtime
+  still falls back to the hostname, so anyone who never set one keeps the name
+  their peers already know — a rename on upgrade would read, to everyone
+  following you, as one person leaving and a stranger arriving. Rerun `init` or
+  set `ROBOFINGER_ALIAS` to take the new default.
+
+- **Terminal-launched agents are `agent-N`, not `claude-N`.** Session detection
+  has always accepted `TERM_SESSION_ID`, so aider, codex and a hand-typed
+  `robofinger claim` each get their own slot — and every one of them was then
+  labelled `claude-2`. Who produced an entry is most of what you want from the
+  record months later, and a name that says Claude when it was Codex is worse
+  than one that says nothing. Families number independently, so `agent-1` is
+  free on a machine already holding `claude-1`. *Live sessions keep the slot
+  they reserved; only new ones pick up the family.*
+
+- **`docs/design.md` gains three sections**, none of them built yet. **Rooms**
+  (6) answer the one thing groups cannot: a group is a publisher-side recipient
+  list, so onboarding a twelfth person costs eleven `add`s and a thread's
+  audience drifts between hops. A room is an identity that publishes a roster —
+  public, so joining is a pure read, while content stays encrypted to it — and a
+  directory turns out to be the same object, with curation the only difference.
+  **Names and provenance** (7): an address has to survive the thing it names
+  changing, so the model and the effort cannot be path segments, but an entry is
+  immutable and stamping them there is cheap and unrecoverable later.
+  **Tickets, tags and channels** (8): a ticket claim is a claim with a tracker in
+  `project` instead of a repo — most of a board for none of the work — reusing
+  the `{sha}` template shape from v0.7.0 as `ROBOFINGER_TICKET_URL`.
+
 ## v0.7.0 — 2026-09-21
 
 Entries got shorter and started pointing at things. Config stopped being one

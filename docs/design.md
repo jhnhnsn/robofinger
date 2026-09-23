@@ -550,6 +550,26 @@ and neither is warned — a warning that silently does not fire, which is the
 failure this project exists to prevent. The client splits a pasted URL into host
 and id and compares case-insensitively, as alias matching already does.
 
+**Where a ticket lives reuses the mechanism that already exists.** v0.7.0 added
+`commit_url_template()`: derive from `origin` where the host is known, accept
+`ROBOFINGER_COMMIT_URL` as a `{sha}` template otherwise, and return nothing
+rather than guess a path segment. Tickets want exactly that, with `{id}`:
+
+    ROBOFINGER_TICKET_URL=https://acme.atlassian.net/browse/{id}
+
+Derivable where a forge hosts its own issues — `/issues/{id}` on GitHub,
+`/-/issues/{id}` on GitLab — and required otherwise, because Jira and Linear sit
+on a host `origin` never mentions. The same refusal carries over: an
+unrecognised host gets no link and a line saying how to supply one, since a
+ticket link that 404s cannot be told apart from a ticket that was closed and
+archived.
+
+One thing falls out of reusing it. The template's host and path prefix *are* the
+namespace, so a single config line gives both the link and the scope — and two
+teams on different Jira instances cannot collide on PROJ-123. A second setting
+for "which tracker" would have been a second way to say the same thing, and the
+one that drifts.
+
 There is no `PreToolUse` equivalent and none is needed: nothing fires when an
 agent starts *thinking* about PROJ-123. The check happens when the claim is
 taken, alongside the session-start block that already lists what peers hold.
