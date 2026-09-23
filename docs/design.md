@@ -42,7 +42,10 @@ own**, and the reason the record is worth keeping rather than just worth
 having. Volume is ambient; the claim is escalation. Both get built.
 
 The web view (5) is not a fifth face but a surface onto the same record — the
-one place it is legible to someone who is not an agent in a session.
+one place it is legible to someone who is not an agent in a session. Rooms
+(6) are not a face either — they are the addressing layer all five rest on,
+and the only part of the design that gets harder as a team grows. Names and
+provenance (7) sit underneath both.
 
 ## Principles
 
@@ -183,8 +186,9 @@ Sketch, deliberately thin:
     robofinger tasks                          # what exists, who has it
 
 Claims stay what they are — the file-level collision check — and a task is the
-thing they hang off. Open: whether tasks need their own storage or are just a
-tag on existing entries. The tag version is much cheaper and probably enough.
+thing they hang off. Whether tasks need storage of their own is settled in 6
+and 8: they do not. A task with a tracker behind it is a ticket claim; one
+without is a tag on entries in a room's namespace.
 
 ## 4. Escalation
 
@@ -290,6 +294,299 @@ accident, and the person publishing chooses what leaves the encrypted set.
 - **The published mode needs a redaction story.** Choosing what to publish is
   a security decision made by a human, not a default.
 
+## 6. Rooms
+
+The other five all assume an audience, and none of them defines one. Today the
+audience is a local guess: peers may be tagged with groups, and `post --group
+work` encrypts to whoever *you* tagged `work`. There is no shared object, which
+costs two things.
+
+**Onboarding is N².** A twelfth person joining a project needs eleven existing
+members to run `add`, each picking their own label for them. Fine at three. Not
+fine at twelve, and "a team and its agents on one record" is a twelve-person
+shape.
+
+**A thread's audience drifts between hops.** Alice posts to her seven. Bob
+replies with `reply_to` set — to *his* nine. The exchange is now readable by a
+set nobody can enumerate, including the people in it. Claims dodge this by
+ignoring groups on purpose; `ask` and `answer` dodge it by going to everyone.
+Group posts do not, and `reply_to` is what exposes it.
+
+### A room cannot be a destination
+
+`relay/README.md` fixes the shape of any answer: storage is keyed by publisher
+pubkey, writes are single-writer and monotonic, and the relay "decides nothing
+about who may read whom". A room that members *write into* forces the relay to
+check a roster before accepting a write, which is an access decision. That ends
+the dumb pipe — so it is out on the contract, not on taste.
+
+What is left is that the relay serves exactly one shape: a keypair publishes
+signed state, peers fetch it. So a room should be a keypair too.
+
+### A room is an identity that publishes a roster
+
+    GET /u/<room-pubkey>   →   roster: alice·key, sam·key, dev-bot·key, …
+
+Joining is `add` against a room address in the format that already exists, with
+the same paste-it-in-Slack story and the same `--as` override. One fetch
+replaces eleven adds: **onboarding goes from N² to N.** Entries still publish to
+your own key, still single-writer, still monotonic. The room is a discovery and
+audience object, not a store, and the relay contract does not change — which is
+fitting, since it already calls a namespace a room.
+
+### Roster public, content private
+
+If the roster were encrypted to its members, a newcomer could not read it to
+find out how to reach them. So publish it in the clear and keep every entry
+encrypted to it: you learn who is in a room, never what they said. Admission is
+then exactly one act — the owner adding a key is what makes the next entry
+decryptable to it — and joining stays a pure read with no handshake.
+
+### A directory is a room you have not joined
+
+A public roster is an enumerable list of who is in a namespace, which is a
+directory — there is no second object to build. What separates the two words is
+curation, not structure:
+
+- **Curated**, signed by the room key, and therefore safe to encrypt to. A room.
+- **Self-asserted** — whoever happens to publish in the namespace — and therefore
+  only safe to look someone up in. A directory.
+
+The signature is what promotes a lookup list into an audience. Without it,
+anyone who wrote themselves into the namespace would receive everyone's entries.
+
+In the terms of **Three layers of scope**, a room is a path plus a *shared*
+group: the group mechanism unchanged, with its membership published rather
+than held privately by each publisher.
+
+This also keeps a promise the README makes: "no directory, nobody's feed to be
+ranked in". A roster is not a registry — per-namespace, opt-in, unranked — and it
+grants nothing. Reading is pull-only from your own follow list, and following
+someone does not let you read them, so finding a key creates no inbox and no way
+to push anything at anyone. **A directory replaces address-swapping, not
+consent.** It needs the one relay change rooms want anyway: enumerate a
+namespace, rather than `?from=` a list of keys you already hold.
+
+### Invites label a knock, they do not grant anything
+
+A room has an age key like any identity, so someone outside the roster can still
+encrypt *to the room*. That is a join request, readable only by the owner, and it
+replaces passing an address out of band — at the cost of the first unsolicited
+inbound channel in the design. Which is what an invite token is for:
+
+    $ robofinger room acme --invite
+    https://acme@relay.example.com/u/KEY?invite=7fq2mk#age1…
+      one-time, expires in 7 days
+
+    $ robofinger room acme
+    pending:
+      amber-otter   invite 7fq2mk (issued to bob, 2d ago)
+      slate-heron   no invite
+
+The token authorises nothing. There is no server to check it against, and
+pre-authorising — "anyone holding this gets in" — would need something to sign a
+roster while the owner is away, which means a daemon. It is a correlation hint
+that makes a pending list triageable, enforced locally by the client that issued
+it, and admission is still a human adding a key.
+
+Two details: the token goes in a query parameter *before* the fragment, because
+`#` already carries the age key; and the joining client strips it into the
+encrypted request body rather than sending it to the relay, for the same reason
+the age key sits after `#`.
+
+Verification is a different job and is already done — the derived alias is a
+pubkey fingerprint, so "does yours say amber-otter?" is an out-of-band check in
+two words.
+
+### Audience is the roster minus your blocks
+
+The obvious rule, "encrypt to the roster", hands your recipient list to the
+room's owner and destroys the best property in the security model: `rm bob` is
+unilateral, cryptographic, instant, and needs no relay cooperation.
+
+So a roster only ever *adds* recipients you never had to add by hand, and a
+local block *subtracts*, from every room, always. Stated plainly, because a user
+has to be able to hold it in their head: **joining a room delegates audience
+curation to its owner; blocking is how you take it back.**
+
+### What it costs
+
+- **An owner.** The first asymmetry in a deliberately symmetric design. It stays
+  honest because the room key is another keypair on somebody's laptop — no
+  server role, no signup — and because `/forward/<pubkey>`, which exists for "I
+  moved", is also how a room hands off to a successor.
+- **Removing someone becomes policy, not crypto.** A key dropped from the roster
+  stops receiving only once every member's client honours the new roster. Same
+  honest-client assumption as claiming being best-effort, with a sharper edge:
+  an ignored claim costs a worse decision, an ignored removal leaks. Document
+  that, rather than letting people assume room removal is as strong as `rm`.
+- **Membership becomes observable.** Publisher keys ride in cleartext, so a
+  relay can already infer the graph from `?from=` batches. A public roster makes
+  that trivial rather than inferential — a change of degree, but worth saying.
+
+### The size ceiling
+
+age wraps the file key once per recipient, on the order of 120 bytes of stanza
+each. A claim republished on every edit carries roughly 4KB of recipient
+overhead at 30 members and 24KB at 200, against a relay that bounds envelope
+size and a 100–300ms hook budget.
+
+So multi-recipient encryption is right for rooms of dozens and wrong for rooms
+of hundreds. The alternative is a room-wide symmetric key, wrapped per member in
+the roster object: constant entry size, and every removal becomes a key
+rotation. Ship multi-recipient — it keeps `rm` instant and teams are small. The
+room key is what a room adds when it outgrows that, not before.
+
+### What it settles
+
+- **Undeliverable addressing, inside a room.** A shared roster lets the client
+  check that an addressee can decrypt *before* publishing, and say so when it
+  cannot. Addressing someone outside every shared room is still silent, so the
+  open question shrinks to that case rather than closing.
+- **Tasks need no storage of their own.** A room is a namespace, and
+  `example.com/plan/team-a` already means separate storage — so a task is a tag
+  on entries in one, which is the cheap version from 3 with a scope that also
+  keeps `?from=` bounded. Where a tracker exists, 8 is cheaper still.
+- **The directory question.** There is nothing else to design: a roster is
+  what a directory would have been.
+
+## 7. Names and provenance
+
+A name does three jobs — read as an address, read as a byline, and read as
+credit — and they want different things. Splitting them is what lets a name
+carry the model and the effort without becoming unstable.
+
+### The address is what survives change
+
+    amber-otter/claude-1
+
+Both halves are machine-read, which is why they are structured at all. The
+first is derived from the pubkey rather than the hostname, because the alias
+rides *outside* the encryption and `johns-macbook-pro` is a needless broadcast.
+The second is the session slot: `PreToolUse` has to resolve to the same agent
+that took the claim, and the relay stores 3 plans per instance, so two sessions
+that collapse into one name overwrite each other's claims.
+
+Model and effort therefore cannot be path segments. Two Opus sessions would
+share a slot, and `--to amber-otter/claude-opus-5/high` names nobody the moment
+a rate limit downgrades them mid-task. **Anything before a slash is an address,
+and an address has to survive the thing it names changing.**
+
+### The byline is a fact about a fixed past event
+
+    14:02  amber-otter/claude-opus-5/high (alice)   progress: backoff was wrong for 5xx
+
+An entry is immutable, so stamping what produced it at write time is safe in
+exactly the way a live identity is not. Two fields, both `#[serde(default)]`
+so older clients drop them: the model string as the agent reports it, and the
+configured effort.
+
+**Effort is the configured setting, not a self-assessment.** low/medium/high is
+a fact about how the run was set up; "how hard I found this" is an agent marking
+its own homework. It is also what justifies the third segment — the same model
+at low and at high are different producers, and the model name alone hides it.
+
+Both are self-asserted, since the client cannot introspect its own model. That
+is tolerable for a capability hint and would be disqualifying for a name: a
+false effort tag is noise, a false identity is impersonation.
+
+### The nickname is yours and never leaves the machine
+
+`(alice)` is the local label from `add --as`, rendered in and not published.
+The first segment is global and key-derived, the parenthetical is local and
+yours — the petname split made visible, so an unmemorable derived name costs
+nothing at reading time. Omitted when you have no label filed for that key.
+
+### Two things fall out
+
+**Origin, for free.** A human has no model and no effort, so a bare `sam`
+against `sam/claude-opus-5/high` separates hand-typed from agent-emitted with
+no extra field. That is the distinction that matters when reading back to work
+out whether a person ever actually looked at something.
+
+**Record it before anything queries it.** Nothing needs to read these fields for
+them to be worth writing: effort is retroactively unrecoverable, so either it
+was stamped on the entry or the question is permanently unanswerable. Stamp it,
+build no view for it, and put "does anyone ever query effort?" in Open questions
+rather than designing for an answer nobody has asked for yet. Store the model
+string verbatim and render it short — `opus-5/high` in the log, the full string
+on a detail view — because 34 characters of byline against a 140-character cap
+is a skimmability problem, not a storage one. The byline says what produced an
+entry; the `commits` field says what it produced.
+
+## 8. Tickets, tags and channels
+
+### A ticket claim is a claim with a different namespace
+
+`project` exists so `src/**` in one repo cannot conflict with another. Point it
+at a tracker instead of a repo and the whole claim machinery — expiry, the
+timeline, release notes, `since`, conflict warnings — works on work items with
+no new mechanism at all.
+
+| | files | tickets |
+|---|---|---|
+| namespace | `project` = repo name | `project` = tracker host |
+| identifier | glob | ticket id |
+| match | glob match | case-insensitive exact |
+
+The thing claimed stays a positional argument, because a glob, a ticket id and a
+URL are cheaply distinguishable:
+
+    robofinger claim "migrate session store" 'src/auth/**'
+    robofinger claim "fix the retry backoff" PROJ-123
+    robofinger claim "reviewing this" https://github.com/o/r/pull/41
+    robofinger claim "…" --ticket 41      # when a bare id would read as a path
+
+`--ticket` earns its place as the disambiguator rather than the usual path, and
+it is the only place the noun surfaces — a URL names itself, so the word only has
+to cover short ids. `ticket` over `item`, which says nothing; over `issue`, which
+would collide with the tool's own warning language and implies a defect when half
+of what people claim is a feature; and over `task`, which is already the
+free-text field on every claim.
+
+**Normalisation is the whole feature.** `PROJ-123`, `proj-123` and the full
+browse URL have to collapse to one identity, or two agents hold the same ticket
+and neither is warned — a warning that silently does not fire, which is the
+failure this project exists to prevent. The client splits a pasted URL into host
+and id and compares case-insensitively, as alias matching already does.
+
+There is no `PreToolUse` equivalent and none is needed: nothing fires when an
+agent starts *thinking* about PROJ-123. The check happens when the claim is
+taken, alongside the session-start block that already lists what peers hold.
+
+**This is most of the board.** Work items need no storage here, and no
+committed-versus-relay decision, because they already live in a tracker.
+robofinger answers the one question a tracker answers worst — who is on this
+right now — and leaves the content where it is.
+
+### A channel is a tag people agree to read
+
+Technically identical, socially different, and neither needs a crypto or relay
+change. The fork that matters is whether a channel gates visibility.
+
+It must not. Claims ignore groups deliberately, because a conflict warning some
+peers cannot see is a warning that silently does not fire — and a channel that
+hides entries reintroduces that everywhere. So **rooms carry who, channels carry
+what**: one access mechanism, not two overlapping ones. That is the rule from
+**Three layers of scope** applied to tags — noise is a filter, secrecy is a
+group.
+
+    relay.example.com/plan/acme     namespace = storage, room, directory
+           #auth  #billing          channels = topic, audience-neutral
+
+Channels never appear in a URL, because `#` is the age key fragment. `acme#auth`
+is a display and CLI form; an address stays an address.
+
+Tags are nearly free if they land with the filtered reads in 2 — a fourth axis
+alongside path, kind and text, on the same code. The cheapest start is a hashtag
+in the body, promoted to a field once filtering is actually used.
+
+**The risk is proliferation, not access.** Five agents will invent `#auth`,
+`#authentication` and `#auth-migration` inside a day. The fix is discovery rather
+than governance: a `channels` listing of tags seen with counts, and a line in
+`ROBOFINGER.md` telling an agent to look before it invents. Read before write,
+the same shape as `since`.
+
 ## Deliberately deferred
 
 - **Key rotation and revocation.** No answer today; designing one now is
@@ -304,14 +601,15 @@ accident, and the person publishing chooses what leaves the encrypted set.
 - **What happens to an unanswered escalation?** It should not vanish silently.
   Whether it re-surfaces, escalates further, or just waits is undecided.
 - **Should a sender learn their message was undeliverable?** Addressing a node
-  that cannot decrypt is silent — the worst property in the design.
+  that cannot decrypt is silent — the worst property in the design. Rooms (6)
+  answer it for members of a shared room; addressing anyone else still is not
+  answered.
 - **Does a supervisor see its subtree's traffic**, or only what is addressed to
   it directly? Unclear whether that is useful or noise. Blocks any move to make
   nested paths behave hierarchically rather than just read that way — see
   "Three layers of scope".
 - **Loop prevention** if two nodes list each other as supervisor. Probably a hop
   count.
-- **Do tasks need storage**, or are they a tag on existing entries?
 - **What does publishing a snapshot actually expose?** Per-entry opt-in is
   safest and probably too tedious to use; whole-timeline is easy and leaks.
 
@@ -368,14 +666,28 @@ So: build the decision path, and pull in exactly the record work it depends on.
    show. Published snapshot after.
 
 7. **`progress` kind** — a variant and a verb in `render_entry`. Makes the
-   ambient half worth reading.
+   ambient half worth reading. The provenance byline rides along with it: same
+   file, same render path, and every entry written before it lands is an
+   entry whose producer is unrecoverable.
 
-8. **Non-consuming filtered reads** — by path, kind, text. The retrieval mode.
+8. **Non-consuming filtered reads** — by path, kind, text, tag. The retrieval
+   mode, and what makes tags nearly free.
 
 9. **Tasks** — last, because the tag version may fall out of 7–8 for free.
 
-**1–2 are prerequisites for the claim being true; 3–6 are the claim.** 7–9 are
-the ambient half: real value, and the volume that makes a record worth reading,
+10. **Rooms** — gated by team size rather than by cost. Nothing above needs
+    them and a team of five never will; they become urgent the first time
+    onboarding one person means asking everyone else to run a command. Rooms
+    also settle half of item 2: a shared roster lets a client check that an
+    addressee can decrypt *before* publishing.
+
+11. **Ticket claims** — barely an item: a tracker host in `project` and a
+    positional that is not a glob. Independent of everything above, so they
+    can land whenever someone wants them.
+
+**1–2 are prerequisites for the claim being true; 3–6 are the claim.** 10–11 are
+demanded by team size and by whatever tracker a team already runs, and can be
+pulled in whenever either applies. 7–9 are the ambient half: real value, and the volume that makes a record worth reading,
 but not what distinguishes this from a wiki with better syntax.
 
 The cost of this order is that nothing useful ships for longer. The old
