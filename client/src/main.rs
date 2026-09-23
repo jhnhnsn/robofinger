@@ -3611,7 +3611,25 @@ mod tests {
         // must not borrow an older commit as its note.
         let future = commits_since_in(&dir, now() + 3600, &["src/**".to_string()]);
 
-        assert!(scoped.contains("retry backoff"), "got {scoped:?}");
+        assert!(
+            scoped.contains("retry backoff"),
+            "scoped={scoped:?} all={all:?} future={future:?}\n\
+             log(no args)={:?}\n\
+             status={:?}",
+            git_log_in(&dir, 0, &[], "--format=%s"),
+            String::from_utf8_lossy(
+                &std::process::Command::new("git")
+                    .current_dir(&dir)
+                    .args(["log", "--oneline", "--all"])
+                    .output()
+                    .map(|o| {
+                        let mut v = o.stdout;
+                        v.extend(o.stderr);
+                        v
+                    })
+                    .unwrap_or_default()
+            )
+        );
         assert!(
             !scoped.contains("unrelated"),
             "globs must scope the log to the claimed paths, got {scoped:?}"
