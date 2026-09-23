@@ -387,7 +387,7 @@ fn cfg() -> Option<Cfg> {
     // Empty stays on the pre-0.2 wire format for headless use (CI, cron, a
     // pipe), where one runner is legitimately one worker.
     let instance = get("ROBOFINGER_INSTANCE")
-        .or_else(|| session_key().map(|k| slot_for(&k)))
+        .or_else(|| session_key().map(|(family, k)| slot_for(family, &k)))
         .unwrap_or_default();
     Some(Cfg {
         url,
@@ -405,30 +405,45 @@ fn cfg() -> Option<Cfg> {
 /// hand-typed `robofinger claim` — without naming a single vendor. A
 /// GUI-launched agent may have neither; it still gets a distinct slot below,
 /// just not a stable one across restarts.
-fn session_key() -> Option<String> {
-    ["CLAUDE_CODE_SESSION_ID", "TERM_SESSION_ID"]
-        .iter()
-        .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()))
+///
+/// The family comes back with the key because it is what the record calls the
+/// agent, and that has to reflect what actually launched it: CLAUDE_CODE_SESSION_ID
+/// means Claude Code, while TERM_SESSION_ID is any terminal-launched tool —
+/// aider, codex, or a human typing `robofinger claim` — none of which are
+/// Claude. Labelling those `claude-2` misreads the record later, when who
+/// produced an entry is most of what you want from it.
+fn session_key() -> Option<(&'static str, String)> {
+    [
+        ("claude", "CLAUDE_CODE_SESSION_ID"),
+        ("agent", "TERM_SESSION_ID"),
+    ]
+    .iter()
+    .find_map(|(family, k)| {
+        std::env::var(k)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|v| (*family, v))
+    })
 }
 
 /// How long an unused slot reservation is honoured. Past this the name is free
 /// again, so a machine does not accumulate claude-1..claude-99 forever.
 const SLOT_TTL: i64 = 24 * 3600;
 
-/// Map an opaque session key to a short readable name: claude-1, claude-2.
+/// Map an opaque session key to a short readable name: claude-1, agent-2.
 ///
 /// Without this the instance would be a raw UUID, which is what `robofinger
 /// list` would then print on every line. Reservations are keyed by session so
 /// the same session keeps its name across subprocesses and restarts, and they
 /// expire by timestamp exactly like claims do — a killed agent's slot ages out
 /// rather than needing a liveness check.
-fn slot_for(key: &str) -> String {
-    slot_in(&crypto::config_dir(), key, now())
+fn slot_for(family: &str, key: &str) -> String {
+    slot_in(&crypto::config_dir(), family, key, now())
 }
 
 /// `slot_for`, with the directory and clock injected so it is testable without
 /// mutating process-global env.
-fn slot_in(dir: &std::path::Path, key: &str, t: i64) -> String {
+fn slot_in(dir: &std::path::Path, family: &str, key: &str, t: i64) -> String {
     let path = dir.join("instances");
     let mut rows: Vec<(String, String, i64)> = std::fs::read_to_string(&path)
         .unwrap_or_default()
@@ -451,10 +466,12 @@ fn slot_in(dir: &std::path::Path, key: &str, t: i64) -> String {
             // reuses claude-1 instead of climbing forever.
             let taken: std::collections::HashSet<&str> =
                 rows.iter().map(|(_, n, _)| n.as_str()).collect();
+            // Numbering is per family, which falls out of the name carrying
+            // it: `agent-1` is free on a machine that already holds `claude-1`.
             let name = (1..)
-                .map(|i| format!("claude-{i}"))
+                .map(|i| format!("{family}-{i}"))
                 .find(|n| !taken.contains(n.as_str()))
-                .unwrap_or_else(|| "claude-1".into());
+                .unwrap_or_else(|| format!("{family}-1"));
             rows.push((key.to_string(), name.clone(), t));
             name
         }
@@ -469,6 +486,49 @@ fn slot_in(dir: &std::path::Path, key: &str, t: i64) -> String {
     let _ = std::fs::create_dir_all(dir);
     let _ = std::fs::write(&path, body);
     name
+}
+
+/// Two words derived from the public key: the default display name for an
+/// identity that has not chosen one.
+///
+/// The alias rides *outside* the encryption, because the relay has to tell
+/// agents apart — so the old default, the machine's hostname, published
+/// `johns-macbook-pro` to everyone who follows you. A derived name leaks
+/// nothing, is stable for the life of the key, and cannot be picked: you get
+/// the name your key gives you, which is the same reason it cannot be used to
+/// impersonate anyone.
+///
+/// FNV-1a rather than DefaultHasher, whose output is explicitly not stable
+/// across Rust releases. This name must never change under a user.
+fn derived_alias(pubkey: &str) -> String {
+    const ADJ: [&str; 64] = [
+        "amber", "ashen", "azure", "basalt", "brisk", "bronze", "calm", "cedar", "clay", "cobalt",
+        "coral", "crisp", "dusk", "ember", "fern", "flint", "frost", "ginger", "glass", "gold",
+        "grey", "hazel", "indigo", "iron", "ivory", "jade", "lilac", "lunar", "mauve", "mint",
+        "moss", "night", "ochre", "olive", "onyx", "opal", "pale", "pearl", "pine", "plum",
+        "quiet", "rapid", "river", "rose", "rust", "sable", "sage", "sand", "sepia", "silver",
+        "slate", "snow", "solar", "steel", "stone", "swift", "teal", "tidal", "umber", "velvet",
+        "violet", "warm", "wheat", "willow",
+    ];
+    const NOUN: [&str; 64] = [
+        "otter", "heron", "falcon", "marten", "badger", "lynx", "raven", "finch", "stoat", "ibis",
+        "hare", "vole", "crane", "shrew", "tern", "wren", "kite", "gull", "pike", "perch", "roach",
+        "eel", "seal", "whale", "orca", "shark", "ray", "crab", "prawn", "snail", "moth", "beetle",
+        "mantis", "cicada", "hornet", "wasp", "ant", "bee", "spider", "newt", "toad", "frog",
+        "adder", "viper", "gecko", "skink", "turtle", "weasel", "ferret", "marmot", "beaver",
+        "bison", "ibex", "tapir", "okapi", "lemur", "gibbon", "macaw", "toucan", "puffin",
+        "osprey", "merlin", "kestrel", "curlew",
+    ];
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in pubkey.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!(
+        "{}-{}",
+        ADJ[(h % ADJ.len() as u64) as usize],
+        NOUN[((h >> 32) % NOUN.len() as u64) as usize]
+    )
 }
 
 fn hostname() -> Option<String> {
@@ -1713,20 +1773,20 @@ fn main() {
                 url = format!("{url}/{ns}");
             }
 
+            // Written unconditionally now, and that is what keeps an existing
+            // user's name stable: `cfg()` still falls back to the hostname at
+            // runtime, so anyone who never pinned an alias keeps the name their
+            // peers already know until they rerun `init`. A rename that happens
+            // on upgrade reads, to everyone following you, as one person
+            // leaving and a stranger arriving.
             let saved_alias = alias
                 .clone()
                 .or_else(|| existing.get("ROBOFINGER_ALIAS").cloned())
                 .or_else(|| existing.get("ROBOFINGER_AGENT").cloned())
-                .or_else(hostname)
-                .unwrap_or_else(|| "agent".into());
+                .unwrap_or_else(|| derived_alias(&k.pubkey()));
 
             let mut body = format!("ROBOFINGER_URL={url}\n");
-            if let Some(a) = alias
-                .or_else(|| existing.get("ROBOFINGER_ALIAS").cloned())
-                .or_else(|| existing.get("ROBOFINGER_AGENT").cloned())
-            {
-                body.push_str(&format!("ROBOFINGER_ALIAS={a}\n"));
-            }
+            body.push_str(&format!("ROBOFINGER_ALIAS={saved_alias}\n"));
             // `init` rewrites the file wholesale, so anything it does not know
             // to carry across is silently lost on the next run.
             if let Some(t) = existing.get("ROBOFINGER_COMMIT_URL") {
@@ -1750,6 +1810,7 @@ fn main() {
                 println!();
             }
             println!("wrote {}", path.display());
+            println!("publishing as \"{saved_alias}\" — change it with --alias");
             println!("\nyour identity — share this line with collaborators:");
             println!(
                 "  {}",
@@ -3292,25 +3353,46 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let t = 1_000_000;
 
-        let a = slot_in(&d, "session-a", t);
+        let a = slot_in(&d, "claude", "session-a", t);
         assert_eq!(
-            slot_in(&d, "session-a", t),
+            slot_in(&d, "claude", "session-a", t),
             a,
             "same session keeps its name"
         );
-        let b = slot_in(&d, "session-b", t);
+        let b = slot_in(&d, "claude", "session-b", t);
         assert_ne!(a, b, "different sessions differ");
         assert_eq!((a.as_str(), b.as_str()), ("claude-1", "claude-2"));
+
+        // Families number independently, so a terminal-launched agent on a
+        // machine already running Claude Code is agent-1, not agent-3.
+        assert_eq!(slot_in(&d, "agent", "session-d", t), "agent-1");
 
         // An expired reservation frees its number for the next new session.
         std::fs::write(d.join("instances"), format!("session-a\tclaude-1\t{t}\n")).unwrap();
         assert_eq!(
-            slot_in(&d, "session-c", t + SLOT_TTL + 1),
+            slot_in(&d, "claude", "session-c", t + SLOT_TTL + 1),
             "claude-1",
             "stale slot is reclaimed"
         );
 
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The derived name must be a pure function of the key and never move: it
+    /// is published, and peers file their own labels against it.
+    #[test]
+    fn derived_alias_is_stable_and_key_dependent() {
+        let a = derived_alias("fHC-SO9S_nQ4aWnyFVJdFhBqLh1nZPqwJHFPNGOZbnE");
+        assert_eq!(
+            a,
+            derived_alias("fHC-SO9S_nQ4aWnyFVJdFhBqLh1nZPqwJHFPNGOZbnE")
+        );
+        assert_ne!(
+            a,
+            derived_alias("3KR2vzooEqN1mYyWQ8dPl0tXsA7bCfUgHjKmNpQrStU")
+        );
+        let (adj, noun) = a.split_once('-').expect("two words joined by a hyphen");
+        assert!(!adj.is_empty() && !noun.is_empty());
     }
 
     /// Byte slicing at an arbitrary offset panics on any multi-byte character,
