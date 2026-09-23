@@ -3567,16 +3567,31 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::create_dir_all(dir.join("docs")).unwrap();
 
+        // Check each step. Discarding git's status meant a fixture that failed
+        // to build looked exactly like a `git log` that found nothing, which
+        // is how this test spent two CI runs reporting `got ""` on Windows
+        // without saying which half was broken.
         let git = |args: &[&str]| {
-            std::process::Command::new("git")
+            let out = std::process::Command::new("git")
                 .current_dir(&dir)
                 .args(args)
                 .output()
-                .expect("git");
+                .expect("git must be on PATH");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
-        git(&["init", "-q"]);
+        // `init.defaultBranch` is unset on the CI runners, and on Windows the
+        // global template can leave core.autocrlf on, which rewrites the
+        // fixture files. Neither affects what this test asserts, but both emit
+        // noise that used to be swallowed.
+        git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "T"]);
+        git(&["config", "commit.gpgsign", "false"]);
 
         std::fs::write(dir.join("src/a.rs"), "1").unwrap();
         git(&["add", "-A"]);
