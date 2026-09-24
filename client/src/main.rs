@@ -225,9 +225,20 @@ publish as someone else. Keys never leave this machine.";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Plan {
-    /// Human label for this machine. Serialised as "agent" for compatibility
-    /// with plans already published; `alias` is what users type.
-    #[serde(rename = "agent")]
+    /// What a publisher called itself, from v0.8.0 and earlier.
+    ///
+    /// No longer written. A name in the envelope is asserted by whoever sent
+    /// it, so it could name anyone — and every reader now derives a name from
+    /// the pubkey it just verified, which nobody can assert. It stays here,
+    /// and stays read, so entries published before v0.9.0 still filter by the
+    /// name they were filed under.
+    ///
+    /// Serialised as "agent" for the same reason it is still parsed at all.
+    /// `skip_serializing`, not a conditional skip: a plan parsed from an old
+    /// entry carries a name, and re-publishing one — a forward, a rebroadcast
+    /// — would put an asserted name back on the wire by accident. Read-only,
+    /// like `id`.
+    #[serde(rename = "agent", default, skip_serializing)]
     alias: String,
     /// Publisher's Ed25519 public key — the real identity. `agent` is a label.
     #[serde(default)]
@@ -1160,7 +1171,7 @@ fn publish(
         _ => now(),
     };
     let plan = Plan {
-        alias: c.alias.clone(),
+        alias: String::new(),
         pubkey: k.pubkey(),
         seq: prev_seq + 1,
         epoch: now(),
@@ -1240,7 +1251,7 @@ fn send(c: &Cfg, k: &Keys, kind: &str, seq: u64, body: String) -> Result<(), Str
 /// Publish a signed forwarding pointer at the OLD address.
 fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
     let entry = Plan {
-        alias: c.alias.clone(),
+        alias: String::new(),
         pubkey: k.pubkey(),
         seq: now() as u64,
         epoch: now(),
@@ -1580,7 +1591,7 @@ fn post(
         .unwrap_or(0);
 
     let entry = Plan {
-        alias: c.alias.clone(),
+        alias: String::new(),
         pubkey: k.pubkey(),
         seq: prev + 1,
         epoch: now(),
@@ -3483,6 +3494,26 @@ mod tests {
         assert_eq!(who(&p, false), name, "solo output hides the instance");
         p.instance = String::new();
         assert_eq!(who(&p, true), name, "nothing to append");
+    }
+
+    /// Publishing a name again would hand every reader a string the publisher
+    /// chose, which is the thing reader-side derivation exists to prevent.
+    #[test]
+    fn the_envelope_carries_no_name() {
+        let mut p = plan("peer", "demo", &[], "working", 0);
+        p.alias = "alice".into();
+        let json = serde_json::to_string(&p).expect("serialise");
+        assert!(!json.contains("\"agent\""), "no name field: {json}");
+        assert!(!json.contains("alice"), "and nothing carrying one: {json}");
+
+        // Entries published before v0.9.0 still parse, so history keeps
+        // filtering under the name it was filed with.
+        let old: Plan = serde_json::from_str(
+            r#"{"agent":"mymac","pubkey":"pk","seq":1,"epoch":0,"status":"working",
+                "task":"t","touching":[],"project":"demo","eta_s":1800}"#,
+        )
+        .expect("an old plan still parses");
+        assert_eq!(old.alias, "mymac");
     }
 
     /// The alias travels inside the envelope, so without this a peer renames

@@ -3,6 +3,53 @@
 All notable changes to robofinger. Versions follow [semver](https://semver.org),
 loosely — this is pre-1.0 software and the wire format is still settling.
 
+## v0.9.0 — 2026-09-24
+
+Nobody gets to tell you what to call them. Names are computed by whoever is
+reading, from the key the relay already verified.
+
+- **The envelope no longer carries a name.** It used to carry `agent`, the
+  publisher's own word for itself, and that word was what every reader
+  displayed — so a peer could appear as anyone by renaming itself between
+  entries, on a timeline whose only job is saying who did what. The field is
+  still *parsed*, so entries published before this keep filtering under the
+  name they were filed with, and it is `skip_serializing` rather than skipped
+  when empty: re-publishing something parsed from an old entry must not put an
+  asserted name back on the wire by accident.
+
+  **This is a breaking wire change.** v0.8.0 and earlier declared `agent`
+  without a serde default, so they cannot parse an entry that omits it and will
+  drop it silently. Peers have to upgrade together.
+
+- **Readers derive the name from the public key.** `hazel-hare`, `slate-heron`
+  — a pure function of the key every write is already verified against, so both
+  ends of a conversation compute the same name and neither can assert one.
+  That makes it checkable out loud: "does yours say hazel-hare?" compares keys
+  without either party reading out base64.
+
+  A consequence worth knowing: a name now applies *backwards* through the
+  record, because it is computed from an identity rather than stored on an
+  event. That is the opposite of the `commits` field or a release note, which
+  record what was true when the entry was written and must never be restated.
+
+- **`robofinger name` — a local pubkey-to-string map.** `names` in the config
+  directory, one `pubkey<TAB>name` per line, never published. `robofinger name
+  <label>` names your own key, which is the one key `add --as` cannot reach
+  since you do not follow yourself; `robofinger name <peer> <label>` covers
+  everyone else, resolving by key, prefix, or the label already filed.
+
+  It renders *beside* the derived name rather than replacing it — `hazel-hare/claude-1
+  (cachy-g14)` — so the fingerprint never leaves the line at the moment someone
+  is reading to find out who did something. This is also where the machine name
+  went: `agent` was documented as "display name for the machine — not identity",
+  one field doing two jobs, and across two machines that mattered — the
+  instances file is per-machine, so a laptop and a desktop can both mint
+  `claude-1`.
+
+- **`ROBOFINGER_ALIAS` keeps one job**: the suggestion before `@` in your
+  address, which a peer adopts as their local label when they `add` you. It is
+  in no entry any more.
+
 ## v0.8.0 — 2026-09-23
 
 Names stopped leaking the machine they came from, and stopped calling every

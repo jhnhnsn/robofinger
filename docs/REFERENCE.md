@@ -60,14 +60,14 @@ Compact UTF-8 JSON. No schema language, no binary framing — the shape comes
 from the `Plan` struct in `client/src/main.rs`, which is the only definition.
 
 ```json
-{"agent":"laptop","pubkey":"fHC-SO9S…","seq":47,"epoch":1785549052,
+{"pubkey":"fHC-SO9S…","seq":47,"epoch":1785549052,
  "status":"working","task":"refactor auth middleware",
  "touching":["src/auth/**"],"project":"myrepo","eta_s":1800}
 ```
 
 | Field | Meaning |
 |---|---|
-| `agent` | display name for the machine — not identity. Set with `--alias`; the field keeps its old name for compatibility. |
+| `agent` | **no longer published.** Entries up to v0.8.0 carried the publisher's own name for itself; it is still parsed so those keep filtering, and never written. See [Names](#names). |
 | `pubkey` | echoed inside; the client overwrites it from the signed envelope |
 | `seq`, `epoch` | ordering and publish time (unix seconds) |
 | `status` | `working` \| `done` \| `post` \| `moved` |
@@ -83,6 +83,28 @@ from the `Plan` struct in `client/src/main.rs`, which is the only definition.
 
 Every field is `#[serde(default)]`, so an older client reading a newer plan
 drops what it does not recognise rather than failing.
+
+### Names
+
+Nothing in an envelope says who sent it except `pubkey`, and that is deliberate:
+a name a publisher asserts is a name it can choose, on a record whose only job
+is saying who did what. Readers build the name themselves, from two places the
+publisher does not control:
+
+    hazel-hare/claude-1 (cachy-g14)
+    └───┬────┘ └──┬───┘ └───┬────┘
+    from pubkey  session   your name for it, local
+
+The first is a pure function of the public key the relay already verified every
+write against, so two people checking an address out loud — "does yours say
+hazel-hare?" — are comparing the key. The last comes from `names` in the config
+directory (`pubkey<TAB>name`, written by `robofinger name`), falling back to the
+label you filed a peer under with `add --as`. Neither leaves the machine, so two
+readers can call one author different things and both be right.
+
+`ROBOFINGER_ALIAS` no longer appears in any entry. It survives as the name
+suggestion in your shared address — the part before `@`, which a peer adopts as
+their local label when they `add` you — and as a string `to` may name you by.
 
 ### Addressing
 
