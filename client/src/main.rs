@@ -1341,9 +1341,10 @@ fn peer_matches(p: &Plan, want: Option<&str>, subs: &[Peer]) -> bool {
         // entries were filed under, and a filter that stops matching history
         // is worse than one that is generous.
         Some(w) => {
-            name_in(&p.pubkey, subs).eq_ignore_ascii_case(w)
+            derived_alias(&p.pubkey).eq_ignore_ascii_case(w)
+                || label_in(&p.pubkey, names_cached(), subs)
+                    .is_some_and(|l| l.eq_ignore_ascii_case(w))
                 || p.alias == w
-                || subs.iter().any(|s| s.label == w && s.pubkey == p.pubkey)
         }
     }
 }
@@ -1926,6 +1927,59 @@ fn main() {
             };
             println!("{}", k.identity_blob(&label, Some(home)));
             eprintln!("\nshare that line with a peer; they run: robofinger add <it>");
+            return;
+        }
+        "name" => {
+            let mut names = load_names();
+            let peers = crypto::load_peers();
+            // Resolve however a user would type it: a full key, a prefix, or
+            // the label they already filed that peer under.
+            let resolve = |w: &str| -> Option<String> {
+                peers
+                    .iter()
+                    .find(|s| {
+                        s.pubkey == w || s.pubkey.starts_with(w) || s.label.eq_ignore_ascii_case(w)
+                    })
+                    .map(|s| s.pubkey.clone())
+            };
+            let (key, label) = match (args.get(1), args.get(2)) {
+                (None, _) => {
+                    if names.is_empty() {
+                        println!("no local names yet");
+                        println!("  robofinger name <label>           name this identity");
+                        println!("  robofinger name <peer> <label>    name someone you follow");
+                    }
+                    let mut rows: Vec<_> = names.iter().collect();
+                    rows.sort();
+                    for (k2, v) in rows {
+                        let mine = if *k2 == k.pubkey() { "  (you)" } else { "" };
+                        println!("{} ({}){}", derived_alias(k2), v, mine);
+                    }
+                    return;
+                }
+                // One argument names your own key, because that is the case
+                // `add --as` cannot reach.
+                (Some(l), None) => (k.pubkey(), l.clone()),
+                (Some(w), Some(l)) => match resolve(w) {
+                    Some(pk) => (pk, l.clone()),
+                    None => {
+                        eprintln!("nobody you follow matches {w:?} — see: robofinger list");
+                        std::process::exit(1);
+                    }
+                },
+            };
+            if label.is_empty() {
+                names.remove(&key);
+            } else {
+                names.insert(key.clone(), label.clone());
+            }
+            let body: String = names.iter().map(|(k2, v)| format!("{k2}\t{v}\n")).collect();
+            if let Err(e) = std::fs::write(names_path(), body) {
+                eprintln!("write {}: {e}", names_path().display());
+                std::process::exit(1);
+            }
+            println!("{} ({})", derived_alias(&key), label);
+            eprintln!("local only — never published, and peers keep their own names for you.");
             return;
         }
         "add" | "rm" | "update" | "list" => {
@@ -2908,6 +2962,48 @@ fn peers_cached() -> &'static Vec<Peer> {
     PEERS.get_or_init(crypto::load_peers)
 }
 
+/// `pubkey<TAB>name`, one per line. Local, never published, and separate from
+/// the peer list because the key you most want to name is your own — and you
+/// do not follow yourself.
+fn names_path() -> std::path::PathBuf {
+    crypto::config_dir().join("names")
+}
+
+fn load_names() -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(names_path())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+        .collect()
+}
+
+fn names_cached() -> &'static std::collections::HashMap<String, String> {
+    static NAMES: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(load_names)
+}
+
+/// What *you* call a key: the `names` file first, then the label you filed a
+/// peer under with `add --as`. Rendered in parentheses beside the derived
+/// name rather than replacing it, so the fingerprint never leaves the line.
+fn label_in(
+    pubkey: &str,
+    names: &std::collections::HashMap<String, String>,
+    subs: &[Peer],
+) -> Option<String> {
+    names.get(pubkey).cloned().or_else(|| {
+        subs.iter()
+            .find(|s| s.pubkey == pubkey && !s.label.is_empty())
+            .map(|s| s.label.clone())
+    })
+}
+
+fn local_label(pubkey: &str) -> Option<String> {
+    label_in(pubkey, names_cached(), peers_cached())
+}
+
 /// What to call the key that published something.
 ///
 /// Deliberately never `p.alias`. The alias rides in the envelope, so a peer
@@ -2923,16 +3019,8 @@ fn peers_cached() -> &'static Vec<Peer> {
 ///
 /// The published alias keeps its one job, which is suggesting a label at `add`
 /// time. That is what the address format has always called it: a suggestion.
-fn name_in(pubkey: &str, subs: &[Peer]) -> String {
-    subs.iter()
-        .find(|s| s.pubkey == pubkey && !s.label.is_empty())
-        .map(|s| s.label.clone())
-        .unwrap_or_else(|| derived_alias(pubkey))
-}
-
-/// `name_in` against the process-wide peer list.
 fn name_for(pubkey: &str) -> String {
-    name_in(pubkey, peers_cached())
+    derived_alias(pubkey)
 }
 
 /// Who published a plan: "hazel-hare", or "hazel-hare/claude-2" when the
@@ -2943,11 +3031,13 @@ fn name_for(pubkey: &str) -> String {
 /// when you are working alone is noise for what is still the common case.
 /// Solo output stays byte-identical to pre-0.2.
 fn who(p: &Plan, show_instance: bool) -> String {
-    let name = name_for(&p.pubkey);
-    if p.instance.is_empty() || !show_instance {
-        name
-    } else {
-        format!("{name}/{}", p.instance)
+    let mut name = name_for(&p.pubkey);
+    if show_instance && !p.instance.is_empty() {
+        name = format!("{name}/{}", p.instance);
+    }
+    match local_label(&p.pubkey) {
+        Some(l) => format!("{name} ({l})"),
+        None => name,
     }
 }
 
@@ -3403,11 +3493,11 @@ mod tests {
         let mut p = plan("peer", "demo", &[], "working", 0);
         p.alias = "alice".into();
 
-        // Nothing filed: the key names them, and the assertion is ignored.
-        assert_eq!(name_in(&p.pubkey, &[]), derived_alias(&p.pubkey));
-        assert_ne!(name_in(&p.pubkey, &[]), "alice");
+        // The published alias is ignored outright: the key names them.
+        assert_eq!(name_for(&p.pubkey), derived_alias(&p.pubkey));
+        assert_ne!(name_for(&p.pubkey), "alice");
 
-        // A label you chose beats both.
+        let empty = std::collections::HashMap::new();
         let subs = vec![Peer {
             label: "sam".into(),
             pubkey: p.pubkey.clone(),
@@ -3415,9 +3505,23 @@ mod tests {
             home: None,
             groups: vec![],
         }];
-        assert_eq!(name_in(&p.pubkey, &subs), "sam");
-        // And does not leak onto another key.
-        assert_eq!(name_in("pk-other", &subs), derived_alias("pk-other"));
+
+        // A local name accompanies the derived one rather than replacing it,
+        // so the fingerprint never leaves the line.
+        assert_eq!(label_in(&p.pubkey, &empty, &subs).as_deref(), Some("sam"));
+        assert_eq!(label_in("pk-other", &empty, &subs), None);
+
+        // The names file wins over a peer label, and reaches keys the peer
+        // list cannot — your own included.
+        let names = std::collections::HashMap::from([
+            (p.pubkey.clone(), "cachy-g14".to_string()),
+            ("pk-mine".to_string(), "desktop".to_string()),
+        ]);
+        assert_eq!(
+            label_in(&p.pubkey, &names, &subs).as_deref(),
+            Some("cachy-g14")
+        );
+        assert_eq!(label_in("pk-mine", &names, &[]).as_deref(), Some("desktop"));
     }
 
     /// Slots must be stable per session (the hook process has to land on the

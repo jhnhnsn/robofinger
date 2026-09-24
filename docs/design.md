@@ -509,10 +509,28 @@ false effort tag is noise, a false identity is impersonation.
 
 ### The nickname is yours and never leaves the machine
 
-`(alice)` is the local label from `add --as`, rendered in and not published.
-The first segment is global and key-derived, the parenthetical is local and
-yours — the petname split made visible, so an unmemorable derived name costs
-nothing at reading time. Omitted when you have no label filed for that key.
+`(alice)` is local and never published. The first segment is global and
+key-derived, the parenthetical is yours — the petname split made visible, so an
+unmemorable derived name costs nothing at reading time. Omitted when you have
+no name filed for that key.
+
+It accompanies the derived name rather than replacing it, which is the part
+worth holding: a label that substituted would take the fingerprint off the line
+exactly where someone is reading to find out who did something.
+
+Two sources, in order. A `names` file in the config directory maps pubkey to
+string, and `robofinger name <label>` writes your own key into it — the one key
+`add --as` can never reach, because you do not follow yourself. Failing that,
+the label you filed a peer under. Neither leaves the machine, so two people
+reading the same entry can call its author different things and both be right:
+
+    2026-09-24 11:59 hazel-hare/claude-1 (cachy-g14)
+      release docs/**  — hooks installed
+
+This is also where the machine name went. `alias` was documented as "display
+name for the machine — not identity", which was one field doing two jobs; the
+derived name answers *who*, and a local name answers *which box of mine*,
+without either being asserted in the envelope.
 
 ### Two things fall out
 
