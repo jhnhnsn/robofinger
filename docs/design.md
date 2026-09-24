@@ -463,7 +463,24 @@ carry the model and the effort without becoming unstable.
 Both halves are machine-read, which is why they are structured at all. The
 first is derived from the pubkey rather than the hostname, because the alias
 rides *outside* the encryption and `johns-macbook-pro` is a needless broadcast.
-The second is the session slot: `PreToolUse` has to resolve to the same agent
+
+**The reader derives it, and that is the whole point.** A name taken from the
+envelope is asserted by the publisher, so a peer can appear as anyone by
+renaming itself between entries — on a timeline whose only job is saying who
+did what. So a displayed name comes from one of the two places the publisher
+does not control: the label you filed them under with `add --as`, or failing
+that the name their key derives to. The published alias keeps its one job,
+suggesting a label at `add` time, which is what the address format has always
+called it.
+
+That makes the name checkable out loud — "does yours say hazel-hare?" — and it
+means a rename applies backwards through the record, because the name is
+computed from an identity rather than stored on an event. Which is the line
+between the two halves of this section: the byline below records what was true
+when an entry was written, the name records who the key is, and only one of
+those can be restated later.
+
+The second half of the address is the session slot: `PreToolUse` has to resolve to the same agent
 that took the claim, and the relay stores 3 plans per instance, so two sessions
 that collapse into one name overwrite each other's claims.
 

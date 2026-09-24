@@ -1287,7 +1287,8 @@ fn warn_unknown_peer(to: &str, c: &Cfg, k: &Keys) {
     // perfectly addressable, and on a fresh team that is the common case.
     let answers_to = |p: &Plan| {
         p.pubkey != k.pubkey()
-            && (p.alias.eq_ignore_ascii_case(to)
+            && (name_for(&p.pubkey).eq_ignore_ascii_case(to)
+                || p.alias.eq_ignore_ascii_case(to)
                 || (!p.instance.is_empty()
                     && (p.instance.eq_ignore_ascii_case(to)
                         || format!("{}/{}", p.alias, p.instance).eq_ignore_ascii_case(to))))
@@ -1335,7 +1336,15 @@ fn addressed_to_me(p: &Plan, c: &Cfg) -> bool {
 fn peer_matches(p: &Plan, want: Option<&str>, subs: &[Peer]) -> bool {
     match want {
         None => true,
-        Some(w) => p.alias == w || subs.iter().any(|s| s.label == w && s.pubkey == p.pubkey),
+        // The rendered name first, because that is what a user reads off the
+        // screen and types back. `p.alias` stays accepted: it is what older
+        // entries were filed under, and a filter that stops matching history
+        // is worse than one that is generous.
+        Some(w) => {
+            name_in(&p.pubkey, subs).eq_ignore_ascii_case(w)
+                || p.alias == w
+                || subs.iter().any(|s| s.label == w && s.pubkey == p.pubkey)
+        }
     }
 }
 
@@ -2357,7 +2366,7 @@ fn main() {
                 // Name the holder, so `--to` can be typed straight from this.
                 let holder = hits
                     .first()
-                    .map(|(p, _)| p.alias.clone())
+                    .map(|(p, _)| name_for(&p.pubkey))
                     .unwrap_or_default();
                 let msg = format!(
                     "CLAIM CONFLICT on {}:\n{}\n\
@@ -2465,7 +2474,7 @@ fn main() {
                             "{mine}{} asks: {}\n    (answer it: robofinger answer --to {} --re {} \"…\")",
                             who(p, true),
                             p.task,
-                            p.alias,
+                            name_for(&p.pubkey),
                             p.id
                         )
                     })
@@ -2891,18 +2900,54 @@ fn ask(question: &str, default: Option<&str>) -> Option<String> {
     }
 }
 
-/// Who published a plan: "mymac", or "mymac/claude-2" when the instance needs
-/// showing.
+/// Peers, read once per process. `who` runs per rendered line and inside the
+/// PreToolUse hook, where the budget is ~100ms and a file read per entry is a
+/// cost for nothing — the peer list cannot change while one command runs.
+fn peers_cached() -> &'static Vec<Peer> {
+    static PEERS: std::sync::OnceLock<Vec<Peer>> = std::sync::OnceLock::new();
+    PEERS.get_or_init(crypto::load_peers)
+}
+
+/// What to call the key that published something.
+///
+/// Deliberately never `p.alias`. The alias rides in the envelope, so a peer
+/// can change how it appears to you between one entry and the next — publish
+/// as "alice" and be rendered as alice, on a timeline whose whole job is
+/// saying who did what. A name is only worth reading if it cannot move under
+/// you, so it comes from one of the two places the publisher does not control:
+///
+///   1. the label you filed them under (`add --as`) — a petname you chose
+///      beats anything they assert about themselves
+///   2. failing that, the name their public key derives to, which is a
+///      fingerprint you can check out loud: "does yours say hazel-hare?"
+///
+/// The published alias keeps its one job, which is suggesting a label at `add`
+/// time. That is what the address format has always called it: a suggestion.
+fn name_in(pubkey: &str, subs: &[Peer]) -> String {
+    subs.iter()
+        .find(|s| s.pubkey == pubkey && !s.label.is_empty())
+        .map(|s| s.label.clone())
+        .unwrap_or_else(|| derived_alias(pubkey))
+}
+
+/// `name_in` against the process-wide peer list.
+fn name_for(pubkey: &str) -> String {
+    name_in(pubkey, peers_cached())
+}
+
+/// Who published a plan: "hazel-hare", or "hazel-hare/claude-2" when the
+/// instance needs showing.
 ///
 /// `show_instance` is false when this key has only one live instance — with
 /// auto-differentiation every plan now carries an instance, and appending it
 /// when you are working alone is noise for what is still the common case.
 /// Solo output stays byte-identical to pre-0.2.
 fn who(p: &Plan, show_instance: bool) -> String {
+    let name = name_for(&p.pubkey);
     if p.instance.is_empty() || !show_instance {
-        p.alias.clone()
+        name
     } else {
-        format!("{}/{}", p.alias, p.instance)
+        format!("{name}/{}", p.instance)
     }
 }
 
@@ -3132,7 +3177,7 @@ fn finger(c: &Cfg, k: &Keys, who: &str) -> Result<(), String> {
     } else {
         println!();
         for p in posts {
-            println!("{} {}", stamp(p.epoch), p.alias);
+            println!("{} {}", stamp(p.epoch), name_for(&p.pubkey));
             println!("{}\n", p.task);
         }
     }
@@ -3343,10 +3388,36 @@ mod tests {
         let mut p = plan("peer", "demo", &[], "working", 0);
         p.alias = "mymac".into();
         p.instance = "claude-2".into();
-        assert_eq!(who(&p, true), "mymac/claude-2");
-        assert_eq!(who(&p, false), "mymac", "solo output stays as it was");
+        let name = derived_alias(&p.pubkey);
+        assert_eq!(who(&p, true), format!("{name}/claude-2"));
+        assert_eq!(who(&p, false), name, "solo output hides the instance");
         p.instance = String::new();
-        assert_eq!(who(&p, true), "mymac", "nothing to append");
+        assert_eq!(who(&p, true), name, "nothing to append");
+    }
+
+    /// The alias travels inside the envelope, so without this a peer renames
+    /// itself to "alice" and is rendered as alice — on a timeline whose only
+    /// job is saying who did what.
+    #[test]
+    fn a_published_alias_never_names_its_publisher() {
+        let mut p = plan("peer", "demo", &[], "working", 0);
+        p.alias = "alice".into();
+
+        // Nothing filed: the key names them, and the assertion is ignored.
+        assert_eq!(name_in(&p.pubkey, &[]), derived_alias(&p.pubkey));
+        assert_ne!(name_in(&p.pubkey, &[]), "alice");
+
+        // A label you chose beats both.
+        let subs = vec![Peer {
+            label: "sam".into(),
+            pubkey: p.pubkey.clone(),
+            age_pub: String::new(),
+            home: None,
+            groups: vec![],
+        }];
+        assert_eq!(name_in(&p.pubkey, &subs), "sam");
+        // And does not leak onto another key.
+        assert_eq!(name_in("pk-other", &subs), derived_alias("pk-other"));
     }
 
     /// Slots must be stable per session (the hook process has to land on the

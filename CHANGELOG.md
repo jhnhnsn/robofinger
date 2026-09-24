@@ -13,10 +13,14 @@ agent Claude.
   another — so the old default published `johns-macbook-pro` to everyone
   following you, and the warning about folder names applied just as well to the
   hostname sitting beside them. A derived name — `amber-otter`, `slate-heron` —
-  leaks nothing, is stable for the life of the key, and cannot be picked, which
-  is also why it cannot be used to impersonate anyone. It doubles as a
-  fingerprint: "does yours say amber-otter?" checks a pasted address in two
-  words.
+  leaks nothing and is stable for the life of the key.
+
+  *Corrected after release:* this entry originally said the name could not be
+  picked or used to impersonate anyone, and that it doubled as a fingerprint.
+  Neither held in v0.8.0 — the derived name was only a **default** for
+  `ROBOFINGER_ALIAS`, an ordinary string any publisher could set to anything.
+  Readers derive the name themselves from v0.9.0 on, which is what makes those
+  claims true.
 
   *Only new identities move.* `init` now always pins an alias, and the runtime
   still falls back to the hostname, so anyone who never set one keeps the name
