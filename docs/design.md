@@ -282,6 +282,41 @@ the only mode that reaches an onlooker, and the only one that can be a public
 shop window. Deliberate by construction: nobody's worklog goes public by
 accident, and the person publishing chooses what leaves the encrypted set.
 
+### What it shows
+
+Five counts, then two columns. A mock with a real timeline in it lives at
+[dashboard-mock.html](dashboard-mock.html).
+
+| | answers | source |
+|---|---|---|
+| **Waiting on you** | must I act? | escalations, with defaults in use |
+| **Working now** | who is mid-edit? | live claims |
+| **Stuck** | is something abandoned? | `claimed_at` vs `epoch` — idle, past ETA |
+| **Contested** | will this collide? | overlapping claims |
+| **New since you looked** | what did I miss? | the `since` cursor |
+
+Left column the timeline, right column questions-for-you over who-holds-what.
+
+**A question is never shown without the default.** The escalation contract in 4
+already says an agent states what it would do by default and what the
+alternatives cost; the view's job is to render that, so the panel reads
+*question, then* ***default***, *then a "using default" tag* — and, because
+`--options` carries structured choices rather than prose, the alternatives can
+be real buttons rather than something a reader has to parse. This is the one
+thing worth taking from the single-agent progress dashboards going around: they
+show a question beside the default that will be taken if nobody answers, which
+turns silence into a decision the human can see being made.
+
+**No denominator the record cannot supply.** Those dashboards lead with "tasks
+done 5/9", which works because one agent is executing one plan of known length.
+Nothing here knows the 9. Claims and entries arrive; a progress bar over them
+would be invented, and an invented number on an audit surface is worse than no
+number. Every count above is something the record already holds.
+
+The other departure is that identity is a column rather than absent. A
+single-run dashboard needs no *who*; this is many agents across many people, so
+every row names one — derived name, session slot, and your local label.
+
 ### Constraints
 
 - **No server-side rendering, ever.** The relay must stay a dumb pipe. The

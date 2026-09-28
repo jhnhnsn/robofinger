@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>robofinger — team view</title>
+<style>
+  :root{
+    --bg:#0b0c0e; --panel:#121316; --line:#22252b; --line-soft:#1a1d22;
+    --fg:#e6e8ec; --dim:#8b919c; --dimmer:#5f656f;
+    --accent:#8b7cf6; --ok:#3fb950; --warn:#d29922; --hot:#f85149;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--sans);
+       -webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 16px 56px}
+
+  /* ---- header ---------------------------------------------------------- */
+  header{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap}
+  h1{font-size:19px;margin:0 0 6px;font-weight:600;letter-spacing:-.01em}
+  .sub{color:var(--dim);font:12px/1.6 var(--mono)}
+  .sub b{color:var(--fg);font-weight:500}
+  .pill{margin-left:auto;flex:none;font:12px/1 var(--sans);padding:7px 12px;
+        border-radius:999px;border:1px solid var(--line);color:var(--dim);
+        background:var(--panel);display:flex;align-items:center;gap:7px}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+
+  /* ---- kpi strip ------------------------------------------------------- */
+  .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;margin:22px 0;
+        background:var(--line-soft);border:1px solid var(--line);border-radius:12px;
+        overflow:hidden}
+  .kpi{background:var(--panel);padding:14px 16px;min-width:0}
+  .kpi .k{color:var(--dim);font-size:11px;text-transform:uppercase;
+          letter-spacing:.07em;margin-bottom:8px;white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis}
+  .kpi .v{font:600 26px/1 var(--sans);letter-spacing:-.02em}
+  .kpi .v small{font:400 13px/1 var(--sans);color:var(--dimmer)}
+  .kpi .n{color:var(--dimmer);font-size:12px;margin-top:6px;white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis}
+  .kpi.live .v{color:var(--accent)}
+  .kpi.attn .v{color:var(--warn)}
+
+  /* ---- layout ---------------------------------------------------------- */
+  .cols{display:grid;grid-template-columns:1fr 360px;gap:16px;align-items:start}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+         margin-bottom:16px;overflow:hidden}
+  .ph{display:flex;align-items:center;gap:8px;padding:12px 16px;
+      border-bottom:1px solid var(--line-soft)}
+  .ph h2{font-size:13px;margin:0;font-weight:600}
+  .ph .c{font:11px/1 var(--mono);color:var(--dim);background:var(--bg);
+         border:1px solid var(--line);border-radius:999px;padding:4px 8px}
+  .ph .r{margin-left:auto;color:var(--dimmer);font-size:12px}
+
+  /* ---- timeline -------------------------------------------------------- */
+  .entry{padding:12px 16px;border-bottom:1px solid var(--line-soft);
+         display:grid;grid-template-columns:62px 1fr;gap:14px}
+  .entry:last-child{border-bottom:0}
+  .entry time{font:12px/1.7 var(--mono);color:var(--dimmer)}
+  .who{font:12px/1.6 var(--mono);color:var(--dim);margin-bottom:3px}
+  .who b{color:var(--fg);font-weight:500}
+  .who .label{color:var(--dimmer)}
+  .ev{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+  .kind{font:11px/1.5 var(--mono);padding:1px 7px;border-radius:4px;
+        border:1px solid var(--line);color:var(--dim);flex:none}
+  .kind.claim{color:var(--accent);border-color:#2f2a52}
+  .kind.release{color:var(--ok);border-color:#1d3a24}
+  .paths{font:12px/1.6 var(--mono);color:var(--dim)}
+  .note{color:var(--fg);opacity:.86;margin-top:3px}
+
+  /* ---- questions ------------------------------------------------------- */
+  .q{padding:13px 16px;border-bottom:1px solid var(--line-soft)}
+  .q:last-child{border-bottom:0}
+  .q .qt{display:flex;gap:8px;align-items:flex-start}
+  .q .qt h3{font-size:13px;margin:0;font-weight:500;flex:1}
+  .tag{font:10px/1.4 var(--sans);padding:3px 7px;border-radius:999px;flex:none;
+       border:1px solid #4a3a12;color:var(--warn);background:#1c1608}
+  .def{margin-top:8px;padding-left:10px;border-left:2px solid var(--line);
+       color:var(--dim);font-size:12.5px}
+  .def b{color:var(--dimmer);font-weight:500;text-transform:uppercase;
+         font-size:10px;letter-spacing:.06em;display:block;margin-bottom:2px}
+
+  /* ---- holders + empty ------------------------------------------------- */
+  .row{padding:11px 16px;border-bottom:1px solid var(--line-soft);
+       display:flex;gap:10px;align-items:baseline}
+  .row:last-child{border-bottom:0}
+  .row .n{font:12px/1.5 var(--mono);color:var(--fg)}
+  .row .m{margin-left:auto;color:var(--dimmer);font-size:12px;flex:none}
+  .empty{padding:16px;color:var(--dim);font-size:13px}
+  .empty .why{color:var(--dimmer);font-size:12px;margin-top:5px}
+  .ok{color:var(--ok)}
+  footer{margin-top:24px;color:var(--dimmer);font:11px/1.7 var(--mono)}
+  @media(max-width:860px){.cols{grid-template-columns:1fr}
+    .kpis{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!--
+  A mock of design.md §5, team mode. Panels are chosen so that every number
+  comes from something the record already carries — no denominators the data
+  cannot supply.
+
+  DATA is a snapshot of a real timeline, taken 2026-09-24. In team mode this
+  is the decrypted result of a relay fetch performed in the browser; the relay
+  keeps serving ciphertext and never sees any of it.
+-->
+<script>
+const DATA = {
+  namespace: "relay.robofinger.net/jhn-37224…",
+  you: "hazel-hare",
+  entries: [
+    {t:"12:18", kind:"release", who:"hazel-hare/claude-1", label:"cachy-g14",
+     paths:"client/**", note:"wire carries no name; readers derive it"},
+    {t:"12:18", kind:"claim", who:"hazel-hare/claude-1", label:"cachy-g14",
+     paths:"client/**", note:"drop alias from the envelope"},
+    {t:"11:59", kind:"release", who:"hazel-hare/claude-1", label:"cachy-g14",
+     paths:"docs/**", note:"hooks + ROBOFINGER.md installed; both gitignored so nothing lands in the repo"},
+    {t:"11:58", kind:"claim", who:"hazel-hare/claude-1", label:"cachy-g14",
+     paths:"docs/**", note:"wire robofinger onto its own repo"},
+  ],
+  holding: [],      // live claims
+  questions: [],    // escalations — sequencing item 3, not built
+  contested: 0,
+  unread: 0,
+};
+</script>
+
+<header>
+  <div>
+    <h1>robofinger — team view</h1>
+    <div class="sub" id="sub"></div>
+  </div>
+  <div class="pill"><span class="dot"></span><span id="status"></span></div>
+</header>
+
+<div class="kpis" id="kpis"></div>
+
+<div class="cols">
+  <div>
+    <div class="panel">
+      <div class="ph">
+        <h2>Timeline</h2>
+        <span class="c" id="tl-count"></span>
+        <span class="r">newest first</span>
+      </div>
+      <div id="timeline"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <div class="ph"><h2>Questions for you</h2><span class="c" id="q-count"></span></div>
+      <div id="questions"></div>
+    </div>
+
+    <div class="panel">
+      <div class="ph"><h2>Holding right now</h2><span class="c" id="h-count"></span></div>
+      <div id="holding"></div>
+    </div>
+  </div>
+</div>
+
+<footer id="foot"></footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+// Every count answers "must I act?". Nothing here needs a total the record
+// cannot supply, which is why there is no progress bar.
+const kpis = [
+  {k:"Waiting on you", v:DATA.questions.length, n:DATA.questions.length ? "defaults in use" : "nothing to answer", cls:DATA.questions.length ? "attn" : ""},
+  {k:"Working now",    v:DATA.holding.length,   n:DATA.holding.length ? "across 1 person" : "no live claims", cls:DATA.holding.length ? "live" : ""},
+  {k:"Stuck",          v:0, n:"no claim past its ETA"},
+  {k:"Contested",      v:DATA.contested, n:DATA.contested ? "paths two agents want" : "no overlapping claims"},
+  {k:"New since you looked", v:DATA.unread, n:DATA.unread ? "unread entries" : "cursor is current"},
+];
+$("kpis").innerHTML = kpis.map(x => `
+  <div class="kpi ${x.cls||''}">
+    <div class="k">${esc(x.k)}</div>
+    <div class="v">${x.v}</div>
+    <div class="n">${esc(x.n)}</div>
+  </div>`).join("");
+
+$("sub").innerHTML = `<b>${esc(DATA.namespace)}</b> · you are <b>${esc(DATA.you)}</b>`;
+$("status").textContent = DATA.holding.length
+  ? `${DATA.holding.length} working, ${DATA.questions.length} waiting`
+  : "nobody working";
+
+$("tl-count").textContent = DATA.entries.length;
+$("timeline").innerHTML = DATA.entries.map(e => `
+  <div class="entry">
+    <time>${esc(e.t)}</time>
+    <div>
+      <div class="who"><b>${esc(e.who)}</b> <span class="label">(${esc(e.label)})</span></div>
+      <div class="ev">
+        <span class="kind ${esc(e.kind)}">${esc(e.kind)}</span>
+        <span class="paths">${esc(e.paths)}</span>
+      </div>
+      <div class="note">${esc(e.note)}</div>
+    </div>
+  </div>`).join("");
+
+// The panel worth stealing: a question is never shown without the default that
+// will be taken if nobody answers it.
+$("q-count").textContent = DATA.questions.length;
+$("questions").innerHTML = DATA.questions.length
+  ? DATA.questions.map(q => `
+      <div class="q">
+        <div class="qt"><h3>${esc(q.q)}</h3><span class="tag">using default</span></div>
+        <div class="def"><b>default</b>${esc(q.def)}</div>
+      </div>`).join("")
+  : `<div class="empty">Nothing is waiting on you.
+       <div class="why">No escalations exist yet — <code>escalate</code> is
+       sequencing item 3 and is not built, so this panel has no source.</div></div>`;
+
+$("h-count").textContent = DATA.holding.length;
+$("holding").innerHTML = DATA.holding.length
+  ? DATA.holding.map(h => `
+      <div class="row"><span class="n">${esc(h.who)}</span>
+        <span class="n">${esc(h.paths)}</span>
+        <span class="m">${esc(h.age)}</span></div>`).join("")
+  : `<div class="empty"><span class="ok">Nothing held.</span>
+       <div class="why">Claims expire on their own, so an empty list means
+       nobody is mid-edit — not that something failed to clean up.</div></div>`;
+
+$("foot").textContent =
+  "mock of design.md §5 — snapshot 2026-09-24. team mode decrypts in the browser; the relay only ever serves ciphertext.";
+</script>
+</body>
+</html>
