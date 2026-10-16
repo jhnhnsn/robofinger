@@ -66,6 +66,8 @@ const STALE_GRACE: i64 = 15 * 60;
 /// this lands in a context window the agent still needs for its real work.
 /// Questions are exempt — they are the reason the block exists.
 const START_SHOWN: usize = 8;
+/// Default port for `serve`. Arbitrary, just unlikely to be taken.
+const SERVE_PORT: u16 = 7380;
 
 /// What an agent should do with any of this. Appended to the SessionStart
 /// block, because the hook is the one place every agent reliably reads —
@@ -134,6 +136,11 @@ THE TIMELINE
         in ~20m\"
       (--re quotes the question back, so the asker sees what was answered.
        ids come from `robofinger since --ids`)
+
+  serve [--port N]              the same record as a page in your browser
+      robofinger serve          then open http://127.0.0.1:7380
+      (who holds what, who has gone quiet, open questions, what landed.
+       localhost only: it decrypts with your keys, so it is yours alone)
 
   post [--to <peer>] [--group <name>] \"<text>\"
                                 leave a note on the timeline
@@ -2380,8 +2387,9 @@ fn main() {
                             done
                         }
                     }
-                    _ => task,
+                    _ => task.clone(),
                 };
+                let text = carry_ticket(&task, &text);
                 timeline_with_commits(&c, &k, "release", &text, held, shas);
             }
         }
@@ -2881,6 +2889,15 @@ fn main() {
                 }
             }
         }
+        "serve" => {
+            let port: u16 = flag(&args, "--port")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(SERVE_PORT);
+            if let Err(e) = serve(&c, &k, port) {
+                eprintln!("serve: {e}");
+                std::process::exit(1);
+            }
+        }
         // `robofinger` alone is your own status; `robofinger alice` is a peer.
         // Falling through to a peer lookup keeps the main verb short, the way
         // `finger alice` was the whole interface.
@@ -3293,6 +3310,417 @@ fn first_line(s: &str) -> String {
     } else {
         line.to_string()
     }
+}
+
+/// `robofinger serve`: the record as a page, for the human at the top.
+///
+/// Local and read-only, rendered where the keys already are — the fallback
+/// `docs/design.md` §5 names for the team view. The relay keeps serving
+/// ciphertext and learns nothing new. Bound to 127.0.0.1 because the page is
+/// decrypted content: anyone who can reach the port reads it as you.
+///
+/// ponytail: one thread, one relay fetch per request. A human refreshing a
+/// tab is the only load; go async only if several viewers ever share one.
+fn serve(c: &Cfg, k: &Keys, port: u16) -> std::io::Result<()> {
+    use std::io::{BufRead, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
+    println!("serving the record at http://127.0.0.1:{port}  (ctrl-c to stop)");
+    // Shells out to git, so once, not per refresh. The template is this
+    // repo's origin, so it only links entries from this repo — a teammate's
+    // sha from another project would get a link that 404s.
+    let links = commit_url_template().map(|t| (project(), t));
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        // Browsers open a spare connection ahead of time and may never send
+        // on it. One thread blocked reading that socket stalls every real
+        // request behind it, so give up on a silent one quickly.
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+        // Only the request line matters; every path gets the dashboard. A
+        // favicon request costs a relay round trip, so answer it empty.
+        let mut line = String::new();
+        let _ = std::io::BufReader::new(&stream).read_line(&mut line);
+        let (status, body) = if line.starts_with("GET / ") || line.starts_with("GET /? ") {
+            let t = now();
+            let live = current_plans(c, k);
+            let posts = fetch_posts(c, k, MAX_POST_LIMIT);
+            ("200 OK", dashboard(&live, &posts, c, t, links.as_ref()))
+        } else {
+            ("404 Not Found", String::new())
+        };
+        let _ = write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n\
+             Content-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    }
+    Ok(())
+}
+
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// A live claim that has gone quiet past its ETA but not yet expired.
+///
+/// The window between `eta_s` and `eta_s * STALE_MULT` is exactly the "well
+/// past its ETA" case the escalation rule names: still blocking teammates,
+/// and nobody can tell yet whether the agent is thinking or dead.
+fn stuck(p: &Plan, t: i64) -> bool {
+    p.live(t) && !p.touching.is_empty() && t - p.epoch > p.eta_s
+}
+
+/// Asks nobody has answered yet, the ones addressed to this node first.
+fn open_asks<'a>(posts: &'a [Plan], c: &Cfg) -> Vec<&'a Plan> {
+    let answered: std::collections::HashSet<i64> = posts
+        .iter()
+        .filter(|p| p.kind == "answer" && p.reply_to > 0)
+        .map(|p| p.reply_to)
+        .collect();
+    let mut v: Vec<&Plan> = posts
+        .iter()
+        .filter(|p| p.kind == "ask" && !answered.contains(&p.id))
+        .collect();
+    v.sort_by_key(|p| (!addressed_to_me(p, c), std::cmp::Reverse(p.epoch)));
+    v
+}
+
+/// The ticket an entry is filed under, as (key, link).
+///
+/// Recognises what a tracker hands an agent: `#123`, or an issue URL. A GitHub
+/// or GitLab URL keys as `#123`, so a claim that says `#88` and a release that
+/// pastes the URL land in one row. Deliberately not `ABC-123`: that is also
+/// how ADRs and RFCs are numbered, and a decision record is not a ticket.
+///
+/// ponytail: first match wins, one ticket per entry. Work spanning tickets
+/// files under the first one named.
+fn ticket_ref(task: &str) -> Option<(String, Option<String>)> {
+    task.split_whitespace().find_map(|w| {
+        let w = w.trim_matches(|c: char| "()[]{},.;:\"'".contains(c));
+        if let Some(n) = w.strip_prefix('#') {
+            return (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| (w.to_string(), None));
+        }
+        if !(w.starts_with("https://") || w.starts_with("http://")) {
+            return None;
+        }
+        // github .../issues/88, gitlab .../-/issues/88, linear .../issue/ENG-1/slug
+        let mut parts = w.split('/');
+        parts.find(|seg| *seg == "issues" || *seg == "issue")?;
+        let id = parts.next().filter(|id| !id.is_empty())?;
+        let key = if id.bytes().all(|b| b.is_ascii_digit()) {
+            format!("#{id}")
+        } else {
+            id.to_string()
+        };
+        Some((key, Some(w.to_string())))
+    })
+}
+
+/// Keep the ticket on a release whose note dropped it.
+///
+/// A release note replaces the claim's text, and neither a hand-written note
+/// nor one derived from commit subjects knows which ticket the work was for.
+/// Prefixed, not appended, so the 140-character cap trims prose, not the ref.
+fn carry_ticket(claim: &str, note: &str) -> String {
+    match (ticket_ref(claim), ticket_ref(note)) {
+        // `#88` is short and parses back; a Linear key alone would not, so
+        // that one keeps its URL.
+        (Some((key, link)), None) => match link {
+            Some(u) if !key.starts_with('#') => format!("{u} {note}"),
+            _ => format!("{key} {note}"),
+        },
+        _ => note.to_string(),
+    }
+}
+
+/// One row per ticket in a repo: where it stands, who touched it last, and
+/// the commits filed under it.
+fn ticket_rows(
+    claims: &[&&Plan],
+    happened: &[&Plan],
+    r: &str,
+    repo: &dyn Fn(&Plan) -> String,
+    t: i64,
+    shas: &dyn Fn(&Plan) -> String,
+) -> String {
+    // (key, link, entries newest first). Claims first, so a live claim is the
+    // row's newest word even when an older release shares its ticket.
+    let mut rows: Vec<(String, Option<String>, Vec<&Plan>)> = Vec::new();
+    let entries = claims
+        .iter()
+        .map(|p| **p)
+        .chain(happened.iter().copied().filter(|p| repo(p) == r));
+    for p in entries {
+        let Some((key, link)) = ticket_ref(&p.task) else {
+            continue;
+        };
+        match rows.iter_mut().find(|x| x.0 == key) {
+            Some(x) => {
+                x.1 = x.1.take().or(link);
+                x.2.push(p);
+            }
+            None => rows.push((key, link, vec![p])),
+        }
+    }
+    if rows.is_empty() {
+        return String::new();
+    }
+    let body = rows
+        .iter()
+        .map(|(key, link, es)| {
+            let head = es[0];
+            let live = claims
+                .iter()
+                .find(|c| ticket_ref(&c.task).is_some_and(|x| x.0 == *key));
+            let state = match (live, head.kind.as_str()) {
+                (Some(c), _) if stuck(c, t) => r#"<span class="tag bad">quiet</span>"#,
+                (Some(_), _) => r#"<span class="tag">working</span>"#,
+                (None, "release") => r#"<span class="tag">released</span>"#,
+                (None, "done") => r#"<span class="tag">done</span>"#,
+                _ => r#"<span class="tag">noted</span>"#,
+            };
+            let name = match link {
+                Some(u) => format!(r#"<a href="{}">{}</a>"#, esc(u), esc(key)),
+                None => esc(key),
+            };
+            let mut all = head.clone();
+            all.commits = Vec::new();
+            for e in es {
+                for c in &e.commits {
+                    if !all.commits.contains(c) {
+                        all.commits.push(c.clone());
+                    }
+                }
+            }
+            format!(
+                "<tr><td>{name}</td><td>{state}</td><td>{} {}</td><td>{}</td><td>{}</td></tr>",
+                esc(&head.task),
+                shas(&all),
+                esc(&who(head, true)),
+                ago(t - head.epoch),
+            )
+        })
+        .collect::<String>();
+    format!(
+        "<table class=tickets><tr><th>Ticket</th><th>Status</th><th>Latest</th><th>Agent</th><th>Updated</th></tr>{body}</table>"
+    )
+}
+
+/// `links` is (project, commit url template): shas link only within that repo.
+fn dashboard(
+    live: &[Plan],
+    posts: &[Plan],
+    c: &Cfg,
+    t: i64,
+    links: Option<&(String, String)>,
+) -> String {
+    let held = |p: &Plan| {
+        t.saturating_sub(if p.claimed_at > 0 {
+            p.claimed_at
+        } else {
+            p.epoch
+        })
+    };
+    let shas = |p: &Plan| {
+        p.commits
+            .iter()
+            .map(|s| match links {
+                Some((repo, tpl)) if *repo == p.project => {
+                    format!(r#"<a href="{}">{}</a>"#, esc(&commit_url(tpl, s)), esc(s))
+                }
+                _ => format!("<code>{}</code>", esc(s)),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let empty = |what: &str| format!(r#"<p class="none">{what}</p>"#);
+
+    let claims: Vec<&Plan> = live
+        .iter()
+        .filter(|p| p.live(t) && !p.touching.is_empty())
+        .collect();
+    let repo = |p: &Plan| match p.project.as_str() {
+        "" | "-" => "(no repo)".to_string(),
+        r => r.to_string(),
+    };
+    // What happened, as opposed to traffic about it: claims are already in
+    // the table and questions have their own panel.
+    let happened: Vec<&Plan> = posts
+        .iter()
+        .filter(|p| matches!(p.kind.as_str(), "release" | "done" | ""))
+        .collect();
+
+    // One panel per repo, the way the record is already partitioned: every
+    // entry carries the publisher's repo. Busiest-now first, then most recent.
+    let mut projects: Vec<(bool, i64, String)> = Vec::new();
+    for p in claims.iter().chain(happened.iter()) {
+        let r = repo(p);
+        let holding = claims.iter().any(|c| repo(c) == r);
+        match projects.iter_mut().find(|x| x.2 == r) {
+            Some(x) => x.1 = x.1.max(p.epoch),
+            None => projects.push((holding, p.epoch, r)),
+        }
+    }
+    projects.sort_by_key(|x| std::cmp::Reverse((x.0, x.1)));
+
+    let project_panels = if projects.is_empty() {
+        format!("<section>{}</section>", empty("Nothing on the record yet"))
+    } else {
+        projects
+            .iter()
+            .map(|(_, last, r)| {
+                let mine: Vec<&&Plan> = claims.iter().filter(|p| repo(p) == *r).collect();
+                let tickets = ticket_rows(&mine, &happened, r, &repo, t, &shas);
+                // Anything filed under a ticket is summarised in its row; the
+                // claims table and the recent list keep only the rest.
+                let untagged: Vec<&&Plan> =
+                    mine.iter().filter(|p| ticket_ref(&p.task).is_none()).copied().collect();
+                let table = if untagged.is_empty() {
+                    String::new()
+                } else {
+                    let rows = untagged
+                        .iter()
+                        .map(|p| {
+                            let state = if stuck(p, t) {
+                                r#"<span class="tag bad">quiet</span>"#
+                            } else {
+                                r#"<span class="tag">working</span>"#
+                            };
+                            format!(
+                                "<tr><td>{state}</td><td>{}</td><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
+                                esc(&who(p, true)),
+                                esc(&p.task),
+                                esc(&p.touching.join(" ")),
+                                dur(held(p)),
+                            )
+                        })
+                        .collect::<String>();
+                    format!(
+                        "<table><tr><th>Status</th><th>Agent</th><th>Task</th><th>Paths</th><th>Held</th></tr>{rows}</table>"
+                    )
+                };
+                let recent = happened
+                    .iter()
+                    .filter(|p| repo(p) == *r && ticket_ref(&p.task).is_none())
+                    .take(6)
+                    .map(|p| {
+                        // A note is prose somebody chose to write; a release
+                        // is a headline with refs. Weight them differently.
+                        let text = if p.kind.is_empty() {
+                            esc(&p.task)
+                        } else {
+                            format!("<b>{}</b> {}", esc(&p.task), shas(p))
+                        };
+                        let paths = if p.globs.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · <code>{}</code>", esc(&p.globs.join(" ")))
+                        };
+                        format!(
+                            "<div class=item>{text}<div class=sub>{} · {}{paths}</div></div>",
+                            esc(&who(p, true)),
+                            ago(t - p.epoch),
+                        )
+                    })
+                    .collect::<String>();
+                let status = if mine.is_empty() {
+                    format!("<span class=dim>last activity {}</span>", ago(t - last))
+                } else {
+                    format!("<span class=n>{} working</span>", mine.len())
+                };
+                format!(
+                    "<section><div class=ph><h2 class=proj>{}</h2>{status}</div>{tickets}{table}{recent}</section>",
+                    esc(r)
+                )
+            })
+            .collect::<String>()
+    };
+
+    let quiet: Vec<&&Plan> = claims.iter().filter(|p| stuck(p, t)).collect();
+    let stuck_panel = if quiet.is_empty() {
+        r#"<p class="ok">Nothing stuck</p>"#.to_string()
+    } else {
+        quiet
+            .iter()
+            .map(|p| {
+                format!(
+                    "<div class=item><b>{}</b> in {} — silent {}, claim lapses in {}<div class=sub><code>{}</code> {}</div></div>",
+                    esc(&who(p, true)),
+                    esc(&repo(p)),
+                    dur(t - p.epoch),
+                    dur(p.epoch + p.eta_s * STALE_MULT - t),
+                    esc(&p.touching.join(" ")),
+                    esc(&p.task),
+                )
+            })
+            .collect()
+    };
+
+    let asks = open_asks(posts, c);
+    let asks_panel = if asks.is_empty() {
+        empty("No open questions")
+    } else {
+        asks.iter()
+            .map(|p| {
+                let mine = if addressed_to_me(p, c) { r#"<span class="tag bad">for you</span> "# } else { "" };
+                let to = if p.to.is_empty() { "the team".to_string() } else { esc(&p.to) };
+                format!(
+                    "<div class=item>{mine}<b>{}</b><div class=sub>{} → {to} · {} · {} · <code>robofinger answer --to {} --re {} \"…\"</code></div></div>",
+                    esc(&p.task),
+                    esc(&who(p, true)),
+                    esc(&repo(p)),
+                    ago(t - p.epoch),
+                    esc(&p.alias),
+                    p.id,
+                )
+            })
+            .collect()
+    };
+
+    let count = |n: usize| {
+        if n > 0 {
+            format!(" <span class=n>{n}</span>")
+        } else {
+            String::new()
+        }
+    };
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="15"><title>robofinger · {alias}</title>
+<style>
+:root{{--bg:#111;--panel:#1a1a1a;--line:#333;--fg:#ddd;--dim:#888;--hi:#f5a623;--ok:#3fb950;--bad:#f85149}}
+@media (prefers-color-scheme: light){{:root{{--bg:#f6f6f6;--panel:#fff;--line:#ddd;--fg:#222;--dim:#666;--hi:#b36b00;--ok:#1a7f37;--bad:#cf222e}}}}
+body{{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;margin:0;padding:16px}}
+header{{border-bottom:2px solid var(--hi);padding-bottom:8px;margin-bottom:16px}}
+h1{{color:var(--hi);font-size:20px;display:inline;margin-right:16px}}
+.grid{{display:grid;grid-template-columns:2fr 1fr;gap:12px}}@media (max-width:800px){{.grid{{grid-template-columns:1fr}}}}
+section{{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:10px 12px;margin-bottom:12px;overflow-x:auto}}
+h2{{font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin:0 0 8px}} .n{{color:var(--hi)}}
+table{{border-collapse:collapse;width:100%}} th,td{{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);vertical-align:top}} th{{color:var(--dim);font-weight:normal;font-size:12px}}
+.tag{{border:1px solid var(--dim);border-radius:3px;padding:0 6px;font-size:12px;white-space:nowrap}} .tag.bad{{border-color:var(--bad);color:var(--bad)}}
+.item{{padding:4px 0 8px}} .sub{{color:var(--dim);font-size:12px}} .none{{color:var(--dim);font-style:italic;margin:0}} .ok{{color:var(--ok);font-weight:bold;margin:0}}
+code{{font-size:12px}} a{{color:var(--hi)}} .dim{{color:var(--dim)}}
+.ph{{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px}} h2.proj{{font-size:15px;text-transform:none;letter-spacing:0;color:var(--hi);margin:0}} .ph span{{font-size:12px}} table.tickets{{margin-bottom:10px}}
+</style></head><body>
+<header><h1>robofinger</h1><span class=dim>{alias} · {n} live claims across {np} repos · refreshed {stamp}</span></header>
+<div class=grid><div>
+{project_panels}
+</div><div>
+<section><h2>Stuck{c_stuck}</h2>{stuck_panel}</section>
+<section><h2>Open questions{c_asks}</h2>{asks_panel}</section>
+</div></div></body></html>"#,
+        alias = esc(&c.alias),
+        n = claims.len(),
+        stamp = stamp(t),
+        np = projects.len(),
+        c_stuck = count(quiet.len()),
+        c_asks = count(asks.len()),
+    )
 }
 
 #[cfg(test)]
@@ -3995,5 +4423,127 @@ mod tests {
         let p: Plan = serde_json::from_str(r#"{"agent":"a"}"#).unwrap();
         assert_eq!(p.eta_s, DEFAULT_ETA);
         assert!(p.touching.is_empty());
+    }
+
+    /// The dashboard's two judgments: who has gone quiet, and which questions
+    /// are still waiting. Plus escaping, since task text is whatever a peer
+    /// typed and the page renders it.
+    #[test]
+    fn dashboard_flags_quiet_claims_and_open_questions() {
+        let t = now();
+        let fresh = plan("a", "repo", &["src/**"], "working", 60);
+        let quiet = plan("b", "repo", &["lib/**"], "working", 2000);
+        let lapsed = plan("c", "repo", &["x/**"], "working", 4000);
+        assert!(!stuck(&fresh, t));
+        assert!(stuck(&quiet, t));
+        assert!(!stuck(&lapsed, t), "an expired claim is gone, not stuck");
+
+        let cfg = Cfg {
+            url: "https://relay.example/plan".into(),
+            alias: "me".into(),
+            instance: String::new(),
+        };
+        let ask = |id: i64, to: &str| {
+            let mut p = plan("b", "repo", &[], "post", 0);
+            p.kind = "ask".into();
+            p.id = id;
+            p.to = to.into();
+            p.task = "<script>x</script>".into();
+            p
+        };
+        let mut reply = plan("a", "repo", &[], "post", 0);
+        reply.kind = "answer".into();
+        reply.reply_to = 1;
+        let posts = vec![ask(1, ""), ask(2, ""), ask(3, "me"), reply];
+        let open: Vec<i64> = open_asks(&posts, &cfg).iter().map(|p| p.id).collect();
+        assert_eq!(open, vec![3, 2], "answered dropped, addressed first");
+
+        // A release from a repo nobody is working in now: its own panel,
+        // ranked below the repo with live claims even though it is newer.
+        let mut shipped = plan("d", "other", &[], "post", 0);
+        shipped.kind = "release".into();
+        shipped.task = "shipped the thing".into();
+        let mut posts = posts;
+        posts.insert(0, shipped);
+
+        let html = dashboard(&[fresh, quiet], &posts, &cfg, t, None);
+        let at = |r: &str| html.find(&format!("<h2 class=proj>{r}</h2>")).unwrap();
+        assert!(at("repo") < at("other"), "busy repos first");
+        assert!(html.contains("2 working"));
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("for you"));
+    }
+
+    /// The ticket is how the dashboard groups work, so a missed ref drops a
+    /// row and a false one invents a ticket.
+    #[test]
+    fn tickets_are_found_where_trackers_put_them() {
+        let key = |s: &str| ticket_ref(s).map(|x| x.0);
+        assert_eq!(key("Admin Users tab (#88)"), Some("#88".into()));
+        assert_eq!(key("#88: users tab"), Some("#88".into()));
+        assert_eq!(
+            key("see https://github.com/o/r/issues/88."),
+            Some("#88".into())
+        );
+        assert_eq!(key("https://gitlab.com/o/r/-/issues/7"), Some("#7".into()));
+        assert_eq!(
+            key("https://linear.app/t/issue/ENG-12/slug"),
+            Some("ENG-12".into())
+        );
+        assert_eq!(
+            key("ADR-015: one shared product"),
+            None,
+            "an ADR is not a ticket"
+        );
+        assert_eq!(key("C# rewrite, item #"), None);
+        assert_eq!(key("https://github.com/o/r/pull/9"), None);
+
+        assert_eq!(carry_ticket("users tab #88", "landed"), "#88 landed");
+        assert_eq!(carry_ticket("users tab #88", "#88 landed"), "#88 landed");
+        assert_eq!(carry_ticket("no ticket", "landed"), "landed");
+        let lin = "https://linear.app/t/issue/ENG-12/x";
+        assert_eq!(
+            carry_ticket(&format!("fix {lin}"), "done"),
+            format!("{lin} done")
+        );
+    }
+
+    #[test]
+    fn dashboard_rolls_ticket_work_into_one_row() {
+        let t = now();
+        let claim = plan("a", "repo", &["src/**"], "working", 60);
+        let mut claim = claim;
+        claim.task = "users tab #88".into();
+        let mut earlier = plan("b", "repo", &[], "post", 600);
+        earlier.kind = "release".into();
+        earlier.task = "#88 schema landed".into();
+        earlier.commits = vec!["abc1234".into()];
+        let mut loose = plan("b", "repo", &[], "post", 700);
+        loose.kind = "release".into();
+        loose.task = "unrelated cleanup".into();
+        let cfg = Cfg {
+            url: "https://relay.example/plan".into(),
+            alias: "me".into(),
+            instance: String::new(),
+        };
+        let html = dashboard(&[claim], &[earlier, loose], &cfg, t, None);
+        assert_eq!(
+            html.matches("<td>#88</td>").count(),
+            1,
+            "one row per ticket"
+        );
+        assert!(
+            html.contains("abc1234"),
+            "commits roll up from earlier releases"
+        );
+        assert!(
+            !html.contains("schema landed"),
+            "the live claim is the latest word"
+        );
+        assert!(
+            html.contains("unrelated cleanup"),
+            "untagged work still listed"
+        );
     }
 }

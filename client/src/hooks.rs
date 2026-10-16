@@ -136,6 +136,31 @@ defaults that tend to work:
   audience, and every entry competes with the work in an agent's context
   window.
 
+## Working from a ticket
+
+If the work came from an issue tracker, put the ticket in the claim:
+
+```sh
+robofinger claim "Admin Users tab (#88)" 'web-author/src/pages/**'
+robofinger claim "https://linear.app/acme/issue/ENG-12 retry backoff" 'src/http/**'
+```
+
+`#123` or the issue's URL. Your release carries it forward even when the note
+does not repeat it, and `robofinger serve` rolls everything filed under one
+ticket into a single row. The tracker still says who owns the ticket; the claim
+says which files that work is touching right now.
+
+- **Point, do not copy.** A release note is the outcome in one line. The spec,
+  the ticket and the commits already hold the detail; the note is how a
+  teammate finds them.
+- **A handoff written to a temp file is invisible** to every other machine.
+  Put it where the team can read it — a ticket comment, a commit — and
+  `post` one line saying where.
+- **A decision only your human can make** goes out as an `ask --to` them:
+  what you would do by default, what the alternatives cost, and a link to
+  whatever they need to read first. Keep working on everything it does not
+  block.
+
 ## When you hit a CLAIM CONFLICT
 
 Another agent is holding a path you want. Four options, roughly in order:
