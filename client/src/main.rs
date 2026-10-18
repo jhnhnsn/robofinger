@@ -849,9 +849,36 @@ fn git_log_in(dir: &std::path::Path, since: i64, globs: &[String], format: &str)
 }
 
 /// Repo name, so `src/**` in one project never collides with `src/**` in another.
+///
+/// Named after the shared `.git`, not the checkout: a worktree lives in a
+/// directory like `.claude/worktrees/<name>`, and naming it by that put its
+/// claims in a project nobody in the main checkout was looking at.
 fn project() -> String {
-    git_toplevel()
-        .and_then(|p| p.rsplit('/').next().map(String::from))
+    let out = std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+            "--show-toplevel",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let mut lines = out.lines();
+    project_name(lines.next(), lines.next())
+}
+
+/// The directory holding the shared `.git`, else the checkout's own directory
+/// (a submodule's common dir is `.git/modules/<name>`, which says nothing).
+fn project_name(common_dir: Option<&str>, toplevel: Option<&str>) -> String {
+    common_dir
+        .and_then(|d| d.trim_end_matches('/').strip_suffix("/.git"))
+        .or(toplevel)
+        .and_then(|p| p.trim_end_matches('/').rsplit('/').next())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
         .unwrap_or_else(|| "-".into())
 }
 
@@ -3726,6 +3753,22 @@ code{{font-size:12px}} a{{color:var(--hi)}} .dim{{color:var(--dim)}}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_worktree_files_claims_under_the_main_checkout() {
+        let main = project_name(Some("/src/robofinger/.git"), Some("/src/robofinger"));
+        let tree = project_name(
+            Some("/src/robofinger/.git"),
+            Some("/src/robofinger/.claude/worktrees/agent-a1"),
+        );
+        assert_eq!((main.as_str(), tree.as_str()), ("robofinger", "robofinger"));
+        // Submodule: the common dir is `.git/modules/<name>`, so the checkout names it.
+        assert_eq!(
+            project_name(Some("/src/app/.git/modules/lib"), Some("/src/app/lib")),
+            "lib"
+        );
+        assert_eq!(project_name(None, None), "-");
+    }
 
     fn plan(agent: &str, project: &str, touching: &[&str], status: &str, age: i64) -> Plan {
         Plan {
