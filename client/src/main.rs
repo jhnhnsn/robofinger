@@ -3417,10 +3417,11 @@ fn open_asks<'a>(posts: &'a [Plan], c: &Cfg) -> Vec<&'a Plan> {
 
 /// The ticket an entry is filed under, as (key, link).
 ///
-/// Recognises what a tracker hands an agent: `#123`, or an issue URL. A GitHub
-/// or GitLab URL keys as `#123`, so a claim that says `#88` and a release that
-/// pastes the URL land in one row. Deliberately not `ABC-123`: that is also
-/// how ADRs and RFCs are numbered, and a decision record is not a ticket.
+/// Recognises what a tracker hands an agent: `#123`, an issue URL, or a
+/// local-markdown ticket file. A GitHub or GitLab URL keys as `#123`, so a
+/// claim that says `#88` and a release that pastes the URL land in one row.
+/// Deliberately not `ABC-123`: that is also how ADRs and RFCs are numbered, and
+/// a decision record is not a ticket.
 ///
 /// ponytail: first match wins, one ticket per entry. Work spanning tickets
 /// files under the first one named.
@@ -3431,12 +3432,16 @@ fn ticket_ref(task: &str) -> Option<(String, Option<String>)> {
             return (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
                 .then(|| (w.to_string(), None));
         }
+        if let Some(key) = scratch_ticket(w) {
+            return Some((key, None));
+        }
         if !(w.starts_with("https://") || w.starts_with("http://")) {
             return None;
         }
-        // github .../issues/88, gitlab .../-/issues/88, linear .../issue/ENG-1/slug
+        // github .../issues/88, gitlab .../-/issues/88, linear .../issue/ENG-1/slug,
+        // jira .../browse/ENG-1
         let mut parts = w.split('/');
-        parts.find(|seg| *seg == "issues" || *seg == "issue")?;
+        parts.find(|seg| *seg == "issues" || *seg == "issue" || *seg == "browse")?;
         let id = parts.next().filter(|id| !id.is_empty())?;
         let key = if id.bytes().all(|b| b.is_ascii_digit()) {
             format!("#{id}")
@@ -3445,6 +3450,16 @@ fn ticket_ref(task: &str) -> Option<(String, Option<String>)> {
         };
         Some((key, Some(w.to_string())))
     })
+}
+
+/// `.scratch/<feature>/issues/NN-slug.md`, the local-markdown tracker's ticket
+/// file, keyed `feature#NN`. Its `.` may already be trimmed off as punctuation.
+fn scratch_ticket(w: &str) -> Option<String> {
+    let segs: Vec<&str> = w.split('/').collect();
+    let i = segs.iter().position(|s| *s == ".scratch" || *s == "scratch")?;
+    let (feature, issues, file) = (segs.get(i + 1)?, segs.get(i + 2)?, segs.get(i + 3)?);
+    let n: String = file.chars().take_while(char::is_ascii_digit).collect();
+    (*issues == "issues" && !feature.is_empty() && !n.is_empty()).then(|| format!("{feature}#{n}"))
 }
 
 /// Keep the ticket on a release whose note dropped it.
@@ -4541,6 +4556,21 @@ mod tests {
         );
         assert_eq!(key("C# rewrite, item #"), None);
         assert_eq!(key("https://github.com/o/r/pull/9"), None);
+        assert_eq!(
+            key("https://acme.atlassian.net/browse/ENG-12"),
+            Some("ENG-12".into())
+        );
+        assert_eq!(
+            key("retry (.scratch/http/issues/03-retry.md)"),
+            Some("http#03".into())
+        );
+        assert_eq!(
+            key("/src/app/.scratch/http/issues/03-retry.md"),
+            Some("http#03".into()),
+            "absolute path from a hook, same ticket"
+        );
+        assert_eq!(key(".scratch/http/map.md"), None, "a map is not a ticket");
+        assert_eq!(key(".scratch/http/spec.md"), None);
 
         assert_eq!(carry_ticket("users tab #88", "landed"), "#88 landed");
         assert_eq!(carry_ticket("users tab #88", "#88 landed"), "#88 landed");

@@ -150,6 +150,18 @@ does not repeat it, and `robofinger serve` rolls everything filed under one
 ticket into a single row. The tracker still says who owns the ticket; the claim
 says which files that work is touching right now.
 
+A ticket that is a file in the repo — `.scratch/<feature>/issues/NN-slug.md`,
+the local-markdown tracker's layout — goes in the claim twice: in the text, so
+`serve` files the work under it, and as a path, so a second agent that goes to
+mark it claimed gets a CLAIM CONFLICT instead of racing you on its `Status:`
+line. Claim before you edit that line; the file reaches other machines only
+when someone pushes.
+
+```sh
+robofinger claim "retry backoff (.scratch/http/issues/03-retry.md)" \
+  '.scratch/http/issues/03-retry.md' 'src/http/**'
+```
+
 - **Point, do not copy.** A release note is the outcome in one line. The spec,
   the ticket and the commits already hold the detail; the note is how a
   teammate finds them.
