@@ -84,9 +84,6 @@ const SERVE_PORT: u16 = 7380;
 /// is when a human has to be involved. Prescribing style here also spends the
 /// context window the agent still needs for its actual work, every session.
 const GUIDANCE: &str = "\
-How to use this:
-  - Before editing files, claim them: `robofinger claim \"<task>\" '<glob>' …`
-    (a claim replaces your previous one). `robofinger release` when done.
   - A question marked [FOR YOU] is addressed to this agent. Answer it with
     `robofinger answer --to <peer> --re <id> \"…\"`.
   - Raise your own with `robofinger ask [--to <peer>] \"…\"`.
@@ -98,6 +95,25 @@ How to use this:
   - Everything else is context. Read it and carry on.
   - The full workflow, including anything this team added, is in
     ROBOFINGER.md at the repo root.";
+
+/// The one rule every session gets, quiet or not: a solo agent that never
+/// claims publishes nothing, and the first teammate to arrive is warned of
+/// nothing.
+const CLAIM_RULE: &str = "\
+  - Before editing files, claim them: `robofinger claim \"<task>\" '<glob>' …`
+    (a claim replaces your previous one). `robofinger release` when done.";
+
+/// What SessionStart hands the agent. With nothing to act on, the rules for
+/// acting on it are just context spent, so only the claim rule goes in.
+fn start_context(mut blocks: Vec<String>) -> String {
+    let rest = if blocks.is_empty() {
+        "  - The full workflow is in ROBOFINGER.md at the repo root."
+    } else {
+        GUIDANCE
+    };
+    blocks.push(format!("How to use this:\n{CLAIM_RULE}\n{rest}"));
+    blocks.join("\n\n")
+}
 
 const USAGE: &str = "\
 robofinger — coordination for teams of coding agents.
@@ -2669,18 +2685,15 @@ fn main() {
                 );
             }
 
-            if !blocks.is_empty() {
-                blocks.push(GUIDANCE.into());
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "hookSpecificOutput": {
-                            "hookEventName": "SessionStart",
-                            "additionalContext": blocks.join("\n\n")
-                        }
-                    })
-                );
-            }
+            println!(
+                "{}",
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": start_context(blocks)
+                    }
+                })
+            );
             std::process::exit(0);
         }
         "end" => {
@@ -4630,6 +4643,18 @@ mod tests {
             key("https://github.com/o/r/issues/88#issuecomment-1"),
             Some("#88".into())
         );
+    }
+
+    #[test]
+    fn a_quiet_session_start_still_says_to_claim() {
+        let quiet = start_context(vec![]);
+        assert!(quiet.contains("robofinger claim"), "{quiet}");
+        assert!(quiet.contains("ROBOFINGER.md"), "{quiet}");
+        assert!(!quiet.contains("[FOR YOU]"), "nothing to answer, so no answering rules");
+
+        let busy = start_context(vec!["OPEN QUESTIONS from your teammates".into()]);
+        assert!(busy.starts_with("OPEN QUESTIONS"), "{busy}");
+        assert!(busy.contains("robofinger claim") && busy.contains("[FOR YOU]"), "{busy}");
     }
 
     #[test]
