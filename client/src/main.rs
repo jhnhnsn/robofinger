@@ -85,6 +85,8 @@ const SERVE_PORT: u16 = 7380;
 /// context window the agent still needs for its actual work, every session.
 const GUIDANCE: &str = "\
 How to use this:
+  - Before editing files, claim them: `robofinger claim \"<task>\" '<glob>' …`
+    (a claim replaces your previous one). `robofinger release` when done.
   - A question marked [FOR YOU] is addressed to this agent. Answer it with
     `robofinger answer --to <peer> --re <id> \"…\"`.
   - Raise your own with `robofinger ask [--to <peer>] \"…\"`.
