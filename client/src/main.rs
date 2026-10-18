@@ -3428,23 +3428,37 @@ fn open_asks<'a>(posts: &'a [Plan], c: &Cfg) -> Vec<&'a Plan> {
 /// ponytail: first match wins, one ticket per entry. Work spanning tickets
 /// files under the first one named.
 fn ticket_ref(task: &str) -> Option<(String, Option<String>)> {
-    task.split_whitespace().find_map(|w| {
-        let w = w.trim_matches(|c: char| "()[]{},.;:\"'".contains(c));
+    task.split_whitespace().find_map(|raw| {
+        let w = raw.trim_matches(|c: char| "()[]{},.;:\"'".contains(c));
         if let Some(n) = w.strip_prefix('#') {
             return (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
                 .then(|| (w.to_string(), None));
         }
-        if let Some(key) = scratch_ticket(w) {
-            return Some((key, None));
-        }
         if !(w.starts_with("https://") || w.starts_with("http://")) {
-            return None;
+            // The trim above would eat the dot that makes `.scratch` the tracker's.
+            let path = raw
+                .trim_start_matches(|c: char| "([{\"'".contains(c))
+                .trim_end_matches(|c: char| ")]},.;:\"'".contains(c));
+            return scratch_ticket(path).map(|key| (key, None));
         }
         // github .../issues/88, gitlab .../-/issues/88, linear .../issue/ENG-1/slug,
         // jira .../browse/ENG-1
-        let mut parts = w.split('/');
-        parts.find(|seg| *seg == "issues" || *seg == "issue" || *seg == "browse")?;
+        let path = w.split(['?', '#']).next().unwrap_or(w);
+        let mut parts = path.split('/');
+        let seg = parts.find(|seg| matches!(*seg, "issues" | "issue" | "browse"))?;
         let id = parts.next().filter(|id| !id.is_empty())?;
+        // Bitbucket Server browses files under the same word Jira browses issues.
+        let jira_key = |id: &str| {
+            id.split_once('-').is_some_and(|(p, n)| {
+                p.starts_with(|c: char| c.is_ascii_uppercase())
+                    && p.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+                    && !n.is_empty()
+                    && n.bytes().all(|b| b.is_ascii_digit())
+            })
+        };
+        if seg == "browse" && !jira_key(id) {
+            return None;
+        }
         let key = if id.bytes().all(|b| b.is_ascii_digit()) {
             format!("#{id}")
         } else {
@@ -3455,13 +3469,14 @@ fn ticket_ref(task: &str) -> Option<(String, Option<String>)> {
 }
 
 /// `.scratch/<feature>/issues/NN-slug.md`, the local-markdown tracker's ticket
-/// file, keyed `feature#NN`. Its `.` may already be trimmed off as punctuation.
-fn scratch_ticket(w: &str) -> Option<String> {
-    let segs: Vec<&str> = w.split('/').collect();
-    let i = segs.iter().position(|s| *s == ".scratch" || *s == "scratch")?;
+/// file, keyed `feature#NN`.
+fn scratch_ticket(path: &str) -> Option<String> {
+    let segs: Vec<&str> = path.split('/').collect();
+    let i = segs.iter().position(|s| *s == ".scratch")?;
     let (feature, issues, file) = (segs.get(i + 1)?, segs.get(i + 2)?, segs.get(i + 3)?);
     let n: String = file.chars().take_while(char::is_ascii_digit).collect();
-    (*issues == "issues" && !feature.is_empty() && !n.is_empty()).then(|| format!("{feature}#{n}"))
+    (*issues == "issues" && !feature.is_empty() && !n.is_empty() && file.ends_with(".md"))
+        .then(|| format!("{feature}#{n}"))
 }
 
 /// Keep the ticket on a release whose note dropped it.
@@ -4581,6 +4596,39 @@ mod tests {
         assert_eq!(
             carry_ticket(&format!("fix {lin}"), "done"),
             format!("{lin} done")
+        );
+    }
+
+    #[test]
+    fn a_forge_url_keeps_its_link_whatever_its_path_says() {
+        let u = "https://github.com/scratch/app/issues/12";
+        assert_eq!(ticket_ref(u), Some(("#12".into(), Some(u.into()))));
+    }
+
+    #[test]
+    fn only_the_local_trackers_own_layout_is_a_ticket() {
+        let key = |s: &str| ticket_ref(s).map(|x| x.0);
+        assert_eq!(key("notes/scratch/foo/issues/7-x.md"), None, "scratch is not .scratch");
+        assert_eq!(key(".scratch/foo/issues/07-x.txt"), None, "a ticket is a .md file");
+        assert_eq!(key("(./.scratch/foo/issues/07-x.md)"), Some("foo#07".into()));
+    }
+
+    #[test]
+    fn a_browsed_file_is_not_a_ticket() {
+        let bitbucket = "https://git.acme.com/projects/P/repos/r/browse/src/main.rs";
+        assert_eq!(ticket_ref(bitbucket), None);
+    }
+
+    #[test]
+    fn a_ticket_url_keys_the_same_with_a_query_or_anchor() {
+        let key = |s: &str| ticket_ref(s).map(|x| x.0);
+        assert_eq!(
+            key("https://acme.atlassian.net/browse/ENG-12?focusedCommentId=5"),
+            Some("ENG-12".into())
+        );
+        assert_eq!(
+            key("https://github.com/o/r/issues/88#issuecomment-1"),
+            Some("#88".into())
         );
     }
 
