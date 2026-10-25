@@ -78,12 +78,16 @@ One working session of a coding tool, acting for a person; what a claim and ever
 _Avoid_: Instance, session, bot
 
 **Subagent**:
-An agent started by another agent to take on part of its task, inside the same working session.
+An agent started by another agent to take on part of its task, inside the same working session. It reports only to its parent, never to the team.
 _Avoid_: Child, worker, helper, teammate
 
 **Parent**:
 The agent that started a subagent.
 _Avoid_: Orchestrator, lead, spawner
+
+**Agent path**:
+An agent's name written as its person, then each parent in turn, then the agent itself. It names whoever holds that place at a given moment, so it picks out one agent only together with a time.
+_Avoid_: Address, route, URL, instance
 
 **Self-reported name**:
 A subagent's name that only the subagent vouches for, because its tool gives no way to tell it apart from its parent.

@@ -14,5 +14,6 @@ A subagent is an agent in its own right: it holds its own claim, its entries car
 ## Consequences
 
 - Sibling collisions are caught only in tools that identify subagents to their hooks — today Claude Code and Codex, not Gemini CLI. Elsewhere the record can still show the tree, marked as self-reported, but nothing enforces it.
+- Who a subagent may talk to is settled separately: only its parent (ADR 0005).
 - A subagent's claim lapses when the subagent stops, not after the usual hour, since the tool says when that happens.
 - A claim taken by running `robofinger claim` is a shell command, which sees the session but not the subagent. In Claude Code the hook that sees the command can rewrite it to carry the subagent's name, so the subagent never has to know it; telling the subagent its name at start and asking it to pass the name along also worked in a trial, but is kept for tools that cannot rewrite, since a forgotten name files the claim under the parent with nothing to say so.

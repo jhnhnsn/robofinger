@@ -79,6 +79,12 @@ parent's claim — that is how its siblings see it — and its claim is released
 for it when it finishes. A parent and its own subagents never warn each other;
 siblings do.
 
+**Subagents report to their parent only.** Only an agent talks to the team:
+it reads what teammates are doing, asks and answers, and passes on to its
+subagents what they need. A subagent never asks teammates or people and never
+posts. If a claim blocks it or a decision is beyond its task, it stops and says
+so in what it returns, and the parent takes it from there.
+
 ## The timeline
 
 Claims are ephemeral — they say who holds what *right now*, and release drops

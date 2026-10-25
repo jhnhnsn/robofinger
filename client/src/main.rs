@@ -108,11 +108,21 @@ const CLAIM_RULE: &str = "\
 
 /// What a subagent gets on top of the claim rule. It works inside its
 /// parent's claim, so without this it reads that claim as covering it — and
-/// its siblings, who are not covered by it, never see what it touches.
+/// its siblings, who are not covered by it, never see what it touches. It
+/// talks to nobody but its parent (ADR 0005), so it is told that too.
 const SUBAGENT_RULE: &str = "\
   - You are a subagent: your claims are your own, filed under your parent's
     name, and released for you when you finish. Claim what you will edit even
-    inside your parent's claim — it is how your sibling subagents see you.";
+    inside your parent's claim — it is how your sibling subagents see you.\n\
+  - You report to your parent only. Do not ask teammates or people, and do not
+    post. If a claim blocks you or a decision is beyond your task, stop and say
+    so in what you return to your parent.";
+
+/// What an agent is told about the subagents it may start: it is their only
+/// line to the team (ADR 0005).
+const PARENT_RULE: &str = "\
+  - If you start subagents, you direct them: pass on what they need from this,
+    and handle what they report back. They do not hear from the team directly.";
 
 /// What SessionStart hands the agent. With nothing to act on, the rules for
 /// acting on it are just context spent, so only the claim rule goes in.
@@ -123,7 +133,7 @@ fn start_context(mut blocks: Vec<String>, me: &str) -> String {
         GUIDANCE
     };
     blocks.push(format!(
-        "How to use this:\n{}\n{CLAIM_RULE}\n{rest}",
+        "How to use this:\n{}\n{CLAIM_RULE}\n{PARENT_RULE}\n{rest}",
         you_are(me, None)
     ));
     blocks.join("\n\n")
@@ -2857,22 +2867,37 @@ fn main() {
                     .first()
                     .map(|(p, _)| name_for(&p.pubkey))
                     .unwrap_or_default();
-                let msg = format!(
-                    "CLAIM CONFLICT on {}:\n{}\n\
-                     This is advisory. Four options, roughly in order:\n\
-                     1. Work elsewhere — cheapest, and usually right.\n\
-                     2. Wait: poll `robofinger check {}` in the background (it prints nothing \
-                     once free) and carry on with unblocked work meanwhile. Do not sit idle.\n\
-                     3. Ask the holder: `robofinger ask --to {} \"<what you need, and the \
-                     options>\"` — they see it at their next session start.\n\
-                     4. Ask your user, if neither of you can yield, if the claim looks abandoned, \
-                     or if proceeding would undo their work. Say what you would do by default \
-                     and what it costs.",
-                    path,
-                    detail.join("\n"),
-                    path,
-                    holder
-                );
+                // A subagent talks only to its parent (ADR 0005), so its way
+                // out of a conflict is to say so in what it returns.
+                let msg = if sub.is_some() {
+                    format!(
+                        "CLAIM CONFLICT on {}:\n{}\n\
+                         This is advisory. Two options:\n\
+                         1. Work elsewhere within your task, if you can.\n\
+                         2. Otherwise stop and report it to your parent in what you return: \
+                         the path, who holds it, and what you would do by default. Your parent \
+                         decides; do not ask the holder or a person yourself.",
+                        path,
+                        detail.join("\n"),
+                    )
+                } else {
+                    format!(
+                        "CLAIM CONFLICT on {}:\n{}\n\
+                         This is advisory. Four options, roughly in order:\n\
+                         1. Work elsewhere — cheapest, and usually right.\n\
+                         2. Wait: poll `robofinger check {}` in the background (it prints nothing \
+                         once free) and carry on with unblocked work meanwhile. Do not sit idle.\n\
+                         3. Ask the holder: `robofinger ask --to {} \"<what you need, and the \
+                         options>\"` — they see it at their next session start.\n\
+                         4. Ask your user, if neither of you can yield, if the claim looks abandoned, \
+                         or if proceeding would undo their work. Say what you would do by default \
+                         and what it costs.",
+                        path,
+                        detail.join("\n"),
+                        path,
+                        holder
+                    )
+                };
                 println!(
                     "{}",
                     serde_json::json!({
@@ -5725,6 +5750,8 @@ mod tests {
         assert!(quiet.contains("robofinger claim"), "{quiet}");
         assert!(quiet.contains("ROBOFINGER.md"), "{quiet}");
         assert!(!quiet.contains("[FOR YOU]"), "nothing to answer, so no answering rules");
+        assert!(quiet.contains("you direct them"), "the parent is the subagents' line to the team");
+        assert!(SUBAGENT_RULE.contains("report to your parent only"));
 
         let busy = start_context(
             vec!["OPEN QUESTIONS from your teammates".into()],
