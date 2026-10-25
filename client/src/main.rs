@@ -548,6 +548,20 @@ fn slot_for(family: &str, key: &str) -> String {
 /// mutating process-global env.
 fn slot_in(dir: &std::path::Path, family: &str, key: &str, t: i64) -> String {
     let path = dir.join("instances");
+    // Held across the read and the write. A swarm starts its subagents in
+    // the same instant, and without this each hook rewrote the file from its
+    // own read: the last writer won, the others' reservations vanished, and a
+    // subagent told it was `explore-3` filed its claims as `explore-1` — or
+    // two subagents got one name. Released when `_lock` drops. A home where
+    // the lock cannot be taken degrades to the old best effort.
+    let _ = std::fs::create_dir_all(dir);
+    let _lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("instances.lock"))
+        .ok()
+        .filter(|f| f.lock().is_ok());
     let mut rows: Vec<(String, String, i64)> = std::fs::read_to_string(&path)
         .unwrap_or_default()
         .lines()
@@ -580,13 +594,11 @@ fn slot_in(dir: &std::path::Path, family: &str, key: &str, t: i64) -> String {
         }
     };
 
-    // Best effort: a losing racer just re-reads its own reservation next run,
-    // and a read-only home degrades to a working (if unstable) name.
+    // A read-only home degrades to a working (if unstable) name.
     let body: String = rows
         .iter()
         .map(|(k, n, ts)| format!("{k}\t{n}\t{ts}\n"))
         .collect();
-    let _ = std::fs::create_dir_all(dir);
     let _ = std::fs::write(&path, body);
     name
 }
@@ -5760,6 +5772,30 @@ mod tests {
         assert!(busy.starts_with("OPEN QUESTIONS"), "{busy}");
         assert!(busy.contains("You are `hazel-hare/claude-1`"), "{busy}");
         assert!(busy.contains("robofinger claim") && busy.contains("[FOR YOU]"), "{busy}");
+    }
+
+    /// A swarm's subagents start in the same instant. Each must keep the
+    /// name it was given, and no two may share one.
+    #[test]
+    fn subagents_starting_together_get_distinct_names_that_stick() {
+        let dir = std::env::temp_dir().join(format!("rf-slots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t = 1_000_000;
+        let names: Vec<String> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..16)
+                .map(|i| {
+                    let dir = &dir;
+                    s.spawn(move || subagent_instance_in(dir, "claude-1", "Explore", &format!("id{i}"), t))
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let unique: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(unique.len(), 16, "no two share a name: {names:?}");
+        for (i, n) in names.iter().enumerate() {
+            assert_eq!(&subagent_instance_in(&dir, "claude-1", "Explore", &format!("id{i}"), t), n, "kept its name");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
