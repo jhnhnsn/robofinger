@@ -183,6 +183,9 @@ pub struct Status {
     pub state: State,
     pub text: String,
     pub since: i64,
+    /// What the agent's parent called it when starting it, for subagents
+    /// whose tool records that; empty otherwise.
+    pub label: String,
 }
 
 /// An agent's current status from its own events, oldest first. None when it
@@ -202,11 +205,36 @@ pub fn status(events: &[&Event]) -> Option<Status> {
         "appear" => (State::Thinking, "Starting".into()),
         _ => (State::Thinking, "Thinking".into()),
     };
+    let label = events[from..]
+        .iter()
+        .find(|e| e.kind == "appear" && !e.target.is_empty())
+        .map(|e| label_from(&e.target))
+        .unwrap_or_default();
     Some(Status {
         state,
         text,
         since: last.t,
+        label,
     })
+}
+
+/// Where Claude Code keeps what a subagent was started for:
+/// `<session>/subagents/agent-<id>.meta.json`, beside the session transcript
+/// a hook is handed. Written a moment after SubagentStart fires, so the hook
+/// records the path and a reader opens it later.
+pub fn meta_path(transcript: &str, agent_id: &str) -> Option<String> {
+    let session = transcript.strip_suffix(".jsonl")?;
+    Some(format!("{session}/subagents/agent-{agent_id}.meta.json"))
+}
+
+/// The description a subagent was started with, from its meta file. An
+/// internal file, not an interface, so anything unexpected is just no label.
+fn label_from(meta: &str) -> String {
+    std::fs::read_to_string(meta)
+        .ok()
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("description")?.as_str().map(|d| short(d.trim(), 48)))
+        .unwrap_or_default()
 }
 
 /// "Running cargo test", "Editing src/main.rs".
@@ -321,6 +349,31 @@ mod tests {
         let refs: Vec<&Event> = es.iter().collect();
         let s = status(&refs).unwrap();
         assert_eq!((s.state, s.since), (State::Thinking, 9));
+    }
+
+    #[test]
+    fn a_subagent_is_labelled_from_what_its_parent_started_it_for() {
+        let home = std::env::temp_dir().join(format!("rf-label-{}", std::process::id()));
+        let meta = meta_path(&format!("{}/sess.jsonl", home.display()), "a1").unwrap();
+        std::fs::create_dir_all(std::path::Path::new(&meta).parent().unwrap()).unwrap();
+        std::fs::write(
+            &meta,
+            r#"{"agentType":"general-purpose","description":"Decode space form of ?at="}"#,
+        )
+        .unwrap();
+        let es = [ev(1, "claude-1/general-purpose-1", "appear", "", &meta)];
+        let refs: Vec<&Event> = es.iter().collect();
+        assert_eq!(status(&refs).unwrap().label, "Decode space form of ?at=");
+        let es = [ev(
+            1,
+            "claude-1/general-purpose-1",
+            "appear",
+            "",
+            "/nowhere.meta.json",
+        )];
+        let refs: Vec<&Event> = es.iter().collect();
+        assert_eq!(status(&refs).unwrap().label, "", "no file, no label");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

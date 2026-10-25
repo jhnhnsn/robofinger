@@ -1,6 +1,6 @@
-//! The live parts of the `serve` page: the agent tree with a status line per
-//! agent, the activity feed, the selected agent's detail, and the project's
-//! plan with who is on each item.
+//! The `serve` page: the roadmap with who is on each item, the agent tree
+//! with a status line per agent, the activity feed, the selected agent, and
+//! a Time Machine rail down the right edge for stepping back through it.
 //!
 //! Scoped left to right, broad to narrow: the project, the agents, then the
 //! one entity the URL names. This machine's agents come from the activity
@@ -101,7 +101,7 @@ pub fn nodes<'a>(b: &'a Board, t: i64) -> Vec<Node<'a>> {
 }
 
 /// A duration as a status line shows it: seconds while they matter.
-/// `ELAPSED_JS` must format exactly the same way.
+/// `LIVE_JS` must format exactly the same way.
 pub fn elapsed(secs: i64) -> String {
     let s = secs.max(0);
     match s {
@@ -113,10 +113,19 @@ pub fn elapsed(secs: i64) -> String {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Icon {
+    Spin,
+    Wait,
+    Done,
+    Hold,
+}
+
 /// What one agent is doing, ready to render.
 struct Line {
-    glyph: &'static str,
-    cls: &'static str,
+    icon: Icon,
+    /// The tone: work, wait, done, hold or quiet.
+    tone: &'static str,
     text: String,
     since: Option<i64>,
     /// Words either side of the ticking duration: "idle 3m", "3m ago".
@@ -127,15 +136,14 @@ struct Line {
 fn line(n: &Node, t: i64) -> Line {
     use activity::State::*;
     if let Some(s) = n.status {
-        let (glyph, cls, post) = match s.state {
-            Working => ("✻", "st-work spin", ""),
-            Thinking => ("✻", "st-think spin", ""),
-            NeedsYou | YourTurn => ("‖", "st-wait", ""),
-            Done | Gone => ("✓", "st-done", " ago"),
+        let (icon, tone, post) = match s.state {
+            Working | Thinking => (Icon::Spin, "work", ""),
+            NeedsYou | YourTurn => (Icon::Wait, "wait", ""),
+            Done | Gone => (Icon::Done, "done", " ago"),
         };
         return Line {
-            glyph,
-            cls,
+            icon,
+            tone,
             text: s.text.clone(),
             since: Some(s.since),
             pre: "",
@@ -145,8 +153,8 @@ fn line(n: &Node, t: i64) -> Line {
     if let Some(c) = n.claim {
         let quiet = stuck(c, t);
         return Line {
-            glyph: "○",
-            cls: if quiet { "st-quiet" } else { "st-claim" },
+            icon: Icon::Hold,
+            tone: if quiet { "quiet" } else { "hold" },
             text: format!("holds {}", c.touching.join(" ")),
             since: Some(c.epoch),
             pre: if quiet { "quiet " } else { "idle " },
@@ -156,27 +164,48 @@ fn line(n: &Node, t: i64) -> Line {
     // A teammate's agent: the relay knows its last entry, not whether it is
     // still running, so say what that entry was.
     match n.last {
-        Some(l) => Line {
-            glyph: if l.kind == "done" { "✓" } else { "○" },
-            cls: if l.kind == "done" { "st-done" } else { "st-claim" },
-            text: match l.kind.as_str() {
-                "done" => "finished",
-                "release" => "released",
-                _ => "last seen",
+        Some(l) => {
+            let done = matches!(l.kind.as_str(), "done" | "release");
+            Line {
+                icon: if done { Icon::Done } else { Icon::Hold },
+                tone: if done { "done" } else { "hold" },
+                text: match l.kind.as_str() {
+                    "done" => "finished",
+                    "release" => "released",
+                    _ => "last seen",
+                }
+                .into(),
+                since: Some(l.epoch),
+                pre: "",
+                post: " ago",
             }
-            .into(),
-            since: Some(l.epoch),
-            pre: "",
-            post: " ago",
-        },
+        }
         None => Line {
-            glyph: "",
-            cls: "st-claim",
+            icon: Icon::Hold,
+            tone: "hold",
             text: String::new(),
             since: None,
             pre: "",
             post: "",
         },
+    }
+}
+
+const CHECK: &str = r#"<svg class=check viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.5l2.2 2.2 4.8-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+const MAC: &str = r#"<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="4" width="14" height="9" rx="1.5"/><path d="M1.5 16h17"/></svg>"#;
+const TERM: &str = r#"<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6.5l2 1.5-2 1.5M8.5 10h3"/></svg>"#;
+const BRANCH: &str = r#"<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="4" cy="4" r="1.8"/><circle cx="12" cy="12" r="1.8"/><path d="M4 6v2a4 4 0 0 0 4 4h2"/></svg>"#;
+const UP: &str = r#"<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 9l4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+const DOWN: &str = r#"<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 5l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+const FOLDER: &str = r#"<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 4.5h4l1.5 1.5H14v6.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z"/></svg>"#;
+const CLOCK: &str = r#"<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 2.5v2.5H5"/><path d="M8 5v3.2l2 1.3"/></svg>"#;
+
+fn icon_html(i: Icon) -> &'static str {
+    match i {
+        Icon::Spin => r#"<span class=spin aria-hidden="true"></span>"#,
+        Icon::Wait => r#"<span class=dotw aria-hidden="true"></span>"#,
+        Icon::Done => CHECK,
+        Icon::Hold => r#"<span class=hold aria-hidden="true"></span>"#,
     }
 }
 
@@ -191,17 +220,17 @@ fn line_html(l: &Line, t: i64) -> String {
         None => String::new(),
     };
     format!(
-        r#"<span class="st {}"><span class=g>{}</span> {}{when}</span>"#,
-        l.cls,
-        l.glyph,
+        r#"<span class="st t-{}">{} <span>{}{when}</span></span>"#,
+        l.tone,
+        icon_html(l.icon),
         esc(&l.text)
     )
 }
 
 fn ticket_html(task: &str, tr: &tracker::Tracker) -> String {
     match tr.find(task) {
-        Some((key, Some(u))) => format!(r#" <a class=tk href="{}">{}</a>"#, esc(&u), esc(&key)),
-        Some((key, None)) => format!(" <span class=tk>{}</span>", esc(&key)),
+        Some((key, Some(u))) => format!(r#"<a class=key href="{}">{}</a>"#, esc(&u), esc(&key)),
+        Some((key, None)) => format!("<span class=key>{}</span>", esc(&key)),
         None => String::new(),
     }
 }
@@ -262,41 +291,86 @@ pub fn counts(ns: &[Node]) -> Counts {
     count(&ns.iter().collect::<Vec<_>>())
 }
 
-/// Whether an agent gets a row in the tree. One that finished more than a
-/// minute ago has gone, unless it somehow still holds a claim.
+/// Whether a top-level agent gets a row. One that finished more than a minute
+/// ago has gone, unless it somehow still holds a claim. Subagents always get
+/// one while they are on record: a finished one moves into its parent's Done
+/// group rather than vanishing.
 pub fn shown(n: &Node, t: i64) -> bool {
     n.claim.is_some() || !n.status.is_some_and(|s| finished_long_ago(s, t))
 }
 
-/// Machine identity, then agent, then subagent, each level collapsible.
-pub fn tree(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
-    let visible: Vec<&Node> = ns.iter().filter(|n| shown(n, t)).collect();
-    let ns = &visible[..];
-    if ns.is_empty() {
-        return r#"<p class="none">Nobody on the record right now</p>"#.into();
+/// Finished, as far as anyone can tell: its tool said so, or — for a
+/// teammate's agent the relay alone knows — its last word was a release.
+fn is_done(n: &Node) -> bool {
+    use activity::State::*;
+    match n.status {
+        Some(s) => matches!(s.state, Done | Gone),
+        None => {
+            n.claim.is_none()
+                && n.last
+                    .is_some_and(|l| matches!(l.kind.as_str(), "done" | "release"))
+        }
     }
+}
+
+/// What a person reads an agent as: what its parent started it for, when its
+/// tool recorded that, else the last segment of its path.
+fn title(n: &Node) -> (String, bool) {
+    match n.status.map(|s| s.label.as_str()).filter(|l| !l.is_empty()) {
+        Some(l) => (l.to_string(), true),
+        None => (
+            n.instance
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("(headless)")
+                .to_string(),
+            false,
+        ),
+    }
+}
+
+/// Machine identity, then agent, then its subagents in two groups: in
+/// progress, open, and done, folded away.
+pub fn tree(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
     let moment = view.moment();
     let selected = view.path();
+    let tops = |pk: &str| -> Vec<&Node> {
+        let mine: Vec<&Node> = ns
+            .iter()
+            .filter(|n| n.pubkey == pk && !n.instance.contains('/'))
+            .collect();
+        let named: Vec<&Node> = mine
+            .iter()
+            .copied()
+            .filter(|n| !n.instance.is_empty())
+            .collect();
+        let mut out = if named.is_empty() { mine } else { named };
+        out.retain(|n| shown(n, t));
+        out.sort_by_key(|n| tracker::natural(&n.instance));
+        out
+    };
     let mut keys: Vec<&str> = ns.iter().map(|n| n.pubkey.as_str()).collect();
+    keys.sort_by_key(|k| (*k != b.me, name_for(k)));
+    keys.dedup();
+    keys.retain(|k| !tops(k).is_empty());
     if keys.is_empty() {
         return r#"<p class="none">Nobody on the record right now</p>"#.into();
     }
-    keys.sort_by_key(|k| (*k != b.me, name_for(k)));
-    keys.dedup();
     keys.iter()
         .map(|pk| {
-            let mine: Vec<&Node> = ns.iter().copied().filter(|n| n.pubkey == *pk).collect();
+            let mine: Vec<&Node> = ns.iter().filter(|n| n.pubkey == *pk).collect();
             let name = name_for(pk);
             let label = if *pk == b.me {
-                let live = if view.at.is_none() { ", live" } else { "" };
+                let live = if view.at.is_none() { " · live" } else { "" };
                 format!("{} · this machine{live}", c.alias)
             } else {
                 local_label(pk).unwrap_or_default()
             };
             let sel = if selected == format!("/{name}") { " sel" } else { "" };
-            let agents = branch(&mine, "", b, t, &moment, &selected);
+            let agents: String = tops(pk).iter().map(|n| block(n, &mine, b, t, &moment, &selected)).collect();
             format!(
-                r#"<details open data-id="{n}"><summary><span class="row id{sel}"><a class=n href="/{n}{moment}">{n}</a> <span class=dim>{}</span> <span class=sum>{}</span></span></summary><div class=kids>{agents}</div></details>"#,
+                r#"<div class=mach><a class="mrow{sel}" href="/{n}{moment}"><span class="av mac">{MAC}</span><span class=grow><span class=mname>{n}</span><span class=sub>{}</span></span><span class=sub>{}</span></a><div class=agents>{agents}</div></div>"#,
                 esc(&label),
                 summary(&count(&mine)),
                 n = esc(&name),
@@ -305,65 +379,106 @@ pub fn tree(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
         .collect()
 }
 
-/// The agents directly under `parent` ("" for top level), and theirs.
-fn branch(ns: &[&Node], parent: &str, b: &Board, t: i64, moment: &str, selected: &str) -> String {
-    let depth = if parent.is_empty() {
-        0
-    } else {
-        parent.matches('/').count() + 1
-    };
-    let mut here: Vec<&&Node> = ns
+/// One agent's row, and its subagents under it.
+fn block(n: &Node, all: &[&Node], b: &Board, t: i64, moment: &str, selected: &str) -> String {
+    let row = row(n, b, t, moment, selected);
+    if n.instance.is_empty() {
+        return format!("<div class=agent>{row}</div>");
+    }
+    let depth = n.instance.matches('/').count() + 1;
+    let mut kids: Vec<&Node> = all
         .iter()
-        .filter(|n| {
-            n.instance.matches('/').count() == depth
-                && (parent.is_empty() || n.instance.starts_with(&format!("{parent}/")))
-                && !n.instance.is_empty()
+        .copied()
+        .filter(|k| {
+            k.instance.starts_with(&format!("{}/", n.instance))
+                && k.instance.matches('/').count() == depth
         })
         .collect();
-    // An identity with no instances at all is one headless agent.
-    if parent.is_empty() && here.is_empty() {
-        here = ns.iter().filter(|n| n.instance.is_empty()).collect();
+    if kids.is_empty() {
+        return format!("<div class=agent>{row}</div>");
     }
-    here.sort_by_key(|n| tracker::natural(&n.instance));
-    here.iter()
-        .map(|n| {
-            let path = n.path();
-            let l = line(n, t);
-            let fin = if l.cls == "st-done" { " fin" } else { "" };
-            let sel = if selected == format!("/{path}") { " sel" } else { "" };
-            let name = n.instance.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("(headless)");
-            let ticket = n.claim.map(|c| ticket_html(&c.task, b.tracker)).unwrap_or_default();
-            let row = format!(
-                r#"<span class="row{sel}{fin}" data-agent="{p}"><a class=n href="/{p}{moment}">{}</a> {}{ticket}</span>"#,
-                esc(name),
-                line_html(&l, t),
-                p = esc(&path),
-            );
-            let kids = if n.instance.is_empty() {
-                String::new()
-            } else {
-                branch(ns, &n.instance, b, t, moment, selected)
-            };
-            if kids.is_empty() {
-                format!("<div class=leaf>{row}</div>")
-            } else {
-                format!(
-                    r#"<details open data-id="{}"><summary>{row}</summary><div class=kids>{kids}</div></details>"#,
-                    esc(&path)
-                )
-            }
-        })
-        .collect()
+    kids.sort_by_key(|k| tracker::natural(&k.instance));
+    let (done, running): (Vec<&Node>, Vec<&Node>) = kids.into_iter().partition(|k| is_done(k));
+    let running_html = if running.is_empty() {
+        r#"<p class=quiet>Nothing running</p>"#.to_string()
+    } else {
+        running
+            .iter()
+            .map(|k| block(k, all, b, t, moment, selected))
+            .collect()
+    };
+    let done_html = if done.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<details class=done data-id="{}:done"><summary class=grp>Done <span class=count>{}</span></summary>{}</details>"#,
+            esc(&n.path()),
+            done.len(),
+            done.iter()
+                .map(|k| block(k, all, b, t, moment, selected))
+                .collect::<String>()
+        )
+    };
+    format!(
+        r#"<div class=agent>{row}<div class=subs><div class=grp>In progress <span class=count>{}</span></div>{running_html}{done_html}</div></div>"#,
+        running.len()
+    )
+}
+
+fn row(n: &Node, b: &Board, t: i64, moment: &str, selected: &str) -> String {
+    let path = n.path();
+    let l = line(n, t);
+    let sub = n.instance.contains('/');
+    let (name, labelled) = title(n);
+    let id = if labelled {
+        format!(
+            " <span class=aid>{}</span>",
+            esc(n.instance.rsplit('/').next().unwrap_or(""))
+        )
+    } else {
+        String::new()
+    };
+    let ticket = n
+        .claim
+        .and_then(|c| b.tracker.find(&c.task))
+        .map(|(k, _)| format!("<span class=tk>{}</span>", esc(&k)))
+        .unwrap_or_default();
+    format!(
+        r#"<a class="arow{}{}{}" data-agent="{p}" href="/{p}{moment}"><span class="av{}">{}</span><span class=grow><span class="aname{}">{}</span>{id}<span class=astat>{}</span></span>{ticket}</a>"#,
+        if selected == format!("/{path}") {
+            " sel"
+        } else {
+            ""
+        },
+        if l.tone == "done" { " fin" } else { "" },
+        if sub { " subrow" } else { "" },
+        if sub { " small" } else { "" },
+        if sub { BRANCH } else { TERM },
+        if labelled { "" } else { " mono" },
+        esc(&name),
+        line_html(&l, t),
+        p = esc(&path),
+    )
 }
 
 /// What happened, newest first: agents appearing and finishing on this
 /// machine, and everything on the timeline.
 pub fn feed(b: &Board, t: i64, view: &View) -> String {
     let moment = view.moment();
+    let label = |inst: &str| {
+        b.local
+            .iter()
+            .find(|(i, _)| i == inst)
+            .map(|(_, s)| s.label.clone())
+            .filter(|l| !l.is_empty())
+    };
     let mut items: Vec<(i64, String, String)> = Vec::new();
     for e in b.events.iter().filter(|e| in_scope(view, b.me, &e.agent)) {
         let text = match e.kind.as_str() {
-            "appear" => "started".to_string(),
+            "appear" => match label(&e.agent) {
+                Some(l) => format!("started · {l}"),
+                None => "started".into(),
+            },
             "done" => "finished".into(),
             "gone" => "session ended".into(),
             "waiting" if !e.target.is_empty() => format!("needs you: {}", e.target),
@@ -393,14 +508,13 @@ pub fn feed(b: &Board, t: i64, view: &View) -> String {
         .take(16)
         .map(|(e, path, text)| {
             format!(
-                r#"<div class=ev><span class="tm dim">{}</span> <a href="/{p}{moment}">{p}</a> {}</div>"#,
+                r#"<div class=ev><span class=tm>{}</span><span class=grow><a class=evwho href="/{p}{moment}">{p}</a> {}</span></div>"#,
                 when(*e, t),
                 esc(&truncate(text, 140)),
                 p = esc(path),
             )
         })
-        .collect::<String>()
-        + &format!("<p class=dim style=\"font-size:12px;margin:6px 0 0\">as of {}</p>", stamp(t))
+        .collect()
 }
 
 /// `HH:MM` of a moment, local time.
@@ -418,6 +532,46 @@ fn when(e: i64, t: i64) -> String {
     }
 }
 
+const DAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// Day of the week of a moment, local time, Sunday first.
+fn weekday(e: i64) -> &'static str {
+    let local = e + utc_offset(e);
+    DAYS[(local.div_euclid(86_400) + 4).rem_euclid(7) as usize]
+}
+
+/// "Saturday 24 Oct, 19:13".
+pub fn long_when(e: i64) -> String {
+    let s = stamp(e);
+    let month = s
+        .get(5..7)
+        .and_then(|m| m.parse::<usize>().ok())
+        .unwrap_or(1);
+    let day = s.get(8..10).unwrap_or("").trim_start_matches('0');
+    format!(
+        "{} {day} {}, {}",
+        weekday(e),
+        MONTHS[month.clamp(1, 12) - 1],
+        clock(e)
+    )
+}
+
+/// "Sat 19:13".
+fn short_when(e: i64) -> String {
+    format!("{} {}", &weekday(e)[..3], clock(e))
+}
+
 /// The entity the URL names: what it is doing, what it holds, and the trail
 /// of what it did.
 pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
@@ -425,6 +579,15 @@ pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
         return String::new();
     };
     let moment = view.moment();
+    let kv = |rows: &[(&str, String)]| -> String {
+        rows.iter()
+            .map(|(k, v)| {
+                format!(
+                    "<div class=kvrow><span class=kvk>{k}</span><span class=kvv>{v}</span></div>"
+                )
+            })
+            .collect()
+    };
     if view.agent.is_empty() {
         let mine: Vec<&Node> = ns.iter().filter(|n| name_for(&n.pubkey) == *who).collect();
         let label = mine
@@ -438,17 +601,19 @@ pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
             })
             .unwrap_or_default();
         return format!(
-            "<section><h2>Machine identity</h2><div class=big>{} <span class=dim>{}</span></div><p>{}</p><p class=dim>{} agents on the record now.</p></section>",
+            "<section class=card><p class=eyebrow>Machine identity</p><div class=big>{}</div><div class=sub>{}</div><div class=kv>{}</div></section>",
             esc(who),
             esc(&label),
-            summary(&count(&mine)),
-            mine.len()
+            kv(&[
+                ("Now", summary(&count(&mine))),
+                ("Agents on record", mine.len().to_string())
+            ])
         );
     }
     let path = format!("{who}/{}", view.agent);
     let Some(n) = ns.iter().find(|n| n.path() == path) else {
         return format!(
-            "<section><h2>Agent</h2><div class=big>{}</div><p class=none>Nothing on the record for it at this moment.</p></section>",
+            "<section class=card><p class=eyebrow>Agent</p><div class=big mono>{}</div><p class=none>Nothing on the record for it at this moment.</p></section>",
             esc(&path)
         );
     };
@@ -458,27 +623,27 @@ pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
         facts.push(("Task", esc(&cl.task)));
         let ticket = ticket_html(&cl.task, b.tracker);
         if !ticket.is_empty() {
-            facts.push(("Ticket", ticket));
+            facts.push(("Work item", ticket));
         }
         facts.push((
             "Claims",
             format!("<code>{}</code>", esc(&cl.touching.join(" "))),
         ));
     } else {
-        facts.push(("Claims", "nothing".into()));
+        facts.push(("Claims", "Nothing".into()));
     }
     facts.push((
         "Seen via",
         if n.status.is_some() || n.pubkey == b.me {
-            "this machine's hooks, live".into()
+            "This machine's hooks, live".into()
         } else {
-            "the timeline: teammates' machines don't report live yet".into()
+            "The timeline".into()
         },
     ));
     if let Some((parent, _)) = n.instance.rsplit_once('/') {
-        facts.push(("Parent", link(&agent_path(&n.pubkey, parent))));
+        facts.push(("Reports to", link(&agent_path(&n.pubkey, parent))));
     }
-    let kids: Vec<String> = ns
+    let kids: Vec<&Node> = ns
         .iter()
         .filter(|k| {
             k.pubkey == n.pubkey
@@ -486,21 +651,20 @@ pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
                     .rsplit_once('/')
                     .is_some_and(|(p, _)| p == n.instance)
         })
-        .map(|k| link(&k.path()))
         .collect();
     if !kids.is_empty() {
-        facts.push(("Subagents", kids.join(" ")));
+        let done = kids.iter().filter(|k| is_done(k)).count();
+        facts.push((
+            "Subagents",
+            format!("{} in progress · {done} done", kids.len() - done),
+        ));
     }
-    let facts: String = facts
-        .iter()
-        .map(|(k, v)| format!("<dt>{k}</dt><dd>{v}</dd>"))
-        .collect();
-    let trail: Vec<String> = if n.pubkey == b.me {
+    let trail: String = if n.pubkey == b.me {
         b.events
             .iter()
             .rev()
             .filter(|e| e.agent == n.instance)
-            .take(14)
+            .take(12)
             .map(|e| {
                 let text = match e.kind.as_str() {
                     "tool" => activity::doing(&e.tool, &e.target),
@@ -515,33 +679,48 @@ pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
                     other => other.into(),
                 };
                 format!(
-                    r#"<div class=ev><span class="tm dim">{}</span> {}</div>"#,
+                    r#"<div class=ev><span class=tm>{}</span><span class=grow>{}</span></div>"#,
                     clock(e.t),
                     esc(&text)
                 )
             })
             .collect()
     } else {
-        Vec::new()
+        String::new()
     };
     let trail = if trail.is_empty() {
         String::new()
     } else {
-        format!("<h2>What it's doing</h2>{}", trail.join(""))
+        format!("<p class=eyebrow style=\"margin-top:18px\">Recent</p>{trail}")
     };
+    let l = line(n, t);
+    let (name, _) = title(n);
     format!(
-        "<section><h2>{}</h2><div class=big>{}</div><div class=bigline>{}</div><dl class=facts>{facts}</dl>{trail}</section>",
+        r#"<section class=card><p class=eyebrow>{}</p><div class=big>{}</div><div class="sub mono">{}</div><div class="pill tone-{}">{}</div><div class=kv>{}</div>{trail}</section>"#,
         if n.instance.contains('/') {
             "Subagent"
         } else {
             "Agent"
         },
+        esc(&name),
         esc(&path),
-        line_html(&line(n, t), t),
+        l.tone,
+        line_html(&l, t),
+        kv(&facts),
     )
 }
 
-/// The project's plan, in the order it lands, with the agents on each item.
+/// A progress ring: how much of a phase is closed.
+fn ring(closed: usize, total: usize, active: bool) -> String {
+    let c = 2.0 * std::f64::consts::PI * 15.0;
+    let done = c * closed as f64 / total.max(1) as f64;
+    format!(
+        r#"<svg class=ring width="26" height="26" viewBox="0 0 36 36" aria-hidden="true"><circle cx="18" cy="18" r="15" class=rbg /><circle cx="18" cy="18" r="15" class="rfg{}" stroke-dasharray="{done:.1} {c:.1}" transform="rotate(-90 18 18)"/></svg>"#,
+        if active { " on" } else { "" }
+    )
+}
+
+/// The project's roadmap, in the order it lands, with the agents on each item.
 pub fn plan(
     groups: &[tracker::Group],
     b: &Board,
@@ -579,18 +758,18 @@ pub fn plan(
                     let on = working_on(&i.key);
                     let c = count(&on);
                     let (chip, cls) = if i.closed {
-                        ("closed", "done")
+                        ("Done", "b-done")
                     } else if c.waiting > 0 {
                         waiting += 1;
-                        ("waiting on you", "wait")
+                        ("Waiting on you", "b-wait")
                     } else if !on.is_empty() {
                         active += 1;
-                        ("in progress", "work")
+                        ("In progress", "b-work")
                     } else {
-                        ("open", "")
+                        ("Open", "b-open")
                     };
                     format!(
-                        r#"<div class=issue><span class="chip {cls}">{chip}</span> <a class=num href="{}">{}</a> {}{}</div>"#,
+                        r#"<div class=item><a class=key href="{}">{}</a><span class=grow>{}{}</span><span class="badge {cls}">{chip}</span></div>"#,
                         esc(&i.url),
                         esc(&i.key),
                         esc(&i.title),
@@ -598,19 +777,19 @@ pub fn plan(
                     )
                 })
                 .collect();
-            let total = g.issues.len().max(1);
-            let mut bits = vec![format!("{closed} of {} closed", g.issues.len())];
+            let mut bits = vec![format!("{closed} of {}", g.issues.len())];
             if active > 0 {
                 bits.push(format!("{active} in progress"));
             }
             if waiting > 0 {
                 bits.push(format!("{waiting} waiting on you"));
             }
+            let about = if g.about.is_empty() { String::new() } else { format!("{} · ", g.about) };
             let open = if active + waiting > 0 { " open" } else { "" };
             format!(
-                r#"<details class=ms data-id="plan:{n}"{open}><summary><span class=msname>{n}</span> <span class="dim about">{}</span><div class=bar><div style="width:{}%"></div></div><div class="dim msum">{}</div></summary>{rows}</details>"#,
-                esc(&g.about),
-                100 * closed / total,
+                r#"<details class=phase data-id="plan:{n}"{open}><summary>{}<span class=grow><span class=pname>{n}</span><span class=pabout>{}{}</span></span></summary><div class=items>{rows}</div></details>"#,
+                ring(closed, g.issues.len(), active + waiting > 0),
+                esc(&about),
                 bits.join(" · "),
                 n = esc(&g.name),
             )
@@ -627,18 +806,145 @@ pub fn plan(
     let untracked = if untracked.is_empty() {
         String::new()
     } else {
-        format!("<h2 style=\"margin-top:10px\">Untracked</h2>{untracked}")
+        format!("<p class=eyebrow style=\"margin-top:14px\">Untracked</p>{untracked}")
     };
     format!(
-        "<section><div class=ph><h2 class=proj>{}</h2><span class=dim>plan</span></div>{body}{untracked}</section>",
+        r#"<section class="card roadmap"><p class=eyebrow>Roadmap · {}</p>{body}{untracked}</section>"#,
         esc(here)
     )
 }
 
+/// The page's window onto the past, down its right edge: a tick per event,
+/// longer where a day starts, and Now at the foot. Every tick is a link, so
+/// it works with no script; with one, the rail is a slider.
+pub fn rail(view: &View) -> String {
+    let p = esc(&view.path());
+    let n = view.epochs.len();
+    let cur = match view.at {
+        None => n,
+        Some(at) => view.epochs.iter().rposition(|&e| e <= at).unwrap_or(0),
+    };
+    let mut ticks = String::new();
+    let mut last_day = String::new();
+    for (i, &e) in view.epochs.iter().enumerate() {
+        let day = stamp(e).get(..10).unwrap_or("").to_string();
+        let label = if day != last_day {
+            format!(
+                "{} {}",
+                &weekday(e)[..3],
+                day.get(8..10).unwrap_or("").trim_start_matches('0')
+            )
+        } else {
+            String::new()
+        };
+        last_day = day;
+        ticks.push_str(&format!(
+            r#"<a class="rtk{}{}" href="{p}?at={e}" title="{}" data-when="{}"><span class=tkl>{label}</span><span class=tkline></span></a>"#,
+            if label.is_empty() { "" } else { " day" },
+            if i == cur { " cur" } else { "" },
+            long_when(e),
+            short_when(e),
+        ));
+    }
+    ticks.push_str(&format!(
+        r#"<a class="rtk day now{}" href="{p}" title="Now" data-when="Now"><span class=tkl>Now</span><span class=tkline></span></a>"#,
+        if cur == n { " cur" } else { "" }
+    ));
+    let arrow = |href: Option<String>, label: &str, svg: &str| match href {
+        Some(h) => format!(r#"<a class=rbtn href="{h}" aria-label="{label}">{svg}</a>"#),
+        None => format!(r#"<span class="rbtn off" aria-hidden="true">{svg}</span>"#),
+    };
+    let up = arrow(
+        view.prev.map(|e| format!("{p}?at={e}")),
+        "Earlier event",
+        UP,
+    );
+    let down = match (view.at, view.next) {
+        (Some(_), Some(e)) => arrow(Some(format!("{p}?at={e}")), "Later event", DOWN),
+        (Some(_), None) => arrow(Some(p.clone()), "Now", DOWN),
+        (None, _) => arrow(None, "", DOWN),
+    };
+    let (flag, flag_long) = match view.at {
+        None => ("Now".to_string(), "Now".to_string()),
+        Some(_) => view
+            .epochs
+            .get(cur)
+            .map(|&e| (short_when(e), long_when(e)))
+            .unwrap_or_default(),
+    };
+    format!(
+        r#"<aside class=rail id=rail aria-label="Time Machine">{up}<div class=track><div class=ticks>{ticks}</div><span class=flag style="top:{:.2}%">{}</span><label class=vh for=scrub>Moment to view</label><input id=scrub class=scrub type=range min=0 max={n} step=1 value={cur} aria-valuetext="{}"></div>{down}</aside>"#,
+        if n == 0 {
+            100.0
+        } else {
+            100.0 * cur as f64 / n as f64
+        },
+        esc(&flag),
+        esc(&flag_long),
+    )
+}
+
+/// On a page fixed at a moment: what moment, the way back, and the stacked
+/// boards behind this one, Time Machine's receding windows.
+pub fn history(view: &View) -> (String, String) {
+    match view.at {
+        None => (String::new(), String::new()),
+        Some(t) => (
+            format!(
+                r#"<div class=banner><div class=banner-in>{CLOCK}<span>Viewing <b>{}</b></span><a class=btn href="{}">Back to Now</a></div></div>"#,
+                long_when(t),
+                esc(&view.path())
+            ),
+            "<div class=\"ghost g3\"></div><div class=\"ghost g2\"></div><div class=\"ghost g1\"></div>".into(),
+        ),
+    }
+}
+
+/// The toolbar's mode: live, or the moment being looked at.
+pub fn mode(view: &View) -> String {
+    match view.at {
+        None => r#"<span class="pill live"><span class=dot></span>Live</span>"#.into(),
+        Some(t) => format!(
+            r#"<span class="pill hist">{CLOCK}History · {}</span>"#,
+            short_when(t)
+        ),
+    }
+}
+
+pub fn folder() -> &'static str {
+    FOLDER
+}
+
+/// Turns the rail into a slider: dragging moves the marker and its time, and
+/// letting go goes there. Loaded on every page; without it the ticks are
+/// links and the arrows step.
+pub const RAIL_JS: &str = r##"<script>
+(function () {
+  function wire() {
+    var rail = document.getElementById("rail");
+    if (!rail) return;
+    var s = rail.querySelector(".scrub"), ticks = rail.querySelectorAll(".rtk"), flag = rail.querySelector(".flag");
+    if (!s || s.dataset.wired) return;
+    s.dataset.wired = "1";
+    function show(i) {
+      var n = ticks.length - 1;
+      flag.style.top = (n ? 100 * i / n : 100) + "%";
+      flag.textContent = ticks[i].dataset.when;
+      ticks.forEach(function (t, j) { t.classList.toggle("cur", j === i); });
+    }
+    s.addEventListener("input", function () { show(Number(s.value)); });
+    s.addEventListener("change", function () { location.href = ticks[Number(s.value)].href; });
+  }
+  wire();
+  window.rfWireRail = wire;
+})();
+</script>"##;
+
 /// Keeps a live page live: re-fetches it every two seconds and swaps the
 /// board in, keeping what is folded folded, marking agents that just
-/// appeared, and ticking every duration once a second in between.
-pub const LIVE_JS: &str = r#"<script>
+/// appeared, and ticking every duration once a second in between. The rail
+/// is left alone while someone has hold of it.
+pub const LIVE_JS: &str = r##"<script>
 (function () {
   function elapsed(s) {
     s = Math.max(0, Math.floor(s));
@@ -662,7 +968,10 @@ pub const LIVE_JS: &str = r#"<script>
       var open = {}, seen = {};
       document.querySelectorAll("details[data-id]").forEach(function (d) { open[d.dataset.id] = d.open; });
       document.querySelectorAll("[data-agent]").forEach(function (e) { seen[e.dataset.agent] = 1; });
-      ["board", "summary"].forEach(function (id) {
+      var ids = ["board", "summary"];
+      var rail = document.getElementById("rail");
+      if (rail && !rail.contains(document.activeElement)) ids.push("rail");
+      ids.forEach(function (id) {
         var a = document.getElementById(id), b = next.getElementById(id);
         if (a && b) a.replaceWith(b);
       });
@@ -672,59 +981,249 @@ pub const LIVE_JS: &str = r#"<script>
       document.querySelectorAll("[data-agent]").forEach(function (e) {
         if (!seen[e.dataset.agent]) e.classList.add("arriving");
       });
+      if (window.rfWireRail) window.rfWireRail();
       tick();
     } catch (e) {}
   }
   setInterval(tick, 1000);
   setInterval(refresh, 2000);
 })();
-</script>"#;
+</script>"##;
 
-pub const CSS: &str = r#"
-.cols{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start}
-.col-l{flex:1 1 360px;min-width:0}.col-m{flex:1.4 1 440px;min-width:0}.col-r{flex:1 1 320px;min-width:0}
+/// The page's look: Apple's, light or dark by the system's setting.
+pub const CSS: &str = r##"
+:root{--bg:#f5f5f7;--panel:#fff;--panel2:#fbfbfd;--line:rgba(0,0,0,.08);--fg:#1d1d1f;--fg2:#6e6e73;--accent:#0071e3;--accentbg:rgba(0,113,227,.10);--wait:#b25000;--waitbg:rgba(255,159,10,.16);--done:#1d7a35;--donebg:rgba(52,199,89,.14);--bad:#d70015;--badbg:rgba(255,59,48,.12);--shadow:0 1px 2px rgba(0,0,0,.04),0 8px 28px rgba(0,0,0,.05);--glass:rgba(255,255,255,.72);--rail:#d2d2d7;--sel:rgba(0,113,227,.09);--pastbg:#e9ecf2}
+@media (prefers-color-scheme:dark){:root{--bg:#000;--panel:#1c1c1e;--panel2:#232325;--line:rgba(255,255,255,.10);--fg:#f5f5f7;--fg2:#a1a1a6;--accent:#2997ff;--accentbg:rgba(41,151,255,.16);--wait:#ffb340;--waitbg:rgba(255,159,10,.18);--done:#30d158;--donebg:rgba(48,209,88,.16);--bad:#ff6961;--badbg:rgba(255,69,58,.18);--shadow:0 0 0 1px rgba(255,255,255,.04);--glass:rgba(28,28,30,.72);--rail:#3a3a3c;--sel:rgba(41,151,255,.16);--pastbg:#0b0d14}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+body.past{background:var(--pastbg)}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+code,.mono{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:12px}
+.toolbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 24px;background:var(--glass);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--line)}
+.brand{font-weight:600;font-size:17px;letter-spacing:-.01em}
+.spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;background:var(--panel);border:1px solid var(--line);font-size:13px}
+.live{color:var(--done)}.live .dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+.hist{color:var(--accent)}
+.sub{color:var(--fg2);font-size:13px}
+.crumbs{padding:10px 24px 0;font-size:12px;color:var(--fg2)}.crumbs nav{display:inline}
+.workspace{display:flex;align-items:stretch}
+.stage{flex:1;min-width:0;padding:16px 8px 40px 24px}
+.banner{display:flex;justify-content:center;margin:0 0 14px}
+.banner-in{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 6px 6px 14px;border-radius:999px;background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--line);box-shadow:var(--shadow);font-size:13px;color:var(--fg)}
+.banner-in svg{color:var(--accent)}
+.btn{background:var(--accent);color:#fff;border-radius:999px;padding:6px 14px;font-size:13px;font-weight:500;min-height:30px;display:inline-flex;align-items:center}
+.btn:hover{text-decoration:none;filter:brightness(1.08)}
+.stack{position:relative}
+.ghost{position:absolute;inset:0;border-radius:18px;background:var(--panel);border:1px solid var(--line);pointer-events:none}
+.g1{transform:translateY(-14px) scale(.975);opacity:.55}.g2{transform:translateY(-26px) scale(.95);opacity:.3}.g3{transform:translateY(-36px) scale(.925);opacity:.14}
+.board{position:relative;display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+.side{flex:1 1 300px;max-width:380px;min-width:0}.center{flex:1.5 1 440px;min-width:0}.inspector{flex:1 1 300px;max-width:400px;min-width:0}
+section,.card{background:var(--panel);border-radius:16px;box-shadow:var(--shadow);border:1px solid var(--line);padding:16px 18px;margin-bottom:16px;overflow-x:auto}
+.eyebrow,section h2{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--fg2);margin:0 0 10px}
+.cardhead{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.n{color:var(--accent)}
+.grow{flex:1;min-width:0;display:flex;flex-direction:column}
 details>summary{list-style:none;cursor:pointer}details>summary::-webkit-details-marker{display:none}
-details>summary::before{content:"▸";display:inline-block;width:14px;color:var(--dim);transition:transform .15s}
-details[open]>summary::before{transform:rotate(90deg)}
-.kids{padding-left:16px}.leaf{padding-left:14px}
-.row{display:inline-flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;padding:3px 6px;border-radius:3px}
-.row.sel{background:color-mix(in srgb,var(--hi) 16%,transparent);outline:1px solid color-mix(in srgb,var(--hi) 45%,transparent)}
-.row.id>a.n{font-weight:600}.row .sum{font-size:12px;color:var(--dim)}
-a.n{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
-.st{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
-.st .g{display:inline-block;width:1em;text-align:center}
-.spin .g{animation:spin 1.4s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
-.st-work{color:var(--hi)}.st-think{color:color-mix(in srgb,var(--hi) 70%,var(--fg))}.st-wait{color:var(--wait)}
-.st-done{color:var(--ok)}.st-claim{color:var(--dim)}.st-quiet{color:var(--bad)}
-.fin{opacity:.6}.arriving{animation:arrive 1.8s ease-out}
-@keyframes arrive{from{opacity:0;transform:translateX(-8px);background:color-mix(in srgb,var(--hi) 30%,transparent)}to{opacity:1;transform:none}}
-.tk{font-size:12px}
-.ev{font-size:13px;padding:3px 0;border-top:1px solid var(--line)}.ev .tm{font-size:12px;font-family:ui-monospace,monospace}
-.ev a{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
-.big{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;word-break:break-all}.bigline{margin:8px 0}
-.facts{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px;margin:10px 0}.facts dt{color:var(--dim)}.facts dd{margin:0;word-break:break-word}
-.ms{border-top:1px solid var(--line);padding:6px 0}.ms>summary{padding:2px 0}.msname{color:var(--hi);font-weight:600}.about{font-size:12px}
-.bar{height:4px;background:var(--line);border-radius:2px;margin:5px 0 3px 14px;overflow:hidden}.bar>div{height:100%;background:var(--ok)}
-.msum{font-size:12px;margin-left:14px}
-.issue{padding:5px 0 5px 14px;border-top:1px solid var(--line);font-size:13px}.num{font-weight:600}
-.chip{border:1px solid var(--dim);color:var(--dim);border-radius:3px;padding:0 5px;font-size:11px;white-space:nowrap}
-.chip.work{border-color:var(--hi);color:var(--hi)}.chip.wait{border-color:var(--wait);color:var(--wait)}.chip.done{border-color:var(--ok);color:var(--ok)}
-.who{padding:2px 0 0 8px}.who a{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
-"#;
+.mach{margin-top:6px}
+.mrow,.arow{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;color:inherit;min-height:44px}
+.mrow:hover,.arow:hover{background:var(--panel2);text-decoration:none}
+.mrow.sel,.arow.sel{background:var(--sel)}
+.mname{font-weight:600}
+.agents{margin-left:26px;padding-left:12px;border-left:1px solid var(--line)}
+.subs{margin-left:26px;padding-left:12px;border-left:1px solid var(--line);margin-bottom:4px}
+.av{flex:none;width:30px;height:30px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;background:var(--panel2);border:1px solid var(--line);color:var(--fg2)}
+.av.small{width:26px;height:26px;border-radius:8px}
+.av.mac{width:34px;height:34px;border-radius:10px;background:var(--accentbg);color:var(--accent);border:0}
+.aname{font-weight:500}.aname.mono{font-size:13px}
+.aid{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:11px;color:var(--fg2)}
+.astat{font-size:12px}
+.subrow .aname{font-size:13px}
+.fin{opacity:.6}
+.arriving{animation:arrive .6s cubic-bezier(.2,.8,.2,1)}
+@keyframes arrive{from{opacity:0;transform:translateY(-6px) scale(.98)}to{opacity:1;transform:none}}
+.grp{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--fg2);padding:8px 10px 4px;min-height:30px}
+details.done>summary.grp::before{content:"";width:6px;height:6px;border-right:1.6px solid currentColor;border-bottom:1.6px solid currentColor;transform:rotate(-45deg);margin-right:4px;transition:transform .2s}
+details.done[open]>summary.grp::before{transform:rotate(45deg)}
+.count{font-weight:500;letter-spacing:0;background:var(--line);border-radius:999px;padding:0 7px;text-transform:none}
+.quiet{margin:2px 0 6px 10px;font-size:12px;color:var(--fg2)}
+.tk{font-size:12px;color:var(--accent);font-weight:500;flex:none}
+.st{display:inline-flex;align-items:center;gap:6px;color:var(--fg2)}
+.t-work{color:var(--accent)}.t-wait{color:var(--wait)}.t-done{color:var(--done)}.t-quiet{color:var(--bad)}
+.spin{width:11px;height:11px;border-radius:50%;border:2px solid var(--accentbg);border-top-color:var(--accent);animation:spin .9s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+.dotw{width:8px;height:8px;border-radius:50%;background:var(--wait);flex:none}
+.hold{width:8px;height:8px;border-radius:50%;border:1.5px solid currentColor;flex:none}
+.check{width:12px;height:12px;flex:none}
+.ev{display:flex;gap:10px;padding:7px 0;border-top:1px solid var(--line);font-size:13px;align-items:baseline}
+.ev:first-of-type{border-top:0}
+.tm{color:var(--fg2);font-size:12px;flex:none;min-width:44px;font-variant-numeric:tabular-nums}
+.evwho{font-weight:500;font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:12px}
+.ev .grow{display:block}
+.big{font-size:22px;font-weight:600;letter-spacing:-.02em;word-break:break-word;margin:2px 0 4px}
+.inspector .pill{margin:12px 0 0;padding:6px 12px}
+.tone-work{background:var(--accentbg);border-color:transparent}.tone-wait{background:var(--waitbg);border-color:transparent}.tone-done{background:var(--donebg);border-color:transparent}.tone-quiet{background:var(--badbg);border-color:transparent}
+.kv{margin:14px 0 0;border-radius:12px;background:var(--panel2);border:1px solid var(--line);overflow:hidden}
+.kvrow{display:flex;justify-content:space-between;gap:12px;padding:10px 14px;border-top:1px solid var(--line);font-size:13px}
+.kvrow:first-child{border-top:0}.kvk{color:var(--fg2);flex:none}.kvv{text-align:right;word-break:break-word}
+.phase{border-top:1px solid var(--line)}.phase:first-of-type{border-top:0}
+.phase>summary{display:flex;align-items:center;gap:10px;padding:8px 4px;border-radius:10px;min-height:44px}
+.phase>summary:hover{background:var(--panel2)}
+.ring{flex:none}.rbg{fill:none;stroke:var(--line);stroke-width:4}.rfg{fill:none;stroke:var(--done);stroke-width:4;stroke-linecap:round}.rfg.on{stroke:var(--accent)}
+.pname{font-weight:500}.pabout{font-size:12px;color:var(--fg2)}
+.items{padding:0 0 8px 36px}
+.item{display:flex;gap:8px;align-items:baseline;padding:6px 0;font-size:13px;border-top:1px solid var(--line)}
+.item .grow{display:block}
+.key{font-weight:500;white-space:nowrap}
+.badge{font-size:11px;font-weight:500;padding:1px 8px;border-radius:999px;white-space:nowrap}
+.b-work{background:var(--accentbg);color:var(--accent)}.b-wait{background:var(--waitbg);color:var(--wait)}.b-done{background:var(--donebg);color:var(--done)}.b-open{background:var(--line);color:var(--fg2)}
+.who{font-size:12px;padding-top:3px}.who a{font-family:"SF Mono",ui-monospace,Menlo,monospace}
+.none{color:var(--fg2);font-style:italic;margin:0;font-size:13px}.ok{color:var(--done);font-weight:600;margin:0}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--fg2);font-weight:500;font-size:12px}
+.tag{border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;background:var(--line);color:var(--fg2);white-space:nowrap}.tag.bad{background:var(--badbg);color:var(--bad)}
+.item>.sub,.item .sub{font-size:12px}
+.ph{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:8px}h2.proj{font-size:15px;text-transform:none;letter-spacing:-.01em;color:var(--fg);margin:0}
+.dim{color:var(--fg2)}
+.rail{flex:none;width:96px;position:sticky;top:57px;height:calc(100vh - 57px);display:flex;flex-direction:column;padding:12px 10px 16px 0}
+.rbtn{align-self:flex-end;width:32px;height:32px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;color:var(--fg2)}
+.rbtn:hover{background:var(--line);color:var(--fg)}.rbtn.off{opacity:.3}
+.track{position:relative;flex:1;margin:6px 0}
+.ticks{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-end}
+.rtk{display:flex;align-items:center;justify-content:flex-end;gap:6px;height:3px;width:100%;color:var(--fg2)}
+.rtk:hover{text-decoration:none}
+.tkl{font-size:10px;font-weight:500;white-space:nowrap}
+.tkline{height:2px;border-radius:1px;background:var(--rail);width:14px;transition:width .15s}
+.rtk.day .tkline{width:24px;background:var(--fg2);opacity:.6}
+.rtk.cur .tkline{width:34px;height:3px;background:var(--accent);opacity:1}
+.track:hover .tkline{width:20px}.track:hover .rtk.day .tkline{width:28px}
+.scrub{position:absolute;inset:-6px 0;width:100%;height:calc(100% + 12px);margin:0;opacity:0;cursor:grab;writing-mode:vertical-lr;direction:ltr;z-index:2}
+.scrub:active{cursor:grabbing}.scrub:focus-visible{opacity:.2}
+.flag{position:absolute;right:42px;transform:translateY(-50%);background:var(--accent);color:#fff;font-size:11px;font-weight:500;padding:3px 9px;border-radius:999px;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,113,227,.3);z-index:1}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+a:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (max-width:760px){.rail{width:72px}.stage{padding:14px 4px 32px 16px}.side,.inspector{max-width:none}.toolbar{padding:10px 16px}}
+"##;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn status(state: activity::State, since: i64, label: &str) -> activity::Status {
+        activity::Status {
+            state,
+            text: "Done".into(),
+            since,
+            label: label.into(),
+        }
+    }
+
     #[test]
     fn a_finished_agent_leaves_the_tree_after_its_minute_but_stays_finished() {
         let t = 10_000;
-        let done = |since| activity::Status { state: activity::State::Done, text: "Done".into(), since };
-        let (recent, old) = (done(t - 30), done(t - 600));
-        let node = |s| Node { pubkey: "pk".into(), instance: "claude-1/general-1".into(), claim: None, last: None, status: Some(s) };
+        let (recent, old) = (
+            status(activity::State::Done, t - 30, ""),
+            status(activity::State::Done, t - 600, ""),
+        );
+        let node = |s| Node {
+            pubkey: "pk".into(),
+            instance: "claude-1".into(),
+            claim: None,
+            last: None,
+            status: Some(s),
+        };
         assert!(shown(&node(&recent), t), "seen finishing");
         assert!(!shown(&node(&old), t), "gone from the tree");
-        assert_eq!(line(&node(&old), t).cls, "st-done", "its own page still says it finished");
+        assert_eq!(
+            line(&node(&old), t).tone,
+            "done",
+            "its own page still says it finished"
+        );
+    }
+
+    #[test]
+    fn subagents_sort_into_in_progress_and_done() {
+        let me = "pk-me";
+        let working = status(activity::State::Working, 90, "Decode space form of ?at=");
+        let done = status(activity::State::Done, 10, "Fix stale REFERENCE line");
+        let tr = tracker::Tracker::none();
+        let local = vec![
+            (
+                "claude-1".to_string(),
+                status(activity::State::Working, 50, ""),
+            ),
+            ("claude-1/general-purpose-1".to_string(), working.clone()),
+            ("claude-1/general-purpose-2".to_string(), done.clone()),
+        ];
+        let b = Board {
+            live: &[],
+            posts: &[],
+            all_live: &[],
+            all_posts: &[],
+            local: &local,
+            events: &[],
+            me,
+            plan: None,
+            tracker: &tr,
+        };
+        let ns = nodes(&b, 100);
+        let cfg = Cfg {
+            url: String::new(),
+            alias: "mac".into(),
+            instance: String::new(),
+        };
+        let html = tree(&b, &ns, &cfg, 100, &View::default());
+        let progress = html
+            .find("In progress <span class=count>1</span>")
+            .expect("in progress group");
+        let done_at = html
+            .find("Done <span class=count>1</span>")
+            .expect("done group");
+        assert!(progress < done_at);
+        assert!(
+            !html[done_at - 80..done_at].contains(" open"),
+            "done starts folded"
+        );
+        assert!(
+            html.contains("Decode space form of ?at="),
+            "labelled by what it was started for"
+        );
+        assert!(
+            html.contains("<span class=aid>general-purpose-1</span>"),
+            "its id stays beside the label"
+        );
+    }
+
+    #[test]
+    fn the_rail_marks_the_moment_and_ends_at_now() {
+        let view = View {
+            who: Some("w".into()),
+            at: Some(200),
+            epochs: vec![100, 200, 300],
+            prev: Some(100),
+            next: Some(300),
+            ..View::default()
+        };
+        let html = rail(&view);
+        assert_eq!(
+            html.matches("class=\"rtk").count(),
+            4,
+            "one per event, then Now"
+        );
+        assert!(html.contains(r#"href="/w?at=200" "#) || html.contains(r#"cur" href="/w?at=200""#));
+        assert!(
+            html.contains(r#"value=1"#),
+            "the slider sits on the moment shown"
+        );
+        assert!(html.contains(r#"href="/w?at=100" aria-label="Earlier event""#));
+        let live = rail(&View {
+            epochs: vec![100],
+            ..View::default()
+        });
+        assert!(
+            live.contains("value=1") && live.contains(r#"class="rtk day now cur""#),
+            "a live page sits on Now"
+        );
     }
 
     #[test]
@@ -749,7 +1248,13 @@ mod tests {
         assert!(!in_scope(&view, me, "claude-10"));
         assert!(!in_scope(&view, "pk-other", "claude-1"));
         assert!(in_scope(&View::default(), "pk-other", "x"));
-        let by_label = View { who: Some("macbook".into()), ..View::default() };
-        assert!(!in_scope(&by_label, me, "claude-1"), "a local label is not an address");
+        let by_label = View {
+            who: Some("macbook".into()),
+            ..View::default()
+        };
+        assert!(
+            !in_scope(&by_label, me, "claude-1"),
+            "a local label is not an address"
+        );
     }
 }

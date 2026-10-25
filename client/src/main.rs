@@ -3135,7 +3135,14 @@ fn main() {
             let you = match hook_subagent(&input) {
                 Some((kind, id)) if !kind.is_empty() && typed(&input) => {
                     let inst = subagent_instance(&c.instance, &kind, &id);
-                    spool(&inst, "appear", "", "");
+                    // Where its tool will record what it was started for:
+                    // the dashboard labels it from there.
+                    let meta = input
+                        .get("transcript_path")
+                        .and_then(|v| v.as_str())
+                        .and_then(|tp| activity::meta_path(tp, &id))
+                        .unwrap_or_default();
+                    spool(&inst, "appear", "", &meta);
                     let me = agent_path(&k.pubkey(), &inst);
                     format!("{}\n", you_are(&me, Some(&parent)))
                 }
@@ -4123,6 +4130,8 @@ struct View {
     /// The earliest entry this page could see, so a moment before it says so
     /// rather than looking quiet.
     oldest: Option<i64>,
+    /// Every event this page can step to, oldest first: the rail's ticks.
+    epochs: Vec<i64>,
 }
 
 impl View {
@@ -4151,28 +4160,16 @@ impl View {
                 crumbs.push(format!(r#"<a href="{}{q}">{}</a>"#, esc(&href), esc(seg)));
             }
         }
-        let path = esc(&self.path());
-        let step = |at: Option<i64>, label: &str| match at {
-            Some(e) => format!(r#"<a href="{path}?at={e}">{label}</a>"#),
-            None => format!("<span class=dim>{label}</span>"),
-        };
-        let mut scrub = vec![step(self.prev, "◀ previous event")];
-        if self.at.is_some() {
-            scrub.push(format!("<b>as of {}</b>", stamp(t)));
-            scrub.push(step(self.next, "next event ▶"));
-            scrub.push(format!(r#"<a href="{path}">now</a>"#));
-        }
-        if let Some(o) = self.oldest.filter(|&o| t < o) {
-            scrub.push(format!(
-                "<span class=dim>nothing this page can see goes back that far — it starts {}</span>",
+        // Stepping through time is the rail's job; this only says when the
+        // moment asked for is before anything the page can see.
+        let early = match self.oldest.filter(|&o| t < o) {
+            Some(o) => format!(
+                " · <span class=dim>nothing this page can see goes back that far — it starts {}</span>",
                 stamp(o)
-            ));
-        }
-        format!(
-            "<nav class=crumbs>{}</nav><nav class=scrub>{}</nav>",
-            crumbs.join(" / "),
-            scrub.join(" · ")
-        )
+            ),
+            None => String::new(),
+        };
+        format!("<nav>{}</nav>{early}", crumbs.join(" / "))
     }
 }
 
@@ -4244,7 +4241,9 @@ fn page(
 
     let all_posts = cache.posts(c, k);
     let posts: Vec<Plan> = all_posts.iter().filter(|p| keep(p)).cloned().collect();
-    let epochs: Vec<i64> = posts.iter().map(|p| p.epoch).collect();
+    let mut epochs: Vec<i64> = posts.iter().map(|p| p.epoch).collect();
+    epochs.sort_unstable();
+    epochs.dedup();
     let t = at.unwrap_or(now_t);
     let (prev, next) = neighbours(&epochs, t);
     let view = View {
@@ -4253,7 +4252,8 @@ fn page(
         at,
         prev,
         next,
-        oldest: epochs.iter().min().copied(),
+        oldest: epochs.first().copied(),
+        epochs: epochs.clone(),
     };
     let all_posts: Vec<Plan> = all_posts.into_iter().filter(|p| p.epoch <= t).collect();
     let all_live = match at {
@@ -4704,54 +4704,46 @@ fn render(
     } else {
         ("", "")
     };
-    let when = match view.at {
-        Some(_) => format!("as of {}", stamp(t)),
-        None => format!("live · {}", stamp(t)),
-    };
+    let (banner, ghosts) = dash::history(view);
+    let shown = ns.iter().filter(|n| dash::shown(n, t) && !n.instance.contains('/')).count();
     format!(
-        r#"<!doctype html><html><head><meta charset="utf-8">
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {refresh}<title>robofinger · {alias}</title>
-<style>
-:root{{--bg:#111;--panel:#1a1a1a;--line:#333;--fg:#ddd;--dim:#999;--hi:#f5a623;--ok:#3fb950;--bad:#f85149;--wait:#79c0ff}}
-@media (prefers-color-scheme: light){{:root{{--bg:#f6f6f6;--panel:#fff;--line:#ddd;--fg:#222;--dim:#666;--hi:#b36b00;--ok:#1a7f37;--bad:#cf222e;--wait:#0969da}}}}
-body{{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;margin:0;padding:16px}}
-header{{border-bottom:2px solid var(--hi);padding-bottom:8px;margin-bottom:16px}}
-h1{{color:var(--hi);font-size:20px;display:inline;margin-right:16px}}
-section{{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:10px 12px;margin-bottom:12px;overflow-x:auto}}
-h2{{font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin:0 0 8px}} .n{{color:var(--hi)}}
-table{{border-collapse:collapse;width:100%}} th,td{{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);vertical-align:top}} th{{color:var(--dim);font-weight:normal;font-size:12px}}
-.tag{{border:1px solid var(--dim);border-radius:3px;padding:0 6px;font-size:12px;white-space:nowrap}} .tag.bad{{border-color:var(--bad);color:var(--bad)}}
-.item{{padding:4px 0 8px}} .sub{{color:var(--dim);font-size:12px}} .none{{color:var(--dim);font-style:italic;margin:0}} .ok{{color:var(--ok);font-weight:bold;margin:0}}
-code{{font-size:12px}} a{{color:var(--hi)}} .dim{{color:var(--dim)}}
-nav{{font-size:12px;margin-top:6px}} nav.scrub b{{color:var(--hi)}}
-.ph{{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px}} h2.proj{{font-size:15px;text-transform:none;letter-spacing:0;color:var(--hi);margin:0}} .ph span{{font-size:12px}} table.tickets{{margin-bottom:10px}}
-{css}
-</style></head><body>
-<header><h1>robofinger</h1><span class=dim id=summary>{alias} · {team} · {n} live claims across {np} repos · {when}</span>{nav}</header>
-<div class=cols id=board>
-<div class=col-l>
+<style>{css}</style></head><body class="{body}">
+<header class=toolbar><span class=brand>robofinger</span><span class=pill>{folder}{here_e}</span><span class=spacer></span><span class=sub id=summary>{team} · {n} live claims across {np} repos</span>{mode}<span class=pill>{me_name} · {alias}</span></header>
+<div class=crumbs>{nav}</div>
+<div class=workspace><main class=stage>{banner}<div class=stack>{ghosts}<div class=board id=board>
+<div class=side>
 {plan_panel}
 {project_panels}
 </div>
-<div class=col-m>
-<section><h2>Agents{c_agents}</h2>{agents_panel}</section>
-<section><h2>Activity</h2>{feed_panel}</section>
+<div class=center>
+<section class=card><div class=cardhead><p class=eyebrow>Agents{c_agents}</p><span class=sub>{team}</span></div>{agents_panel}</section>
+<section class=card><p class=eyebrow>Activity</p>{feed_panel}</section>
 </div>
-<div class=col-r>
+<div class=inspector>
 {detail_panel}
-<section><h2>Stuck{c_stuck}</h2>{stuck_panel}</section>
-<section><h2>Open questions{c_asks}</h2>{asks_panel}</section>
+<section class=card><p class=eyebrow>Stuck{c_stuck}</p>{stuck_panel}</section>
+<section class=card><p class=eyebrow>Open questions{c_asks}</p>{asks_panel}</section>
 </div>
-</div>
-{live_js}</body></html>"#,
+</div></div></main>
+{rail}</div>
+{rail_js}{live_js}</body></html>"#,
         alias = esc(&c.alias),
         team = dash::summary(&team),
         css = dash::CSS,
+        body = if view.at.is_some() { "past" } else { "" },
+        folder = dash::folder(),
+        here_e = esc(&here),
+        mode = dash::mode(view),
+        me_name = esc(&name_for(b.me)),
+        rail = dash::rail(view),
+        rail_js = dash::RAIL_JS,
         n = claims.len(),
         np = projects.len(),
         nav = view.nav(t),
-        c_agents = count(ns.iter().filter(|n| dash::shown(n, t)).count()),
+        c_agents = count(shown),
         c_stuck = count(quiet.len()),
         c_asks = count(asks.len()),
     )
@@ -6022,6 +6014,7 @@ mod tests {
             prev: Some(t - 100),
             next: Some(t + 60),
             oldest: Some(t - 100),
+            epochs: vec![t - 100, t, t + 60],
         };
         let html = dashboard(&[claim], &[], &cfg, t, None, &view);
         let me = name_for("pk-me");
