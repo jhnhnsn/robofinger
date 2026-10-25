@@ -5792,7 +5792,7 @@ mod tests {
     /// name it was given, and no two may share one.
     #[test]
     fn subagents_starting_together_get_distinct_names_that_stick() {
-        let dir = std::env::temp_dir().join(format!("rf-slots-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rf-swarm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let t = 1_000_000;
         let names: Vec<String> = std::thread::scope(|s| {
