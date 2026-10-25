@@ -839,29 +839,36 @@ pub fn rail(view: &View) -> String {
         };
         last_day = day;
         ticks.push_str(&format!(
-            r#"<a class="rtk{}{}" href="{p}?at={e}" title="{}" data-when="{}"><span class=tkl>{label}</span><span class=tkline></span></a>"#,
+            r#"<a class="rtk{}{}" href="{p}{}" title="{}" data-when="{}"><span class=tkl>{label}</span><span class=tkline></span></a>"#,
             if label.is_empty() { "" } else { " day" },
             if i == cur { " cur" } else { "" },
+            esc(&view.query(Some(e))),
             long_when(e),
             short_when(e),
         ));
     }
     ticks.push_str(&format!(
-        r#"<a class="rtk day now{}" href="{p}" title="Now" data-when="Now"><span class=tkl>Now</span><span class=tkline></span></a>"#,
-        if cur == n { " cur" } else { "" }
+        r#"<a class="rtk day now{}" href="{p}{}" title="Now" data-when="Now"><span class=tkl>Now</span><span class=tkline></span></a>"#,
+        if cur == n { " cur" } else { "" },
+        esc(&view.query(None))
     ));
     let arrow = |href: Option<String>, label: &str, svg: &str| match href {
         Some(h) => format!(r#"<a class=rbtn href="{h}" aria-label="{label}">{svg}</a>"#),
         None => format!(r#"<span class="rbtn off" aria-hidden="true">{svg}</span>"#),
     };
     let up = arrow(
-        view.prev.map(|e| format!("{p}?at={e}")),
+        view.prev
+            .map(|e| format!("{p}{}", esc(&view.query(Some(e))))),
         "Earlier event",
         UP,
     );
     let down = match (view.at, view.next) {
-        (Some(_), Some(e)) => arrow(Some(format!("{p}?at={e}")), "Later event", DOWN),
-        (Some(_), None) => arrow(Some(p.clone()), "Now", DOWN),
+        (Some(_), Some(e)) => arrow(
+            Some(format!("{p}{}", esc(&view.query(Some(e))))),
+            "Later event",
+            DOWN,
+        ),
+        (Some(_), None) => arrow(Some(format!("{p}{}", esc(&view.query(None)))), "Now", DOWN),
         (None, _) => arrow(None, "", DOWN),
     };
     let (flag, flag_long) = match view.at {
@@ -893,7 +900,7 @@ pub fn history(view: &View) -> (String, String) {
             format!(
                 r#"<div class=banner><div class=banner-in>{CLOCK}<span>Viewing <b>{}</b></span><a class=btn href="{}">Back to Now</a></div></div>"#,
                 long_when(t),
-                esc(&view.path())
+                esc(&format!("{}{}", view.path(), view.query(None)))
             ),
             "<div class=\"ghost g3\"></div><div class=\"ghost g2\"></div><div class=\"ghost g1\"></div>".into(),
         ),
@@ -909,6 +916,30 @@ pub fn mode(view: &View) -> String {
             short_when(t)
         ),
     }
+}
+
+/// "This project · All": which projects the page shows. All is everything
+/// this machine can read; this project is the repo `serve` runs in.
+pub fn switch(view: &View, here: &str) -> String {
+    let flip = View {
+        all: !view.all,
+        ..view.clone()
+    };
+    let href = format!("{}{}", view.path(), flip.query(view.at));
+    let (this, all) = if view.all {
+        (
+            format!(r#"<a href="{}">{}</a>"#, esc(&href), esc(here)),
+            "<b>All</b>".to_string(),
+        )
+    } else {
+        (
+            format!("<b>{}</b>", esc(here)),
+            format!(r#"<a href="{}">All</a>"#, esc(&href)),
+        )
+    };
+    format!(
+        r#"<span class="pill seg" role="group" aria-label="Projects shown">{this}<span class=segsep></span>{all}</span>"#
+    )
 }
 
 pub fn folder() -> &'static str {
@@ -1006,6 +1037,7 @@ code,.mono{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:12px}
 .live{color:var(--done)}.live .dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 2s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.35}}
 .hist{color:var(--accent)}
+.seg{gap:0;padding:2px}.seg b,.seg a{padding:2px 10px;border-radius:999px;font-weight:500}.seg b{background:var(--accentbg);color:var(--accent)}.seg a{color:var(--fg2)}.seg a:hover{text-decoration:none;color:var(--fg)}.segsep{width:2px}
 .sub{color:var(--fg2);font-size:13px}
 .crumbs{padding:10px 24px 0;font-size:12px;color:var(--fg2)}.crumbs nav{display:inline}
 .workspace{display:flex;align-items:stretch}
@@ -1224,6 +1256,32 @@ mod tests {
             live.contains("value=1") && live.contains(r#"class="rtk day now cur""#),
             "a live page sits on Now"
         );
+    }
+
+    #[test]
+    fn showing_every_project_survives_every_link() {
+        let view = View {
+            who: Some("w".into()),
+            at: Some(200),
+            all: true,
+            epochs: vec![100, 200],
+            prev: Some(100),
+            ..View::default()
+        };
+        assert_eq!(view.moment(), "?at=200&all=1");
+        let html = rail(&view);
+        assert!(
+            html.contains("href=\"/w?at=100&amp;all=1\""),
+            "ticks and arrows keep it"
+        );
+        assert!(html.contains("href=\"/w?all=1\""), "and so does Now");
+        let sw = switch(&view, "robofinger");
+        assert!(
+            sw.contains("<b>All</b>") && sw.contains("href=\"/w?at=200\""),
+            "the switch flips it back, keeping the moment"
+        );
+        let here = switch(&View::default(), "robofinger");
+        assert!(here.contains("<b>robofinger</b>") && here.contains("href=\"/?all=1\""));
     }
 
     #[test]

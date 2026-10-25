@@ -30,6 +30,9 @@ pub struct Event {
     pub kind: String,
     pub tool: String,
     pub target: String,
+    /// The project a session appeared in, on its `appear`; empty elsewhere.
+    /// Subagents belong to their top-level session's project.
+    pub project: String,
 }
 
 pub fn dir(home: &Path) -> PathBuf {
@@ -49,6 +52,10 @@ pub fn append(dir: &Path, e: &Event) {
     let line = serde_json::json!({
         "t": e.t, "agent": e.agent, "kind": e.kind, "tool": e.tool, "target": e.target,
     });
+    let mut line = line;
+    if !e.project.is_empty() {
+        line["project"] = e.project.clone().into();
+    }
     let _ = std::fs::create_dir_all(dir);
     // One short write with O_APPEND: concurrent hooks interleave whole lines.
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -114,6 +121,7 @@ pub fn read(dir: &Path) -> Vec<Event> {
                 kind: s("kind"),
                 tool: s("tool"),
                 target: s("target"),
+                project: s("project"),
             });
         }
     }
@@ -237,6 +245,17 @@ fn label_from(meta: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The project an agent works in: what its top-level session said when it
+/// appeared. None for a session from before projects were recorded.
+pub fn project_of<'a>(events: &'a [Event], agent: &str) -> Option<&'a str> {
+    let top = agent.split('/').next().unwrap_or(agent);
+    events
+        .iter()
+        .rev()
+        .find(|e| e.agent == top && e.kind == "appear" && !e.project.is_empty())
+        .map(|e| e.project.as_str())
+}
+
 /// "Running cargo test", "Editing src/main.rs".
 pub fn doing(tool: &str, target: &str) -> String {
     let verb = match tool {
@@ -267,7 +286,25 @@ mod tests {
             kind: kind.into(),
             tool: tool.into(),
             target: target.into(),
+            project: String::new(),
         }
+    }
+
+    #[test]
+    fn a_subagent_works_in_its_sessions_project() {
+        let mut appear = ev(1, "claude-1", "appear", "", "");
+        appear.project = "robofinger".into();
+        let es = vec![
+            appear,
+            ev(2, "claude-1/explore-1", "appear", "", "/x.meta.json"),
+            ev(3, "claude-2", "appear", "", ""),
+        ];
+        assert_eq!(project_of(&es, "claude-1/explore-1"), Some("robofinger"));
+        assert_eq!(
+            project_of(&es, "claude-2"),
+            None,
+            "from before projects were recorded"
+        );
     }
 
     #[test]

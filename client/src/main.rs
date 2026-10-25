@@ -2099,6 +2099,23 @@ fn spool(agent: &str, kind: &str, tool: &str, target: &str) {
             kind: kind.into(),
             tool: tool.into(),
             target: target.into(),
+            project: String::new(),
+        },
+    );
+}
+
+/// A session appearing, with the project it appeared in, so the dashboard
+/// can show this project's agents and leave the rest of the machine out.
+fn spool_appear(agent: &str, project: &str) {
+    activity::append(
+        &activity::dir(&crypto::config_dir()),
+        &activity::Event {
+            t: now(),
+            agent: agent.into(),
+            kind: "appear".into(),
+            tool: String::new(),
+            target: String::new(),
+            project: project.into(),
         },
     );
 }
@@ -2934,7 +2951,7 @@ fn main() {
             let t = now();
             let mut blocks: Vec<String> = Vec::new();
             activity::prune(&activity::dir(&crypto::config_dir()));
-            spool(&c.instance, "appear", "", "");
+            spool_appear(&c.instance, &project());
 
             let live = current_plans(&c, &k);
             let here = project();
@@ -4006,6 +4023,8 @@ struct Route {
     who: Option<String>,
     agent: String,
     at: Option<String>,
+    /// Every project this machine can see, not just the one `serve` runs in.
+    all: bool,
 }
 
 fn parse_route(target: &str) -> Option<Route> {
@@ -4030,6 +4049,7 @@ fn parse_route(target: &str) -> Option<Route> {
         who: segs.first().map(|s| s.to_string()),
         agent: segs.get(1..).unwrap_or_default().join("/"),
         at,
+        all: query.split('&').any(|kv| kv == "all=1"),
     })
 }
 
@@ -4119,7 +4139,7 @@ fn claims_at(posts: &[Plan], t: i64) -> Vec<Plan> {
 
 /// Where a dashboard page sits: whose record, which agent, and when — with
 /// the events either side, for stepping through it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct View {
     who: Option<String>,
     agent: String,
@@ -4132,6 +4152,8 @@ struct View {
     oldest: Option<i64>,
     /// Every event this page can step to, oldest first: the rail's ticks.
     epochs: Vec<i64>,
+    /// Every project this machine can see, rather than the one served.
+    all: bool,
 }
 
 impl View {
@@ -4145,7 +4167,24 @@ impl View {
 
     /// `?at=` for links that stay at this page's moment.
     fn moment(&self) -> String {
-        self.at.map(|t| format!("?at={t}")).unwrap_or_default()
+        self.query(self.at)
+    }
+
+    /// The query a link from this page carries: a moment, if any, and
+    /// whether every project is showing — so neither is lost by clicking.
+    fn query(&self, at: Option<i64>) -> String {
+        let mut q: Vec<String> = Vec::new();
+        if let Some(t) = at {
+            q.push(format!("at={t}"));
+        }
+        if self.all {
+            q.push("all=1".into());
+        }
+        if q.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", q.join("&"))
+        }
     }
 
     /// Breadcrumb, then the scrub controls.
@@ -4237,7 +4276,12 @@ fn page(
         agent: r.agent.clone(),
         ..View::default()
     };
-    let keep = |p: &Plan| dash::in_scope(&scope, &p.pubkey, &p.instance);
+    // This project unless every project was asked for: what other repos on
+    // this machine are doing is not this team's business. Anything addressed
+    // to this node is kept wherever it was asked.
+    let here = project();
+    let in_project = |p: &Plan| r.all || p.project == here || addressed_to_me(p, c);
+    let keep = |p: &Plan| in_project(p) && dash::in_scope(&scope, &p.pubkey, &p.instance);
 
     let all_posts = cache.posts(c, k);
     let posts: Vec<Plan> = all_posts.iter().filter(|p| keep(p)).cloned().collect();
@@ -4254,15 +4298,30 @@ fn page(
         next,
         oldest: epochs.first().copied(),
         epochs: epochs.clone(),
+        all: r.all,
     };
-    let all_posts: Vec<Plan> = all_posts.into_iter().filter(|p| p.epoch <= t).collect();
-    let all_live = match at {
+    let all_posts: Vec<Plan> = all_posts
+        .into_iter()
+        .filter(|p| p.epoch <= t && in_project(p))
+        .collect();
+    let all_live: Vec<Plan> = match at {
         None => cache.live(c, k),
         Some(t) => claims_at(&all_posts, t),
-    };
+    }
+    .into_iter()
+    .filter(|p| in_project(p))
+    .collect();
     let live: Vec<Plan> = all_live.iter().filter(|p| keep(p)).cloned().collect();
     let posts: Vec<Plan> = posts.into_iter().filter(|p| p.epoch <= t).collect();
-    let (events, local) = local_spool(t);
+    // This machine's agents by the project their session appeared in. One
+    // from before projects were recorded is shown rather than guessed away.
+    let (mut events, mut local) = local_spool(t);
+    if !r.all {
+        let all_events = events.clone();
+        let mine = |agent: &str| activity::project_of(&all_events, agent).is_none_or(|p| p == here);
+        events.retain(|e| mine(&e.agent));
+        local.retain(|(inst, _)| mine(inst));
+    }
     let plan = cache.plan();
     let me = k.pubkey();
     let b = dash::Board {
@@ -4711,7 +4770,7 @@ fn render(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {refresh}<title>robofinger · {alias}</title>
 <style>{css}</style></head><body class="{body}">
-<header class=toolbar><span class=brand>robofinger</span><span class=pill>{folder}{here_e}</span><span class=spacer></span><span class=sub id=summary>{team} · {n} live claims across {np} repos</span>{mode}<span class=pill>{me_name} · {alias}</span></header>
+<header class=toolbar><span class=brand>robofinger</span><span class=pill>{folder}{here_e}</span><span class=spacer></span><span class=sub id=summary>{team} · {n} live claims across {np} repos</span>{switch}{mode}<span class=pill>{me_name} · {alias}</span></header>
 <div class=crumbs>{nav}</div>
 <div class=workspace><main class=stage>{banner}<div class=stack>{ghosts}<div class=board id=board>
 <div class=side>
@@ -4737,6 +4796,7 @@ fn render(
         folder = dash::folder(),
         here_e = esc(&here),
         mode = dash::mode(view),
+        switch = dash::switch(view, &here),
         me_name = esc(&name_for(b.me)),
         rail = dash::rail(view),
         rail_js = dash::RAIL_JS,
@@ -5894,6 +5954,8 @@ mod tests {
         let r = parse_route("/wheat-falcon?at=2026-10-24%2018:51").unwrap();
         assert_eq!(r.at.as_deref(), Some("2026-10-24 18:51"), "so is `%20`");
 
+        assert!(parse_route("/w?all=1").unwrap().all, "every project, on request");
+        assert!(!parse_route("/w?at=2h").unwrap().all, "this project by default");
         assert!(parse_route("/favicon.ico").is_none(), "costs a relay round trip for nothing");
         assert!(parse_route("/<script>").is_none());
         assert!(parse_route("/a/../b").is_none());
@@ -6015,6 +6077,7 @@ mod tests {
             next: Some(t + 60),
             oldest: Some(t - 100),
             epochs: vec![t - 100, t, t + 60],
+            all: false,
         };
         let html = dashboard(&[claim], &[], &cfg, t, None, &view);
         let me = name_for("pk-me");
