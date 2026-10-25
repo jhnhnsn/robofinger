@@ -174,10 +174,16 @@ holds your identity and your home relay, the one your address points to, not
 the project a folder belongs to.
 
 ```sh
-robofinger join                  # this folder → the relay in your global config
+robofinger join tooob            # a room called tooob on your home relay
+robofinger join                  # your home relay itself
 robofinger join https://relay.example.com/team
 robofinger leave
 ```
+
+A project's members are the peers who publish to its relay. A session reads
+only from them and encrypts only to them, so two folders joined to different
+rooms are two separate projects even under one identity. An agent in one is not
+briefed on the other's claims, and the other's members never receive its work.
 
 `init` joins the folder it runs in. In an unjoined folder:
 - every write is refused, in the one function that writes;

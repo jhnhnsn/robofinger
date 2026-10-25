@@ -305,8 +305,9 @@ SETUP
 
 PROJECTS
 
-  join [<relay url>]            share this folder's work with a project
-      robofinger join           the relay in your global config
+  join [<name> | <relay url>]   share this folder's work with a project
+      robofinger join tooob     a room called tooob on your relay
+      robofinger join           your relay itself
       (a folder that has not joined publishes nothing; its agents still get
        their names and the local activity view)
   leave                         stop sharing this folder
@@ -513,6 +514,38 @@ fn join_in(root: &std::path::Path, url: &str) -> std::io::Result<std::path::Path
         }
     }
     Ok(path)
+}
+
+/// What `robofinger join [arg]` joins. A relay URL as given; a bare name, a
+/// room of that name on your home relay (`join tooob` →
+/// `https://relay.example.com/tooob`); nothing, your home relay itself.
+/// Anything else is refused rather than written down as a relay nobody can
+/// reach.
+fn join_target(arg: Option<&str>) -> Result<String, String> {
+    let home = || {
+        parse_config(&crypto::config_dir().join("config"))
+            .get("ROBOFINGER_URL")
+            .map(|u| u.trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty())
+            .ok_or_else(|| {
+                "no home relay yet: run `robofinger init --url <relay>` first".to_string()
+            })
+    };
+    join_target_in(arg, home)
+}
+
+fn join_target_in(
+    arg: Option<&str>,
+    home: impl Fn() -> Result<String, String>,
+) -> Result<String, String> {
+    match arg.map(|a| a.trim().trim_end_matches('/')) {
+        None | Some("") => home(),
+        Some(u) if u.starts_with("https://") || u.starts_with("http://") => Ok(u.to_string()),
+        Some(name) if plain_token(name) => Ok(format!("{}/{name}", home()?)),
+        Some(other) => Err(format!(
+            "{other:?} is neither a relay URL nor a project name; try `robofinger join <name>` or `robofinger join https://…`"
+        )),
+    }
 }
 
 /// Undo `join_in`. True when there was a join to undo.
@@ -1557,7 +1590,7 @@ fn decrypt_plan(e: &Envelope, k: &Keys) -> Option<Plan> {
 /// Every plan row the relay has, newest first: the live claim for each agent
 /// plus the short history behind it.
 fn fetch_plans(c: &Cfg, k: &Keys) -> Vec<Plan> {
-    let subs = crypto::load_peers();
+    let subs = members(c);
     fetch_envelopes(c, k, &subs, "plans", "")
         .iter()
         .filter_map(|e| decrypt_plan(e, k))
@@ -1650,7 +1683,7 @@ fn fetch_posts_after(
     limit: usize,
     seen: &std::collections::HashMap<String, i64>,
 ) -> Vec<Plan> {
-    let subs = crypto::load_peers();
+    let subs = members(c);
     let mut posts: Vec<Plan> = Vec::new();
     for (url, keys) in endpoints(c, k, &subs) {
         let after = seen.get(&url).copied().unwrap_or(0);
@@ -1753,15 +1786,22 @@ fn publish(
 /// `group` restricts the list. Excluded peers cannot decrypt the result at all;
 /// this is cryptographic, not a display filter. They can still see *that* you
 /// published, since the envelope is cleartext for the relay.
+/// This project's members: the peers who publish to the relay this folder
+/// publishes to. What a session reads from, as well as who it encrypts to,
+/// so an agent in one project is not briefed on another's (ADR 0006).
+fn members(c: &Cfg) -> Vec<Peer> {
+    crypto::load_peers()
+        .into_iter()
+        .filter(|p| p.endpoint(&c.url) == c.url)
+        .collect()
+}
+
 fn recipients(c: &Cfg, k: &Keys, group: Option<&str>) -> Vec<age::x25519::Recipient> {
     let mut recips = vec![k.age_secret.to_public()];
     // Only this project's members: the peers who publish to the relay this
     // folder publishes to. Joining a second project must not start
     // encrypting the first one's work to its members (ADR 0006).
-    for p in crypto::load_peers()
-        .into_iter()
-        .filter(|p| p.endpoint(&c.url) == c.url)
-    {
+    for p in members(c) {
         if let Some(g) = group
             && !p.groups.iter().any(|pg| pg == g)
         {
@@ -3078,10 +3118,13 @@ fn main() {
             }
         }
         "join" => {
-            let url = args
-                .get(1)
-                .map(|u| u.trim_end_matches('/').to_string())
-                .unwrap_or_else(|| c.url.clone());
+            let url = match join_target(args.get(1).map(String::as_str)) {
+                Ok(u) => u,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
             let root = repo_root();
             match join_in(std::path::Path::new(&root), &url) {
                 Ok(path) => {
@@ -3365,7 +3408,7 @@ fn main() {
             let dir = crypto::config_dir();
             let mut seen = read_seen(&dir);
             let fresh = fetch_posts_after(&c, &k, START_ENTRIES, &seen);
-            let subs = crypto::load_peers();
+            let subs = members(&c);
             for (url, keys) in endpoints(&c, &k, &subs) {
                 let high = fresh
                     .iter()
@@ -3738,7 +3781,7 @@ fn main() {
                     eprintln!("{e}");
                     std::process::exit(2);
                 });
-            let subs = crypto::load_peers();
+            let subs = members(&c);
             // Built once for the whole read, and only when asked: it shells
             // out to git, and a link is noise on a feed being skimmed.
             let want_links = args.iter().any(|a| a == "--url");
@@ -3782,7 +3825,7 @@ fn main() {
             let ids = args.iter().any(|a| a == "--ids");
             let dir = crypto::config_dir();
             let mut seen = read_seen(&dir);
-            let subs = crypto::load_peers();
+            let subs = members(&c);
 
             let fresh = fetch_posts_after(&c, &k, limit, &seen);
             // Oldest first: this reads as a narrative of what happened while
@@ -6444,6 +6487,26 @@ mod tests {
         );
         assert!(!leave_in(&root).unwrap(), "nothing left to leave");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_bare_name_joins_a_room_on_your_home_relay() {
+        let home = || Ok("https://relay.example.com".to_string());
+        assert_eq!(
+            join_target_in(Some("tooob"), home).unwrap(),
+            "https://relay.example.com/tooob"
+        );
+        assert_eq!(
+            join_target_in(None, home).unwrap(),
+            "https://relay.example.com"
+        );
+        assert_eq!(
+            join_target_in(Some("https://other.example/x/"), home).unwrap(),
+            "https://other.example/x"
+        );
+        assert!(join_target_in(Some("not a name"), home).is_err());
+        let none = || Err("no home relay".to_string());
+        assert!(join_target_in(Some("tooob"), none).is_err());
     }
 
     #[test]
