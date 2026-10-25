@@ -12,20 +12,21 @@
 //! `gh` when `origin` is on GitHub, using the person's own credentials. Other
 //! trackers still get links; their plan is whatever the record cites.
 
-use super::{config_file, origin_base, ticket_ref};
+use super::{config_file, origin_base_in, ticket_ref};
 
 pub struct Tracker {
     template: Option<String>,
 }
 
 impl Tracker {
-    pub fn load() -> Self {
+    /// The tracker for the repo at `dir`.
+    pub fn load_in(dir: &str) -> Self {
         let configured = std::env::var("ROBOFINGER_TICKET_URL")
             .ok()
             .or_else(|| config_file().get("ROBOFINGER_TICKET_URL").cloned())
             .filter(|s| !s.is_empty());
         Tracker {
-            template: configured.or_else(|| origin_base().and_then(|b| default_template(&b))),
+            template: configured.or_else(|| origin_base_in(dir).and_then(|b| default_template(&b))),
         }
     }
 
@@ -117,8 +118,8 @@ pub struct Group {
 /// The project's plan from GitHub, in the order it is meant to land: by
 /// milestone, earliest due first; failing milestones, by `phase-*` label.
 /// None when `origin` is not GitHub or `gh` cannot answer.
-pub fn plan() -> Option<Vec<Group>> {
-    let base = origin_base()?;
+pub fn plan_in(dir: &str) -> Option<Vec<Group>> {
+    let base = origin_base_in(dir)?;
     if !base
         .split('/')
         .nth(2)?
@@ -129,7 +130,7 @@ pub fn plan() -> Option<Vec<Group>> {
     }
     let out = run_with_timeout(
         std::process::Command::new("gh")
-            .current_dir(super::repo_root())
+            .current_dir(dir)
             .env("GH_PROMPT_DISABLED", "1")
             .args([
                 "issue",

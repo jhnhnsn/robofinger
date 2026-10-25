@@ -145,7 +145,10 @@ fn start_context(mut blocks: Vec<String>, me: &str) -> String {
 /// it is cannot tell anyone where to find it.
 fn you_are(me: &str, parent: Option<&str>) -> String {
     let page = dashboard_base()
-        .map(|b| format!(" Its page: {b}/{me}"))
+        .map(|b| match project_slug_here() {
+            Some(p) => format!(" Its page: {b}/{p}/{me}"),
+            None => format!(" Its page: {b}/{me}"),
+        })
         .unwrap_or_default();
     let of = parent
         .map(|p| format!(", a subagent of `{p}`"))
@@ -208,8 +211,9 @@ THE TIMELINE
       (--re quotes the question back, so the asker sees what was answered.
        ids come from `robofinger since --ids`)
 
-  serve [--port N]              the same record as a live page in your browser
+  serve [--port N]              every project you have joined, live, in your browser
       robofinger serve          then open http://127.0.0.1:7380
+      (one server for all of them: /<project>/<who>/<agent>…; start it anywhere)
       (the plan comes from GitHub via `gh`; work items link to the tracker —
        github, gitlab and bitbucket from `origin`, anything else via
        ROBOFINGER_TICKET_URL, e.g. https://acme.atlassian.net/browse/{key})
@@ -438,6 +442,7 @@ impl Plan {
     }
 }
 
+#[derive(Clone)]
 struct Cfg {
     /// Which agent on this machine this process is. Empty for a single-agent
     /// install, which is the default and what most people run.
@@ -620,6 +625,7 @@ fn join_by_invitation(c: &mut Cfg, k: &Keys, raw: &str) {
         std::process::exit(1);
     }
     c.url = inv.body.relay.clone();
+    register(&c.url, &root);
 
     let mut peers = crypto::load_peers();
     let mut added = Vec::new();
@@ -1208,6 +1214,11 @@ fn git_toplevel() -> Option<String> {
 /// guessing a path segment — a link that looks right and 404s is worse than no
 /// link, because nothing distinguishes it from a commit that was rebased away.
 fn commit_url_template() -> Option<String> {
+    commit_url_template_in(&repo_root())
+}
+
+/// `commit_url_template`, for the repo at `dir`.
+fn commit_url_template_in(dir: &str) -> Option<String> {
     if let Some(t) = std::env::var("ROBOFINGER_COMMIT_URL")
         .ok()
         .or_else(|| config_file().get("ROBOFINGER_COMMIT_URL").cloned())
@@ -1215,7 +1226,7 @@ fn commit_url_template() -> Option<String> {
     {
         return Some(t);
     }
-    let base = origin_base()?;
+    let base = origin_base_in(dir)?;
     // The three big forges agree on everything but one path segment.
     let host = base
         .split('/')
@@ -1234,9 +1245,9 @@ fn commit_url_template() -> Option<String> {
 }
 
 /// This repo's `origin` as a browsable `https://host/org/repo`, or None.
-fn origin_base() -> Option<String> {
+fn origin_base_in(dir: &str) -> Option<String> {
     let out = std::process::Command::new("git")
-        .current_dir(repo_root())
+        .current_dir(dir)
         .args(["remote", "get-url", "origin"])
         .output()
         .ok()
@@ -2586,7 +2597,10 @@ fn main() {
             // Running init here is the clearest sign this folder is meant to
             // be shared. Every other folder joins on its own.
             match join_in(std::path::Path::new(&repo_root()), &url) {
-                Ok(p) => println!("joined this folder to {url} ({})", p.display()),
+                Ok(p) => {
+                    register(&url, &repo_root());
+                    println!("joined this folder to {url} ({})", p.display())
+                }
                 Err(e) => eprintln!("could not join this folder: {e}"),
             }
             if k.freshly_generated {
@@ -3128,6 +3142,7 @@ fn main() {
             let root = repo_root();
             match join_in(std::path::Path::new(&root), &url) {
                 Ok(path) => {
+                    register(&url, &root);
                     println!("joined {root} to {url}");
                     println!("  written to {} (yours; kept out of git)", path.display());
                     println!("  agents here now publish their claims and see teammates' claims");
@@ -3141,7 +3156,10 @@ fn main() {
         "leave" => {
             let root = repo_root();
             match leave_in(std::path::Path::new(&root)) {
-                Ok(true) => println!("{root} left its project; nothing here is published now"),
+                Ok(true) => {
+                    unregister(&root);
+                    println!("{root} left its project; nothing here is published now")
+                }
                 Ok(false) => println!(
                     "{root} had not joined a project here (a committed .robofinger may still name one)"
                 ),
@@ -3375,6 +3393,9 @@ fn main() {
                 std::process::exit(0);
             }
 
+            // Known to `serve` from anywhere, including folders that joined
+            // before projects were recorded.
+            register(&c.url, &repo_root());
             // Newcomers a member vouched for, followed before anything is
             // read, so their claims are in this very briefing.
             let adopted = invite::adopt(&c, &k);
@@ -4433,12 +4454,13 @@ fn first_line(s: &str) -> String {
 fn serve(c: &Cfg, k: &Keys, port: u16) -> std::io::Result<()> {
     use std::io::{BufRead, Write};
     let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
-    println!("serving the record at http://127.0.0.1:{port}  (ctrl-c to stop)");
-    // Shells out to git, so once, not per refresh. The template is this
-    // repo's origin, so it only links entries from this repo — a teammate's
-    // sha from another project would get a link that 404s.
-    let links = commit_url_template().map(|t| (project(), t));
-    let tracker = tracker::Tracker::load();
+    // The folder `serve` starts in is the default project, and is recorded
+    // if it has joined one, so the list is never empty for a joined folder.
+    let here = repo_root();
+    if joined() {
+        register(&c.url, &here);
+    }
+    println!("serving every project you have joined at http://127.0.0.1:{port}  (ctrl-c to stop)");
     let mut cache = Cache::default();
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -4450,24 +4472,87 @@ fn serve(c: &Cfg, k: &Keys, port: u16) -> std::io::Result<()> {
         // favicon, a probe — gets an empty 404 rather than a relay round trip.
         let mut line = String::new();
         let _ = std::io::BufReader::new(&stream).read_line(&mut line);
-        let route = line
+        let target = line
             .strip_prefix("GET ")
             .and_then(|r| r.split_whitespace().next())
-            .and_then(parse_route);
-        let (status, body) =
-            match route.map(|r| page(c, k, &r, links.as_ref(), &mut cache, &tracker)) {
-                Some(Ok(html)) => ("200 OK", html),
-                Some(Err(e)) => ("400 Bad Request", esc(&e)),
-                None => ("404 Not Found", String::new()),
-            };
+            .unwrap_or("")
+            .to_string();
+        let (status, location, body) = match parse_route(&target) {
+            None => ("404 Not Found", None, String::new()),
+            Some(r) => {
+                let ps = projects();
+                match resolve(r, &ps, &here) {
+                    Resolved::Page(r, proj) => match page(c, k, &r, &proj, &mut cache) {
+                        Ok(html) => ("200 OK", None, html),
+                        Err(e) => ("400 Bad Request", None, esc(&e)),
+                    },
+                    Resolved::Go(to) => ("302 Found", Some(to), String::new()),
+                    Resolved::List => ("200 OK", None, dash::project_list(&ps)),
+                }
+            }
+        };
+        let location = location
+            .map(|l| format!("Location: {l}\r\n"))
+            .unwrap_or_default();
         let _ = write!(
             stream,
-            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n\
+            "HTTP/1.1 {status}\r\n{location}Content-Type: text/html; charset=utf-8\r\n\
              Content-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
     }
     Ok(())
+}
+
+/// What a request comes to: a page in a project, the list of projects, or a
+/// redirect — `/` to the only project, and an address from before projects
+/// were in URLs to the same agent in this folder's project.
+enum Resolved {
+    Page(Route, Project),
+    Go(String),
+    List,
+}
+
+fn resolve(mut r: Route, ps: &[Project], here: &str) -> Resolved {
+    match &r.who {
+        None if ps.len() == 1 => Resolved::Go(format!("/{}", ps[0].slug)),
+        None => Resolved::List,
+        Some(first) => match ps.iter().find(|p| p.slug == *first) {
+            Some(p) => {
+                // `/<project>/<who>/<agent>…`: shift the project off.
+                let mut segs = r.agent.splitn(2, '/');
+                r.who = segs.next().filter(|s| !s.is_empty()).map(String::from);
+                r.agent = segs.next().unwrap_or("").to_string();
+                Resolved::Page(r, p.clone())
+            }
+            None => {
+                let default = ps
+                    .iter()
+                    .find(|p| p.folders.iter().any(|f| f == here))
+                    .or(ps.first());
+                match default {
+                    Some(p) => {
+                        let mut to = format!("/{}/{first}", p.slug);
+                        if !r.agent.is_empty() {
+                            to = format!("{to}/{}", r.agent);
+                        }
+                        let mut q = Vec::new();
+                        if let Some(at) = &r.at {
+                            q.push(format!("at={at}"));
+                        }
+                        if r.all {
+                            q.push("all=1".into());
+                        }
+                        if !q.is_empty() {
+                            to = format!("{to}?{}", q.join("&"));
+                        }
+                        Resolved::Go(to)
+                    }
+                    None => Resolved::List,
+                }
+            }
+        },
+    }
 }
 
 /// A dashboard page's address: `/<who>/<agent>/<subagent>…?at=<when>`.
@@ -4616,14 +4701,36 @@ struct View {
     epochs: Vec<i64>,
     /// Every project this machine can see, rather than the one served.
     all: bool,
+    /// The project this page is in, the URL's first segment. Empty only in
+    /// tests, where links stay unprefixed.
+    project: String,
 }
 
 impl View {
+    /// This page's address: the project, then the agent path.
     fn path(&self) -> String {
+        match (self.base(), self.rel()) {
+            (b, r) if b.is_empty() => r,
+            (b, r) if r == "/" => b,
+            (b, r) => format!("{b}{r}"),
+        }
+    }
+
+    /// The agent path part of the address, without the project.
+    fn rel(&self) -> String {
         match &self.who {
             None => "/".into(),
             Some(w) if self.agent.is_empty() => format!("/{w}"),
             Some(w) => format!("/{w}/{}", self.agent),
+        }
+    }
+
+    /// What every link on the page starts with: `/<project>`.
+    fn base(&self) -> String {
+        if self.project.is_empty() {
+            String::new()
+        } else {
+            format!("/{}", self.project)
         }
     }
 
@@ -4652,9 +4759,15 @@ impl View {
     /// Breadcrumb, then the scrub controls.
     fn nav(&self, t: i64) -> String {
         let q = self.moment();
-        let mut crumbs = vec![format!(r#"<a href="/{q}">everyone</a>"#)];
+        let base = self.base();
+        let top = if self.project.is_empty() {
+            "everyone"
+        } else {
+            &self.project
+        };
+        let mut crumbs = vec![format!(r#"<a href="{base}/{q}">{}</a>"#, esc(top))];
         if let Some(w) = &self.who {
-            let mut href = format!("/{w}");
+            let mut href = format!("{base}/{w}");
             crumbs.push(format!(r#"<a href="{}{q}">{}</a>"#, esc(&href), esc(w)));
             for seg in self.agent.split('/').filter(|s| !s.is_empty()) {
                 href = format!("{href}/{seg}");
@@ -4680,9 +4793,13 @@ impl View {
 /// still. The activity spool is local and read fresh every time.
 #[derive(Default)]
 struct Cache {
-    posts: Option<(i64, Vec<Plan>)>,
-    live: Option<(i64, Vec<Plan>)>,
-    plan: Option<(i64, Option<Vec<tracker::Group>>)>,
+    /// Per relay: the newest posts, and the live claims.
+    posts: std::collections::HashMap<String, (i64, Vec<Plan>)>,
+    live: std::collections::HashMap<String, (i64, Vec<Plan>)>,
+    /// Per folder: its roadmap, tracker and commit links.
+    plan: std::collections::HashMap<String, (i64, Option<Vec<tracker::Group>>)>,
+    trackers: std::collections::HashMap<String, std::rc::Rc<tracker::Tracker>>,
+    links: std::collections::HashMap<String, Option<(String, String)>>,
     /// Folder → project, so placing a session costs one git call per folder
     /// for as long as `serve` runs.
     projects: std::collections::HashMap<String, String>,
@@ -4695,28 +4812,33 @@ const PLAN_TTL: i64 = 60;
 impl Cache {
     fn posts(&mut self, c: &Cfg, k: &Keys) -> Vec<Plan> {
         let t = now();
-        if self
+        let fresh = self
             .posts
-            .as_ref()
-            .is_none_or(|(at, _)| t - at >= RELAY_TTL)
-        {
+            .get(&c.url)
+            .is_some_and(|(at, _)| t - at < RELAY_TTL);
+        if !fresh {
             // ponytail: the newest MAX_POST_LIMIT entries are all a page can
             // scrub through; going further back means paging with `before=`.
-            self.posts = Some((t, fetch_posts(c, k, MAX_POST_LIMIT)));
+            self.posts
+                .insert(c.url.clone(), (t, fetch_posts(c, k, MAX_POST_LIMIT)));
         }
         self.posts
-            .as_ref()
+            .get(&c.url)
             .map(|(_, p)| p.clone())
             .unwrap_or_default()
     }
 
     fn live(&mut self, c: &Cfg, k: &Keys) -> Vec<Plan> {
         let t = now();
-        if self.live.as_ref().is_none_or(|(at, _)| t - at >= RELAY_TTL) {
-            self.live = Some((t, current_plans(c, k)));
+        let fresh = self
+            .live
+            .get(&c.url)
+            .is_some_and(|(at, _)| t - at < RELAY_TTL);
+        if !fresh {
+            self.live.insert(c.url.clone(), (t, current_plans(c, k)));
         }
         self.live
-            .as_ref()
+            .get(&c.url)
             .map(|(_, p)| p.clone())
             .unwrap_or_default()
     }
@@ -4728,41 +4850,164 @@ impl Cache {
             .clone()
     }
 
-    fn plan(&mut self) -> Option<Vec<tracker::Group>> {
+    fn plan(&mut self, dir: &str) -> Option<Vec<tracker::Group>> {
         let t = now();
-        if self.plan.as_ref().is_none_or(|(at, _)| t - at >= PLAN_TTL) {
-            self.plan = Some((t, tracker::plan()));
+        let fresh = self.plan.get(dir).is_some_and(|(at, _)| t - at < PLAN_TTL);
+        if !fresh {
+            self.plan
+                .insert(dir.to_string(), (t, tracker::plan_in(dir)));
         }
-        self.plan.as_ref().and_then(|(_, p)| p.clone())
+        self.plan.get(dir).and_then(|(_, p)| p.clone())
+    }
+
+    fn tracker(&mut self, dir: &str) -> std::rc::Rc<tracker::Tracker> {
+        self.trackers
+            .entry(dir.to_string())
+            .or_insert_with(|| std::rc::Rc::new(tracker::Tracker::load_in(dir)))
+            .clone()
+    }
+
+    fn links(&mut self, dir: &str) -> Option<(String, String)> {
+        if !self.links.contains_key(dir) {
+            let l = commit_url_template_in(dir).map(|t| (project_at(dir), t));
+            self.links.insert(dir.to_string(), l);
+        }
+        self.links.get(dir).cloned().flatten()
     }
 }
 
+/// A project this machine has joined, as `serve` finds it: the relay is its
+/// identity, the slug its first URL segment, the folders where it is worked.
+#[derive(Clone, Debug, PartialEq)]
+struct Project {
+    slug: String,
+    url: String,
+    folders: Vec<String>,
+}
+
+/// Every project this machine has joined, from `$ROBOFINGER_HOME/projects`.
+fn projects() -> Vec<Project> {
+    projects_in(&crypto::config_dir())
+}
+
+/// One line per joined folder, `relay<TAB>folder`, in the order they joined.
+/// Folders on one relay are one project. Its slug is the relay's room name
+/// (`…/tooob` → `tooob`), else its first folder's name, made unique in join
+/// order so a link never changes meaning when another project arrives.
+fn projects_in(dir: &std::path::Path) -> Vec<Project> {
+    let mut out: Vec<Project> = Vec::new();
+    for line in std::fs::read_to_string(dir.join("projects"))
+        .unwrap_or_default()
+        .lines()
+    {
+        let Some((url, folder)) = line.split_once('\t') else {
+            continue;
+        };
+        match out.iter_mut().find(|p| p.url == url) {
+            Some(p) => p.folders.push(folder.to_string()),
+            None => {
+                let room = url.split('/').skip(3).filter(|s| !s.is_empty()).last();
+                let name = room.unwrap_or_else(|| folder.rsplit('/').next().unwrap_or("project"));
+                let mut slug: String = name
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect();
+                if slug.is_empty() {
+                    slug = "project".into();
+                }
+                let taken = |s: &str| out.iter().any(|p| p.slug == s);
+                if taken(&slug) {
+                    slug = (2..)
+                        .map(|i| format!("{slug}-{i}"))
+                        .find(|s| !taken(s))
+                        .unwrap_or(slug);
+                }
+                out.push(Project {
+                    slug,
+                    url: url.to_string(),
+                    folders: vec![folder.to_string()],
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Record that `folder` has joined the project at `url`, so `serve` can show
+/// it from anywhere. Best effort: a read-only home costs the project list.
+fn register(url: &str, folder: &str) {
+    register_in(&crypto::config_dir(), Some(url), folder);
+}
+
+fn unregister(folder: &str) {
+    register_in(&crypto::config_dir(), None, folder);
+}
+
+fn register_in(dir: &std::path::Path, url: Option<&str>, folder: &str) {
+    let path = dir.join("projects");
+    let body = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = body
+        .lines()
+        .filter(|l| l.split_once('\t').is_none_or(|(_, f)| f != folder))
+        .map(String::from)
+        .collect();
+    if let Some(u) = url {
+        lines.push(format!("{u}\t{folder}"));
+    }
+    let new = if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\n") + "\n"
+    };
+    if new != body {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(&path, new);
+    }
+}
+
+/// The project this folder is in, by slug, if it has joined one.
+fn project_slug_here() -> Option<String> {
+    let here = repo_root();
+    projects()
+        .into_iter()
+        .find(|p| p.folders.contains(&here))
+        .map(|p| p.slug)
+}
+
 /// One dashboard page: everyone, one person, or one agent and its subagents,
-/// now or as it stood at a moment.
-fn page(
-    c: &Cfg,
-    k: &Keys,
-    r: &Route,
-    links: Option<&(String, String)>,
-    cache: &mut Cache,
-    tracker: &tracker::Tracker,
-) -> Result<String, String> {
+/// now or as it stood at a moment, within one project.
+fn page(c: &Cfg, k: &Keys, r: &Route, proj: &Project, cache: &mut Cache) -> Result<String, String> {
+    // The project's relay, not wherever `serve` happened to start.
+    let mut pc = c.clone();
+    pc.url = proj.url.clone();
+    let c = &pc;
+    let folder = proj.folders.first().cloned().unwrap_or_default();
+    let tracker = cache.tracker(&folder);
+    let links = cache.links(&folder);
     let now_t = now();
     let at = r.at.as_deref().map(|s| parse_at(s, now_t)).transpose()?;
-    // The first segment is the key-derived name and nothing else: a local
-    // label or a published alias would make a link mean one agent to you and
-    // another to whoever you send it to. The same rule as the tree and the
-    // feed, so every panel on the page agrees on who is in scope.
+    // The first segment after the project is the key-derived name and nothing
+    // else: a local label or a published alias would make a link mean one
+    // agent to you and another to whoever you send it to. The same rule as
+    // the tree and the feed, so every panel agrees on who is in scope.
     let scope = View {
         who: r.who.clone(),
         agent: r.agent.clone(),
         ..View::default()
     };
-    // This project unless every project was asked for: what other repos on
-    // this machine are doing is not this team's business. Anything addressed
-    // to this node is kept wherever it was asked.
-    let here = project();
-    let in_project = |p: &Plan| r.all || p.project == here || addressed_to_me(p, c);
+    // The codebases this project is worked in, by the names entries carry.
+    // Unless every project was asked for, what other repos on this machine
+    // are doing is not this team's business. Anything addressed to this node
+    // is kept wherever it was asked.
+    let names: Vec<String> = proj.folders.iter().map(|f| cache.project_at(f)).collect();
+    let here = names.first().cloned().unwrap_or_else(project);
+    let in_project = |p: &Plan| r.all || names.contains(&p.project) || addressed_to_me(p, c);
     let keep = |p: &Plan| in_project(p) && dash::in_scope(&scope, &p.pubkey, &p.instance);
 
     let all_posts = cache.posts(c, k);
@@ -4781,6 +5026,7 @@ fn page(
         oldest: epochs.first().copied(),
         epochs: epochs.clone(),
         all: r.all,
+        project: proj.slug.clone(),
     };
     let all_posts: Vec<Plan> = all_posts
         .into_iter()
@@ -4795,8 +5041,6 @@ fn page(
     .collect();
     let live: Vec<Plan> = all_live.iter().filter(|p| keep(p)).cloned().collect();
     let posts: Vec<Plan> = posts.into_iter().filter(|p| p.epoch <= t).collect();
-    // This machine's agents by the project their session appeared in. One
-    // from before projects were recorded is shown rather than guessed away.
     let (mut events, mut local) = local_spool(t);
     if !r.all {
         // What each session's start said, else the folder its hooks ran in.
@@ -4808,7 +5052,7 @@ fn page(
             .collect();
         tops.sort();
         tops.dedup();
-        let projects: std::collections::HashMap<String, Option<String>> = tops
+        let placed: std::collections::HashMap<String, Option<String>> = tops
             .into_iter()
             .map(|top| {
                 let p = activity::project_of(&events, &top)
@@ -4819,16 +5063,16 @@ fn page(
             .collect();
         let mine = |agent: &str| {
             let top = agent.split('/').next().unwrap_or("");
-            projects
+            placed
                 .get(top)
                 .cloned()
                 .flatten()
-                .is_none_or(|p| p == here)
+                .is_none_or(|p| names.contains(&p))
         };
         events.retain(|e| mine(&e.agent));
         local.retain(|(inst, _)| mine(inst));
     }
-    let plan = cache.plan();
+    let plan = cache.plan(&folder);
     let me = k.pubkey();
     let b = dash::Board {
         live: &live,
@@ -4839,9 +5083,10 @@ fn page(
         events: &events,
         me: &me,
         plan: plan.as_deref(),
-        tracker,
+        tracker: &tracker,
+        here: &here,
     };
-    Ok(render(&b, c, t, links, &view))
+    Ok(render(&b, c, t, links.as_ref(), &view))
 }
 
 fn esc(s: &str) -> String {
@@ -5043,6 +5288,7 @@ fn dashboard(
         me: "",
         plan: None,
         tracker: &tr,
+        here: "",
     };
     render(&b, c, t, links, view)
 }
@@ -5057,7 +5303,7 @@ fn render(
 ) -> String {
     let (live, posts) = (b.live, b.posts);
     let tr = b.tracker;
-    let here = project();
+    let here = b.here.to_string();
     // Every name on the page is a link to that agent's own page, at the same
     // moment — the byline and the path are the same string.
     let moment = view.moment();
@@ -5279,7 +5525,7 @@ fn render(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {refresh}<title>robofinger · {alias}</title>
 <style>{css}</style></head><body class="{body}">
-<header class=toolbar><span class=brand>robofinger</span><span class=pill>{folder}{here_e}</span><span class=spacer></span><span class=sub id=summary>{team} · {n} live claims across {np} repos</span>{switch}{mode}<span class=pill>{me_name} · {alias}</span></header>
+<header class=toolbar><a class=brand href="/" title="All projects">robofinger</a><span class=pill>{folder}{here_e}</span><span class=spacer></span><span class=sub id=summary>{team} · {n} live claims across {np} repos</span>{switch}{mode}<span class=pill>{me_name} · {alias}</span></header>
 <div class=crumbs>{nav}</div>
 <div class=workspace><main class=stage>{banner}<div class=stack>{ghosts}<div class=board id=board>
 <div class=side>
@@ -6490,6 +6736,73 @@ mod tests {
     }
 
     #[test]
+    fn projects_are_relays_named_by_their_room_or_first_folder() {
+        let dir = std::env::temp_dir().join(format!("rf-projects-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        register_in(&dir, Some("https://relay.example"), "/src/robofinger");
+        register_in(&dir, Some("https://relay.example/tooob"), "/src/org/tooob");
+        register_in(&dir, Some("https://relay.example"), "/src/robofinger-docs");
+        register_in(&dir, Some("https://other.example"), "/elsewhere/robofinger");
+        let ps = projects_in(&dir);
+        let slugs: Vec<&str> = ps.iter().map(|p| p.slug.as_str()).collect();
+        assert_eq!(slugs, ["robofinger", "tooob", "robofinger-2"]);
+        assert_eq!(
+            ps[0].folders,
+            ["/src/robofinger", "/src/robofinger-docs"],
+            "one relay, one project"
+        );
+        register_in(&dir, None, "/src/org/tooob");
+        assert_eq!(projects_in(&dir).len(), 2, "leaving removes it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_leads_the_address_and_old_addresses_redirect() {
+        let ps = vec![
+            Project {
+                slug: "robofinger".into(),
+                url: "u1".into(),
+                folders: vec!["/src/rf".into()],
+            },
+            Project {
+                slug: "tooob".into(),
+                url: "u2".into(),
+                folders: vec!["/src/tooob".into()],
+            },
+        ];
+        match resolve(
+            parse_route("/tooob/hazel-hare/claude-2/explore-1?at=2h").unwrap(),
+            &ps,
+            "/src/rf",
+        ) {
+            Resolved::Page(r, p) => {
+                assert_eq!(p.slug, "tooob");
+                assert_eq!(
+                    (r.who.as_deref(), r.agent.as_str(), r.at.as_deref()),
+                    (Some("hazel-hare"), "claude-2/explore-1", Some("2h"))
+                );
+            }
+            _ => panic!("a page in tooob"),
+        }
+        match resolve(
+            parse_route("/hazel-hare/claude-1?at=5").unwrap(),
+            &ps,
+            "/src/rf",
+        ) {
+            Resolved::Go(to) => assert_eq!(to, "/robofinger/hazel-hare/claude-1?at=5"),
+            _ => panic!("an old address redirects into this folder's project"),
+        }
+        assert!(matches!(
+            resolve(parse_route("/").unwrap(), &ps, "/src/rf"),
+            Resolved::List
+        ));
+        match resolve(parse_route("/").unwrap(), &ps[..1], "/src/rf") {
+            Resolved::Go(to) => assert_eq!(to, "/robofinger"),
+            _ => panic!("one project: straight to it"),
+        }
+    }
+
+    #[test]
     fn a_bare_name_joins_a_room_on_your_home_relay() {
         let home = || Ok("https://relay.example.com".to_string());
         assert_eq!(
@@ -6779,6 +7092,7 @@ mod tests {
             oldest: Some(t - 100),
             epochs: vec![t - 100, t, t + 60],
             all: false,
+            project: String::new(),
         };
         let html = dashboard(&[claim], &[], &cfg, t, None, &view);
         let me = name_for("pk-me");

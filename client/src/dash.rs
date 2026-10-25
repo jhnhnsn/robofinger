@@ -25,6 +25,9 @@ pub struct Board<'a> {
     pub me: &'a str,
     pub plan: Option<&'a [tracker::Group]>,
     pub tracker: &'a tracker::Tracker,
+    /// The codebase this project is chiefly worked in, by the name entries
+    /// carry: what the roadmap and the untracked list are about.
+    pub here: &'a str,
 }
 
 /// One agent on the page.
@@ -334,7 +337,8 @@ fn title(n: &Node) -> (String, bool) {
 /// progress, open, and done, folded away.
 pub fn tree(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
     let moment = view.moment();
-    let selected = view.path();
+    let base = view.base();
+    let selected = view.rel();
     let tops = |pk: &str| -> Vec<&Node> {
         let mine: Vec<&Node> = ns
             .iter()
@@ -368,9 +372,9 @@ pub fn tree(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
                 local_label(pk).unwrap_or_default()
             };
             let sel = if selected == format!("/{name}") { " sel" } else { "" };
-            let agents: String = tops(pk).iter().map(|n| block(n, &mine, b, t, &moment, &selected)).collect();
+            let agents: String = tops(pk).iter().map(|n| block(n, &mine, b, t, &base, &moment, &selected)).collect();
             format!(
-                r#"<div class=mach><a class="mrow{sel}" href="/{n}{moment}"><span class="av mac">{MAC}</span><span class=grow><span class=mname>{n}</span><span class=sub>{}</span></span><span class=sub>{}</span></a><div class=agents>{agents}</div></div>"#,
+                r#"<div class=mach><a class="mrow{sel}" href="{base}/{n}{moment}"><span class="av mac">{MAC}</span><span class=grow><span class=mname>{n}</span><span class=sub>{}</span></span><span class=sub>{}</span></a><div class=agents>{agents}</div></div>"#,
                 esc(&label),
                 summary(&count(&mine)),
                 n = esc(&name),
@@ -380,8 +384,17 @@ pub fn tree(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
 }
 
 /// One agent's row, and its subagents under it.
-fn block(n: &Node, all: &[&Node], b: &Board, t: i64, moment: &str, selected: &str) -> String {
-    let row = row(n, b, t, moment, selected);
+#[allow(clippy::too_many_arguments)]
+fn block(
+    n: &Node,
+    all: &[&Node],
+    b: &Board,
+    t: i64,
+    base: &str,
+    moment: &str,
+    selected: &str,
+) -> String {
+    let row = row(n, b, t, base, moment, selected);
     if n.instance.is_empty() {
         return format!("<div class=agent>{row}</div>");
     }
@@ -404,7 +417,7 @@ fn block(n: &Node, all: &[&Node], b: &Board, t: i64, moment: &str, selected: &st
     } else {
         running
             .iter()
-            .map(|k| block(k, all, b, t, moment, selected))
+            .map(|k| block(k, all, b, t, base, moment, selected))
             .collect()
     };
     let done_html = if done.is_empty() {
@@ -415,7 +428,7 @@ fn block(n: &Node, all: &[&Node], b: &Board, t: i64, moment: &str, selected: &st
             esc(&n.path()),
             done.len(),
             done.iter()
-                .map(|k| block(k, all, b, t, moment, selected))
+                .map(|k| block(k, all, b, t, base, moment, selected))
                 .collect::<String>()
         )
     };
@@ -425,7 +438,7 @@ fn block(n: &Node, all: &[&Node], b: &Board, t: i64, moment: &str, selected: &st
     )
 }
 
-fn row(n: &Node, b: &Board, t: i64, moment: &str, selected: &str) -> String {
+fn row(n: &Node, b: &Board, t: i64, base: &str, moment: &str, selected: &str) -> String {
     let path = n.path();
     let l = line(n, t);
     let sub = n.instance.contains('/');
@@ -444,7 +457,7 @@ fn row(n: &Node, b: &Board, t: i64, moment: &str, selected: &str) -> String {
         .map(|(k, _)| format!("<span class=tk>{}</span>", esc(&k)))
         .unwrap_or_default();
     format!(
-        r#"<a class="arow{}{}{}" data-agent="{p}" href="/{p}{moment}"><span class="av{}">{}</span><span class=grow><span class="aname{}">{}</span>{id}<span class=astat>{}</span></span>{ticket}</a>"#,
+        r#"<a class="arow{}{}{}" data-agent="{p}" href="{base}/{p}{moment}"><span class="av{}">{}</span><span class=grow><span class="aname{}">{}</span>{id}<span class=astat>{}</span></span>{ticket}</a>"#,
         if selected == format!("/{path}") {
             " sel"
         } else {
@@ -465,6 +478,7 @@ fn row(n: &Node, b: &Board, t: i64, moment: &str, selected: &str) -> String {
 /// machine, and everything on the timeline.
 pub fn feed(b: &Board, t: i64, view: &View) -> String {
     let moment = view.moment();
+    let base = view.base();
     let label = |inst: &str| {
         b.local
             .iter()
@@ -508,7 +522,7 @@ pub fn feed(b: &Board, t: i64, view: &View) -> String {
         .take(16)
         .map(|(e, path, text)| {
             format!(
-                r#"<div class=ev><span class=tm>{}</span><span class=grow><a class=evwho href="/{p}{moment}">{p}</a> {}</span></div>"#,
+                r#"<div class=ev><span class=tm>{}</span><span class=grow><a class=evwho href="{base}/{p}{moment}">{p}</a> {}</span></div>"#,
                 when(*e, t),
                 esc(&truncate(text, 140)),
                 p = esc(path),
@@ -617,7 +631,8 @@ pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
             esc(&path)
         );
     };
-    let link = |p: &str| format!(r#"<a href="/{p}{moment}">{p}</a>"#, p = esc(p));
+    let base = view.base();
+    let link = |p: &str| format!(r#"<a href="{base}/{p}{moment}">{p}</a>"#, p = esc(p));
     let mut facts: Vec<(&str, String)> = Vec::new();
     if let Some(cl) = n.claim {
         facts.push(("Task", esc(&cl.task)));
@@ -730,6 +745,7 @@ pub fn plan(
     here: &str,
 ) -> String {
     let moment = view.moment();
+    let base = view.base();
     let working_on = |key: &str| -> Vec<&Node> {
         ns.iter()
             .filter(|n| {
@@ -740,7 +756,7 @@ pub fn plan(
     };
     let who_html = |n: &Node| {
         format!(
-            r#"<div class=who><a href="/{p}{moment}">{p}</a> {}</div>"#,
+            r#"<div class=who><a href="{base}/{p}{moment}">{p}</a> {}</div>"#,
             line_html(&line(n, t), t),
             p = esc(&n.path())
         )
@@ -942,6 +958,36 @@ pub fn switch(view: &View, here: &str) -> String {
     )
 }
 
+/// The front page when there is more than one project: one card each.
+pub fn project_list(ps: &[Project]) -> String {
+    let cards: String = if ps.is_empty() {
+        r#"<section class=card><p class=none>No projects yet. In a folder you want shared, run <code>robofinger join &lt;name&gt;</code>.</p></section>"#.into()
+    } else {
+        ps.iter()
+            .map(|p| {
+                let folders: String = p
+                    .folders
+                    .iter()
+                    .map(|f| format!("<div class=\"sub mono\">{}</div>", esc(f)))
+                    .collect();
+                format!(
+                    r#"<a class="card proj" href="/{s}"><span class="av mac">{FOLDER}</span><span class=grow><span class=big>{s}</span><span class="sub mono">{}</span>{folders}</span></a>"#,
+                    esc(&p.url),
+                    s = esc(&p.slug),
+                )
+            })
+            .collect()
+    };
+    format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>robofinger · projects</title><style>{CSS}
+.projects{{max-width:760px;margin:24px auto;padding:0 16px}}.proj{{display:flex;gap:14px;align-items:flex-start;color:inherit}}.proj:hover{{text-decoration:none;border-color:var(--accent)}}</style></head><body>
+<header class=toolbar><span class=brand>robofinger</span><span class=spacer></span><span class=sub>{} project{}</span></header>
+<main class=projects><p class=eyebrow>Projects you have joined</p>{cards}</main></body></html>"#,
+        ps.len(),
+        if ps.len() == 1 { "" } else { "s" },
+    )
+}
+
 pub fn folder() -> &'static str {
     FOLDER
 }
@@ -1031,7 +1077,7 @@ body.past{background:var(--pastbg)}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 code,.mono{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:12px}
 .toolbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 24px;background:var(--glass);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--line)}
-.brand{font-weight:600;font-size:17px;letter-spacing:-.01em}
+.brand{font-weight:600;font-size:17px;letter-spacing:-.01em;color:var(--fg)}.brand:hover{text-decoration:none}
 .spacer{flex:1}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;background:var(--panel);border:1px solid var(--line);font-size:13px}
 .live{color:var(--done)}.live .dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 2s ease-in-out infinite}
@@ -1197,6 +1243,7 @@ mod tests {
             me,
             plan: None,
             tracker: &tr,
+            here: "",
         };
         let ns = nodes(&b, 100);
         let cfg = Cfg {

@@ -319,6 +319,15 @@ every row names one — derived name, session slot, and your local label.
 
 ### Every name is an address
 
+Addresses start with the project: `/tooob/hazel-hare/claude-1/explore-2`. One
+`serve` shows every project this machine has joined, recorded as folders join,
+so it does not matter which folder it was started in. `/` lists the projects,
+or goes straight to the only one. An address from before projects were in URLs
+redirects to the same agent in the project of the folder `serve` started in.
+The project is part of the page's address, not of the agent's name: session
+slots are unique per machine across projects, so `hazel-hare/claude-2` is one
+agent wherever it works.
+
 The byline is already a path — `hazel-hare/claude-1/explore-2`, a subagent
 under its parent — so the page uses it as one: `/hazel-hare/claude-1` is that
 agent and everything under it, and every name on the page links there. The
