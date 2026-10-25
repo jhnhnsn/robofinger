@@ -24,9 +24,15 @@ const MAX_BODY = 16 * 1024;
 // namespace, and a team past this size is not a team any more.
 const MAX_AGENTS_PER_NS = 200;
 
-// Writes per publisher per minute. A publish happens on task boundaries, not
-// per keystroke, so single digits is normal and 30 is a wide margin.
+// Writes per publisher: a bucket that holds WRITE_BURST and drains at
+// WRITES_PER_MIN. A publish happens on task boundaries, not per keystroke, so
+// one agent's sustained rate is single digits and 30 a minute is a wide
+// margin. But every agent of a person writes on one key, and a session that
+// hands work to a swarm of subagents claims and releases in bursts — four
+// writes per subagent, all at once. The burst is for that; the long-run bound
+// on abuse is the drain rate, which is what the old per-minute window was.
 const WRITES_PER_MIN = 30;
+const WRITE_BURST = 120;
 
 // Posts are append-only, so unlike plans they need their own bound.
 const MAX_POSTS_PER_KEY = 500;
@@ -42,6 +48,12 @@ const MAX_PLANS_PER_INSTANCE = 3;
 /// Without this bound a `plans` fetch grows with lifetime session count.
 /// Retired instances are dropped oldest-first by their newest claim.
 const MAX_INSTANCES_PER_KEY = 10;
+/// Subagent instances kept per identity, counted apart from the sessions
+/// above. A subagent's instance nests under its parent's (`claude-1/explore-2`),
+/// so the relay can tell them apart without reading anything. Ranked against
+/// sessions, a swarm of newer subagents would evict the quiet session that
+/// spawned it — whose live claim the swarm is working under.
+const MAX_SUBAGENTS_PER_KEY = 30;
 const DEFAULT_POST_LIMIT = 20;
 const MAX_POST_LIMIT = 100;
 
@@ -156,40 +168,41 @@ async function readEnvelope(pubkey, request) {
   return { env, seq, instance };
 }
 
-/// Sliding-window write limit per publisher. Returns a Response when over
-/// budget, otherwise null.
+/// Write limit per publisher, as a draining bucket. Returns a Response when
+/// over budget, otherwise null.
 ///
-/// Not atomic — two simultaneous writes can both read the same count. That is
-/// acceptable: this bounds sustained abuse, and being off by one occasionally
-/// costs nothing. Making it exact would need a transaction on the hot path.
+/// `count` is the bucket's level in sixtieths of a write as of `window_start`,
+/// so draining WRITES_PER_MIN writes a minute is WRITES_PER_MIN units a second
+/// — exact in integers. One upsert reads the level, drains it, and adds this
+/// write only if it still fits, so two simultaneous writes cannot both squeeze
+/// into the last slot. A refused write changes nothing. test_rate.sh pins it.
 async function rateLimit(db, ns, pubkey) {
   const now = Math.floor(Date.now() / 1000);
+  const fits = await db
+    .prepare(
+      `INSERT INTO writes(ns,pubkey,window_start,count) VALUES(?1,?2,?3,60)
+       ON CONFLICT(ns,pubkey) DO UPDATE SET
+         count = MAX(0, count - (excluded.window_start - window_start) * ?4) + 60,
+         window_start = excluded.window_start
+       WHERE MAX(0, count - (excluded.window_start - window_start) * ?4) + 60 <= ?5
+       RETURNING count`,
+    )
+    .bind(ns, pubkey, now, WRITES_PER_MIN, WRITE_BURST * 60)
+    .first();
+  if (fits) return null;
+
   const row = await db
     .prepare("SELECT window_start, count FROM writes WHERE ns=? AND pubkey=?")
     .bind(ns, pubkey)
     .first();
-
-  if (row && now - row.window_start < 60) {
-    if (row.count >= WRITES_PER_MIN) {
-      return json(
-        { error: "rate limit exceeded", retry_after: 60 - (now - row.window_start) },
-        429,
-      );
-    }
-    await db
-      .prepare("UPDATE writes SET count = count + 1 WHERE ns=? AND pubkey=?")
-      .bind(ns, pubkey)
-      .run();
-  } else {
-    await db
-      .prepare(
-        `INSERT INTO writes(ns,pubkey,window_start,count) VALUES(?,?,?,1)
-         ON CONFLICT(ns,pubkey) DO UPDATE SET window_start=excluded.window_start, count=1`,
-      )
-      .bind(ns, pubkey, now)
-      .run();
-  }
-  return null;
+  const level = Math.max(0, row.count - (now - row.window_start) * WRITES_PER_MIN);
+  return json(
+    {
+      error: "rate limit exceeded",
+      retry_after: Math.max(1, Math.ceil((level + 60 - WRITE_BURST * 60) / WRITES_PER_MIN)),
+    },
+    429,
+  );
 }
 
 /// `from` is an optional comma-separated allowlist of pubkeys.
@@ -370,14 +383,20 @@ async function putPlan(db, ns, pubkey, request) {
   // it counts how often an agent has published rather than how recently. That
   // would rank a fresh tab below a retired chatty one and evict the row just
   // written. epoch is wall-clock and comparable across instances.
+  //
+  // Sessions and subagents are capped and ranked apart, and only the class
+  // just written to can have grown past its cap. test_trim.sh pins both.
+  const [cls, cap] = instance.includes("/")
+    ? ["LIKE '%/%'", MAX_SUBAGENTS_PER_KEY]
+    : ["NOT LIKE '%/%'", MAX_INSTANCES_PER_KEY];
   await db
     .prepare(
-      `DELETE FROM plans WHERE ns=? AND pubkey=? AND instance NOT IN (
-         SELECT instance FROM plans WHERE ns=? AND pubkey=?
+      `DELETE FROM plans WHERE ns=? AND pubkey=? AND instance ${cls} AND instance NOT IN (
+         SELECT instance FROM plans WHERE ns=? AND pubkey=? AND instance ${cls}
          GROUP BY instance ORDER BY MAX(epoch) DESC LIMIT ?
        )`,
     )
-    .bind(ns, pubkey, ns, pubkey, MAX_INSTANCES_PER_KEY)
+    .bind(ns, pubkey, ns, pubkey, cap)
     .run();
 
   return json({ ok: true, seq });

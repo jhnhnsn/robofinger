@@ -15,7 +15,8 @@
 -- `robofinger` shows -- and to the most recently active instances per
 -- (ns, pubkey). The second bound matters because since 0.3 every session gets
 -- its own instance automatically, so instances are retired steadily and the
--- per-instance trim never touches them.
+-- per-instance trim never touches them. Subagent instances (`claude-1/explore-2`)
+-- are capped apart from sessions, so a swarm cannot evict its own parent.
 CREATE TABLE IF NOT EXISTS plans (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   ns       TEXT NOT NULL,
@@ -53,7 +54,9 @@ CREATE TABLE IF NOT EXISTS forwards (
   PRIMARY KEY (ns, pubkey)
 );
 
--- Fixed-size sliding window per publisher; never grows beyond `plans`.
+-- Write bucket per publisher: `count` is its level, in sixtieths of a write,
+-- as of `window_start` (see rateLimit). One row per publisher, so it never
+-- grows beyond `plans`. The column names are from when it was a fixed window.
 CREATE TABLE IF NOT EXISTS writes (
   ns           TEXT NOT NULL,
   pubkey       TEXT NOT NULL,

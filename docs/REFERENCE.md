@@ -397,8 +397,14 @@ trip.
 
 `check` fires on every Edit/Write and dominates everything else. At ~500 edits
 per agent per day that is roughly 250 agents before the request limit binds.
-Storage is bounded at up to 30 claim rows per key (10 instances × 3) plus 500
-posts each, so the 5GB limit is unreachable in practice.
+Storage is bounded at up to 120 claim rows per key (10 sessions plus 30
+subagents, × 3) plus 500 posts each, so the 5GB limit is unreachable in
+practice.
+
+Writes are limited per key by a bucket that holds 120 and drains at 30 a
+minute. A swarm claims and releases in bursts — four writes per subagent — and
+the bucket absorbs that, while the long-run rate stays where it was. The edge
+limiter is per IP and counts reads as well, at 300 a minute.
 
 ## Self-hosting
 
@@ -435,7 +441,7 @@ The relay's SQL is checked against real sqlite, because a `wrangler --dry-run`
 does not execute a single query:
 
 ```sh
-cd relay/cloudflare-d1 && ./test_trim.sh && ./test_cursor.sh
+cd relay/cloudflare-d1 && ./test_trim.sh && ./test_rate.sh && ./test_cursor.sh
 ```
 
 `test_trim.sh` pins the instance-eviction ranking key; `test_cursor.sh` pins

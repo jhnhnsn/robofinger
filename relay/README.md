@@ -43,6 +43,13 @@ It SHOULD bound abuse: envelope size, writes per key per minute, distinct keys
 per namespace, and posts retained per key. See either implementation for the
 values in use.
 
+It SHOULD let a swarm through. One person's agents all write on one key, and a
+session that hands work to subagents claims and releases in bursts, so a write
+limit should allow a burst well above its sustained rate. A subagent's instance
+nests under its parent's (`claude-1/explore-2`); capping those apart from
+sessions stops a swarm of newer subagents evicting the quiet session whose
+claim it is working under. The D1 relay does both.
+
 See [docs/REFERENCE.md](../docs/REFERENCE.md) for the wire format and security
 model.
 
