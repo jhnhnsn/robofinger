@@ -36,6 +36,9 @@ pub struct Event {
     /// Where the hook ran: the session's folder. What places a session in a
     /// project when it started before its `appear` could say.
     pub cwd: String,
+    /// Why, in the agent's own words: the description a tool call carries
+    /// (Claude Code's Bash requires one), or the to-do item it is on.
+    pub why: String,
 }
 
 pub fn dir(home: &Path) -> PathBuf {
@@ -61,6 +64,9 @@ pub fn append(dir: &Path, e: &Event) {
     }
     if !e.cwd.is_empty() {
         line["cwd"] = e.cwd.clone().into();
+    }
+    if !e.why.is_empty() {
+        line["why"] = e.why.clone().into();
     }
     let _ = std::fs::create_dir_all(dir);
     // One short write with O_APPEND: concurrent hooks interleave whole lines.
@@ -129,6 +135,7 @@ pub fn read(dir: &Path) -> Vec<Event> {
                 target: s("target"),
                 project: s("project"),
                 cwd: s("cwd"),
+                why: s("why"),
             });
         }
     }
@@ -138,7 +145,7 @@ pub fn read(dir: &Path) -> Vec<Event> {
 
 /// The tool and what it was pointed at, from PreToolUse input. Short, and with
 /// paths made relative to the repo, because it is shown in a status line.
-pub fn describe(input: &serde_json::Value) -> (String, String) {
+pub fn describe(input: &serde_json::Value) -> (String, String, String) {
     let tool = input
         .get("tool_name")
         .and_then(|v| v.as_str())
@@ -169,7 +176,38 @@ pub fn describe(input: &serde_json::Value) -> (String, String) {
         "WebSearch" => arg("query").map(String::from),
         _ => None,
     };
-    (tool, short(&target.unwrap_or_default(), 72))
+    // The agent's own account of the call. Bash requires one; the Agent
+    // tool's is already the target.
+    let why = match tool.as_str() {
+        "Task" | "Agent" => "",
+        _ => arg("description").unwrap_or(""),
+    };
+    (
+        tool,
+        short(&target.unwrap_or_default(), 72),
+        short(why.trim(), 72),
+    )
+}
+
+/// What a to-do list update says the agent is now on: the in-progress item,
+/// as Claude Code words it under its input box ("Adding the project
+/// segment"). Some("") when the list has nothing in progress, which clears
+/// it; None when this is not a to-do update at all.
+pub fn todo_intent(input: &serde_json::Value) -> Option<String> {
+    if input.get("tool_name").and_then(|v| v.as_str()) != Some("TodoWrite") {
+        return None;
+    }
+    let todos = input.pointer("/tool_input/todos")?.as_array()?;
+    let now = todos
+        .iter()
+        .find(|t| t.get("status").and_then(|v| v.as_str()) == Some("in_progress"))
+        .and_then(|t| {
+            t.get("activeForm")
+                .or_else(|| t.get("content"))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("");
+    Some(short(now.trim(), 90))
 }
 
 fn short(s: &str, max: usize) -> String {
@@ -201,13 +239,25 @@ pub struct Status {
     /// What the agent's parent called it when starting it, for subagents
     /// whose tool records that; empty otherwise.
     pub label: String,
+    /// Why it is doing what it is doing right now: the current tool call's
+    /// description. Empty when the call carried none.
+    pub why: String,
+    /// What it is on, from its to-do list. Empty when it keeps none, or has
+    /// nothing in progress.
+    pub intent: String,
 }
 
 /// An agent's current status from its own events, oldest first. None when it
 /// has none since it last appeared.
 pub fn status(events: &[&Event]) -> Option<Status> {
     let from = events.iter().rposition(|e| e.kind == "appear").unwrap_or(0);
-    let last = events.get(from..)?.last()?;
+    // A to-do change says what the agent is on, not what it is doing: the
+    // state comes from the last thing it did.
+    let last = events
+        .get(from..)?
+        .iter()
+        .rev()
+        .find(|e| e.kind != "intent")?;
     let (state, text) = match last.kind.as_str() {
         "tool" => (State::Working, doing(&last.tool, &last.target)),
         "waiting" if !last.target.is_empty() => {
@@ -225,11 +275,24 @@ pub fn status(events: &[&Event]) -> Option<Status> {
         .find(|e| e.kind == "appear" && !e.target.is_empty())
         .map(|e| label_from(&e.target))
         .unwrap_or_default();
+    let why = if last.kind == "tool" {
+        last.why.clone()
+    } else {
+        String::new()
+    };
+    let intent = events[from..]
+        .iter()
+        .rev()
+        .find(|e| e.kind == "intent")
+        .map(|e| e.target.clone())
+        .unwrap_or_default();
     Some(Status {
         state,
         text,
         since: last.t,
         label,
+        why,
+        intent,
     })
 }
 
@@ -306,6 +369,7 @@ mod tests {
             target: target.into(),
             project: String::new(),
             cwd: String::new(),
+            why: String::new(),
         }
     }
 
@@ -448,15 +512,62 @@ mod tests {
         });
         assert_eq!(
             describe(&input),
-            ("Edit".into(), "client/src/main.rs".into())
+            ("Edit".into(), "client/src/main.rs".into(), String::new())
         );
         let input = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": format!("cargo test {}\necho done", "x".repeat(100)) }
         });
-        let (_, target) = describe(&input);
+        let (_, target, _) = describe(&input);
         assert!(
             target.starts_with("cargo test") && target.ends_with('…') && !target.contains("echo")
+        );
+    }
+
+    #[test]
+    fn an_agent_says_why_and_what_it_is_on() {
+        let bash = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "cargo test -q", "description": "Run the test suite" }
+        });
+        assert_eq!(describe(&bash).2, "Run the test suite");
+        let todo = serde_json::json!({
+            "tool_name": "TodoWrite",
+            "tool_input": { "todos": [
+                { "content": "Fix fmt", "status": "completed", "activeForm": "Fixing fmt" },
+                { "content": "Add the project segment", "status": "in_progress", "activeForm": "Adding the project segment" }
+            ]}
+        });
+        assert_eq!(
+            todo_intent(&todo).as_deref(),
+            Some("Adding the project segment")
+        );
+        assert_eq!(todo_intent(&bash), None, "not a to-do update");
+
+        let mut tool = ev(3, "a", "tool", "Bash", "cargo test -q");
+        tool.why = "Run the test suite".into();
+        let es = [
+            ev(1, "a", "appear", "", ""),
+            ev(2, "a", "intent", "", "Adding the project segment"),
+            tool,
+        ];
+        let refs: Vec<&Event> = es.iter().collect();
+        let s = status(&refs).unwrap();
+        assert_eq!(
+            (s.why.as_str(), s.intent.as_str()),
+            ("Run the test suite", "Adding the project segment")
+        );
+        assert_eq!(s.text, "Running cargo test -q");
+
+        let es = [
+            ev(1, "a", "tool", "Edit", "x"),
+            ev(2, "a", "intent", "", "Next thing"),
+        ];
+        let refs: Vec<&Event> = es.iter().collect();
+        assert_eq!(
+            status(&refs).unwrap().since,
+            1,
+            "a to-do change is not an action"
         );
     }
 }

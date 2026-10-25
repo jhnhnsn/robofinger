@@ -2430,6 +2430,11 @@ fn is_hook(cmd: &str) -> bool {
 
 /// Note what an agent just did in this machine's activity spool. No network.
 fn spool(agent: &str, kind: &str, tool: &str, target: &str) {
+    spool_why(agent, kind, tool, target, "");
+}
+
+/// `spool`, with the agent's own account of why.
+fn spool_why(agent: &str, kind: &str, tool: &str, target: &str, why: &str) {
     activity::append(
         &activity::dir(&crypto::config_dir()),
         &activity::Event {
@@ -2440,6 +2445,7 @@ fn spool(agent: &str, kind: &str, tool: &str, target: &str) {
             target: target.into(),
             project: String::new(),
             cwd: here_dir(),
+            why: why.into(),
         },
     );
 }
@@ -2464,6 +2470,7 @@ fn spool_appear(agent: &str, project: &str) {
             target: String::new(),
             project: project.into(),
             cwd: here_dir(),
+            why: String::new(),
         },
     );
 }
@@ -3316,8 +3323,12 @@ fn main() {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if !tool.is_empty() {
-                let (tool, target) = activity::describe(&input);
-                spool(&c.instance, "tool", &tool, &target);
+                let (tool, target, why) = activity::describe(&input);
+                spool_why(&c.instance, "tool", &tool, &target, &why);
+                // A to-do update is the agent saying what it is on now.
+                if let Some(intent) = activity::todo_intent(&input) {
+                    spool(&c.instance, "intent", "", &intent);
+                }
             }
             if !tool.is_empty() && tool != "Bash" && !edits(tool) {
                 std::process::exit(0);
@@ -4309,6 +4320,7 @@ fn status_line(s: &activity::Status, t: i64) -> String {
     use activity::State::*;
     let for_ = dur(t - s.since);
     match s.state {
+        Working | Thinking if !s.why.is_empty() => format!("✻ {} ({}) · {for_}", s.why, s.text),
         Working | Thinking => format!("✻ {} · {for_}", s.text),
         NeedsYou | YourTurn => format!("‖ {} · {for_}", s.text),
         Done | Gone => format!("✓ {} · {}", s.text, ago(t - s.since)),

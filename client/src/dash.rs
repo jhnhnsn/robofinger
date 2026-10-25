@@ -132,6 +132,9 @@ struct Line {
     /// The tone: work, wait, done, hold or quiet.
     tone: &'static str,
     text: String,
+    /// The command behind `text`, shown quieter beside it, when `text` is
+    /// the agent's own account of why it is running.
+    cmd: String,
     since: Option<i64>,
     /// Words either side of the ticking duration: "idle 3m", "3m ago".
     pre: &'static str,
@@ -146,10 +149,17 @@ fn line(n: &Node, t: i64) -> Line {
             NeedsYou | YourTurn => (Icon::Wait, "wait", ""),
             Done | Gone => (Icon::Done, "done", " ago"),
         };
+        // Why first, in the agent's words; what, beside it.
+        let (text, cmd) = if s.why.is_empty() {
+            (s.text.clone(), String::new())
+        } else {
+            (s.why.clone(), s.text.clone())
+        };
         return Line {
             icon,
             tone,
-            text: s.text.clone(),
+            text,
+            cmd,
             since: Some(s.since),
             pre: "",
             post,
@@ -161,6 +171,7 @@ fn line(n: &Node, t: i64) -> Line {
             icon: Icon::Hold,
             tone: if quiet { "quiet" } else { "hold" },
             text: format!("holds {}", c.touching.join(" ")),
+            cmd: String::new(),
             since: Some(c.epoch),
             pre: if quiet { "quiet " } else { "idle " },
             post: "",
@@ -180,6 +191,7 @@ fn line(n: &Node, t: i64) -> Line {
                     _ => "last seen",
                 }
                 .into(),
+                cmd: String::new(),
                 since: Some(l.epoch),
                 pre: "",
                 post: " ago",
@@ -189,6 +201,7 @@ fn line(n: &Node, t: i64) -> Line {
             icon: Icon::Hold,
             tone: "hold",
             text: String::new(),
+            cmd: String::new(),
             since: None,
             pre: "",
             post: "",
@@ -224,8 +237,13 @@ fn line_html(l: &Line, t: i64) -> String {
         ),
         None => String::new(),
     };
+    let cmd = if l.cmd.is_empty() {
+        String::new()
+    } else {
+        format!(" <span class=cmd>{}</span>", esc(&l.cmd))
+    };
     format!(
-        r#"<span class="st t-{}">{} <span>{}{when}</span></span>"#,
+        r#"<span class="st t-{}">{} <span>{}{cmd}{when}</span></span>"#,
         l.tone,
         icon_html(l.icon),
         esc(&l.text)
@@ -453,6 +471,15 @@ fn row(n: &Node, b: &Board, t: i64, base: &str, moment: &str, selected: &str) ->
     } else {
         String::new()
     };
+    // What it is on: its to-do item, else what it claimed for. The line a
+    // person reads to know why the status below it is happening.
+    let intent = n
+        .status
+        .map(|s| s.intent.clone())
+        .filter(|i| !i.is_empty())
+        .or_else(|| n.claim.map(|c| c.task.clone()).filter(|t| !t.is_empty()))
+        .map(|i| format!("<span class=intent>{}</span>", esc(&truncate(&i, 110))))
+        .unwrap_or_default();
     // A claim in someone else's area, per the working agreement: shown, never
     // refused. A claimed glob is placed by what precedes its first wildcard.
     let area = n
@@ -476,7 +503,7 @@ fn row(n: &Node, b: &Board, t: i64, base: &str, moment: &str, selected: &str) ->
         .map(|(k, _)| format!("<span class=tk>{}</span>", esc(&k)))
         .unwrap_or_default();
     format!(
-        r#"<a class="arow{}{}{}" data-agent="{p}" href="{base}/{p}{moment}"><span class="av{}">{}</span><span class=grow><span class="aname{}">{}</span>{id}<span class=astat>{}</span></span>{area}{ticket}</a>"#,
+        r#"<a class="arow{}{}{}" data-agent="{p}" href="{base}/{p}{moment}"><span class="av{}">{}</span><span class=grow><span class="aname{}">{}</span>{id}{intent}<span class=astat>{}</span></span>{area}{ticket}</a>"#,
         if selected == format!("/{path}") {
             " sel"
         } else {
@@ -653,6 +680,13 @@ pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
     let base = view.base();
     let link = |p: &str| format!(r#"<a href="{base}/{p}{moment}">{p}</a>"#, p = esc(p));
     let mut facts: Vec<(&str, String)> = Vec::new();
+    if let Some(i) = n
+        .status
+        .map(|s| s.intent.as_str())
+        .filter(|i| !i.is_empty())
+    {
+        facts.push(("Now on", esc(i)));
+    }
     if let Some(cl) = n.claim {
         facts.push(("Task", esc(&cl.task)));
         let ticket = ticket_html(&cl.task, b.tracker);
@@ -701,7 +735,12 @@ pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
             .take(12)
             .map(|e| {
                 let text = match e.kind.as_str() {
+                    "tool" if !e.why.is_empty() => {
+                        format!("{} — {}", e.why, activity::doing(&e.tool, &e.target))
+                    }
                     "tool" => activity::doing(&e.tool, &e.target),
+                    "intent" if !e.target.is_empty() => format!("On to: {}", e.target),
+                    "intent" => "Finished its to-do list".into(),
                     "idle" => "Thinking".into(),
                     "prompt" => "New prompt from its person".into(),
                     "waiting" if !e.target.is_empty() => format!("Needs you: {}", e.target),
@@ -771,7 +810,7 @@ pub fn agreement_panel(b: &Board) -> String {
                 format!("{} <span class=sub>({})</span>", esc(&ar.owner), esc(&ar.person))
             };
             format!(
-                "<div class=item><span class=grow><span class=pname>{who}</span><span class=pabout>{}</span><code>{}</code></span></div>",
+                "<div class=item><span class=grow><span class=pname>{who}</span><div class=pabout>{}</div><div><code>{}</code></div></span></div>",
                 esc(&ar.about),
                 esc(&ar.globs.join("  "))
             )
@@ -1223,6 +1262,8 @@ details.done[open]>summary.grp::before{transform:rotate(45deg)}
 .count{font-weight:500;letter-spacing:0;background:var(--line);border-radius:999px;padding:0 7px;text-transform:none}
 .quiet{margin:2px 0 6px 10px;font-size:12px;color:var(--fg2)}
 .tk{font-size:12px;color:var(--accent);font-weight:500;flex:none}
+.intent{font-size:13px;color:var(--fg);margin:1px 0 2px}
+.cmd{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:11px;color:var(--fg2);opacity:.85}
 .inarea{font-size:11px;font-weight:500;padding:1px 8px;border-radius:999px;background:var(--waitbg);color:var(--wait);white-space:nowrap;flex:none}
 .st{display:inline-flex;align-items:center;gap:6px;color:var(--fg2)}
 .t-work{color:var(--accent)}.t-wait{color:var(--wait)}.t-done{color:var(--done)}.t-quiet{color:var(--bad)}
@@ -1290,6 +1331,8 @@ mod tests {
             text: "Done".into(),
             since,
             label: label.into(),
+            why: String::new(),
+            intent: String::new(),
         }
     }
 
