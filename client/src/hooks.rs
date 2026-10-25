@@ -362,12 +362,12 @@ fn already_installed(settings: &serde_json::Value) -> bool {
                     entries.iter().any(|e| {
                         e.get("matcher") == matcher
                             && e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
-                            hs.iter().any(|h| {
-                                h.get("command")
-                                    .and_then(|c| c.as_str())
-                                    .is_some_and(|c| c.contains("robofinger"))
+                                hs.iter().any(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .is_some_and(|c| c.contains("robofinger"))
+                                })
                             })
-                        })
                     })
                 })
         })
@@ -502,10 +502,7 @@ mod tests {
         let partial = serde_json::json!({
             "hooks": { "SessionStart": [{"hooks":[{"command":"robofinger start"}]}] }
         });
-        assert!(
-            !already_installed(&partial),
-            "one event is not an install"
-        );
+        assert!(!already_installed(&partial), "one event is not an install");
 
         let full = serde_json::json!({ "hooks": hook_json("robofinger") });
         assert!(already_installed(&full));
@@ -606,7 +603,10 @@ mod tests {
         assert!(s.contains("/opt/bin/robofinger subagent-start"));
         assert!(s.contains("/opt/bin/robofinger subagent-stop"));
         assert!(s.contains("/opt/bin/robofinger activity stop"));
-        assert_eq!(h["PreToolUse"][0]["matcher"], "*", "every tool feeds the activity spool");
+        assert_eq!(
+            h["PreToolUse"][0]["matcher"], "*",
+            "every tool feeds the activity spool"
+        );
     }
 
     /// An install from before the activity spool hooks edits and Bash only.

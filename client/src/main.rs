@@ -492,7 +492,11 @@ fn join_in(root: &std::path::Path, url: &str) -> std::io::Result<std::path::Path
         let ignore = root.join(".gitignore");
         let body = std::fs::read_to_string(&ignore).unwrap_or_default();
         if !body.lines().any(|l| l.trim() == ".robofinger.local") {
-            let sep = if body.is_empty() || body.ends_with('\n') { "" } else { "\n" };
+            let sep = if body.is_empty() || body.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
             std::fs::write(&ignore, format!("{body}{sep}.robofinger.local\n"))?;
         }
     }
@@ -520,7 +524,10 @@ fn without_url(path: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .filter(|l| l.split_once('=').is_none_or(|(k, _)| k.trim() != "ROBOFINGER_URL"))
+        .filter(|l| {
+            l.split_once('=')
+                .is_none_or(|(k, _)| k.trim() != "ROBOFINGER_URL")
+        })
         .map(String::from)
         .collect()
 }
@@ -728,11 +735,7 @@ fn agent_kind(agent_type: &str) -> String {
     while out.ends_with('-') {
         out.pop();
     }
-    if out.is_empty() {
-        "agent".into()
-    } else {
-        out
-    }
+    if out.is_empty() { "agent".into() } else { out }
 }
 
 /// An id the tool generated, accepted only as a plain token: it is spliced
@@ -740,7 +743,8 @@ fn agent_kind(agent_type: &str) -> String {
 fn plain_token(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// The subagent a hook fired in, as (kind, id), or None in the main
@@ -748,7 +752,10 @@ fn plain_token(s: &str) -> bool {
 /// only from inside a subagent.
 fn hook_subagent(input: &serde_json::Value) -> Option<(String, String)> {
     let id = input.get("agent_id")?.as_str().filter(|s| plain_token(s))?;
-    let kind = input.get("agent_type").and_then(|v| v.as_str()).unwrap_or("");
+    let kind = input
+        .get("agent_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     Some((agent_kind(kind), id.to_string()))
 }
 
@@ -830,9 +837,9 @@ fn tag_robofinger(cmd: &str, tag: &str) -> Option<String> {
                 let start = i;
                 i = word_end(i);
                 let word = &cmd[start..i];
-                let assignment = word
-                    .split_once('=')
-                    .is_some_and(|(k, _)| !k.is_empty() && k.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'));
+                let assignment = word.split_once('=').is_some_and(|(k, _)| {
+                    !k.is_empty() && k.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                });
                 if command_position && word.rsplit('/').next() == Some("robofinger") {
                     // After the subcommand, when one follows.
                     let mut j = i;
@@ -2133,7 +2140,9 @@ fn nested_in(child: &str, parent: &str) -> bool {
 /// collision a swarm makes most likely.
 fn may_conflict(p: &Plan, pubkey: &str, instance: &str, here: &str, t: i64) -> bool {
     let family = p.pubkey == pubkey
-        && (p.instance == instance || nested_in(&p.instance, instance) || nested_in(instance, &p.instance));
+        && (p.instance == instance
+            || nested_in(&p.instance, instance)
+            || nested_in(instance, &p.instance));
     !family && p.project == here && p.live(t)
 }
 
@@ -2875,7 +2884,9 @@ fn main() {
             let root = repo_root();
             match leave_in(std::path::Path::new(&root)) {
                 Ok(true) => println!("{root} left its project; nothing here is published now"),
-                Ok(false) => println!("{root} had not joined a project here (a committed .robofinger may still name one)"),
+                Ok(false) => println!(
+                    "{root} had not joined a project here (a committed .robofinger may still name one)"
+                ),
                 Err(e) => {
                     eprintln!("leave failed: {e}");
                     std::process::exit(1);
@@ -2960,7 +2971,10 @@ fn main() {
             // shell commands go any further. Matching every tool keeps the
             // live view honest about reads and searches, and costs a local
             // append — never the network.
-            let tool = input.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+            let tool = input
+                .get("tool_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if !tool.is_empty() {
                 let (tool, target) = activity::describe(&input);
                 spool(&c.instance, "tool", &tool, &target);
@@ -2978,7 +2992,9 @@ fn main() {
             // ran them, so its claims are filed under its own name. No
             // network, and nothing at all for the main agent's commands.
             if input.get("tool_name").and_then(|v| v.as_str()) == Some("Bash") {
-                let line = input.pointer("/tool_input/command").and_then(|v| v.as_str());
+                let line = input
+                    .pointer("/tool_input/command")
+                    .and_then(|v| v.as_str());
                 if let (Some((kind, id)), Some(line)) = (&sub, line)
                     && let Some(tagged) = tag_robofinger(line, &format!("{kind}:{id}"))
                 {
@@ -3865,7 +3881,8 @@ fn local_activity(t: i64) -> Vec<(String, activity::Status)> {
 /// Finished, and past the minute it stays on screen. Still known to have
 /// finished — its own page says so — but no longer worth a row.
 fn finished_long_ago(s: &activity::Status, t: i64) -> bool {
-    matches!(s.state, activity::State::Done | activity::State::Gone) && t - s.since >= FINISHED_SHOWN
+    matches!(s.state, activity::State::Done | activity::State::Gone)
+        && t - s.since >= FINISHED_SHOWN
 }
 
 /// The spool as it stood at `t`, and each agent's status then. It keeps a
@@ -3917,7 +3934,11 @@ fn show_activity(c: &Cfg, k: &Keys) {
     for (inst, s) in rows {
         let depth = inst.matches('/').count();
         let name = inst.rsplit('/').next().unwrap_or(&inst);
-        let mark = if inst == c.instance { "  (this one)" } else { "" };
+        let mark = if inst == c.instance {
+            "  (this one)"
+        } else {
+            ""
+        };
         println!(
             "{}{:<w$} {}{mark}",
             "  ".repeat(depth),
@@ -3926,8 +3947,11 @@ fn show_activity(c: &Cfg, k: &Keys) {
             w = 22usize.saturating_sub(2 * depth)
         );
     }
-    println!("
-as {}", name_for(&k.pubkey()));
+    println!(
+        "
+as {}",
+        name_for(&k.pubkey())
+    );
 }
 
 /// `robofinger` with no arguments: your own status, the way `finger` with no
@@ -4161,11 +4185,12 @@ fn serve(c: &Cfg, k: &Keys, port: u16) -> std::io::Result<()> {
             .strip_prefix("GET ")
             .and_then(|r| r.split_whitespace().next())
             .and_then(parse_route);
-        let (status, body) = match route.map(|r| page(c, k, &r, links.as_ref(), &mut cache, &tracker)) {
-            Some(Ok(html)) => ("200 OK", html),
-            Some(Err(e)) => ("400 Bad Request", esc(&e)),
-            None => ("404 Not Found", String::new()),
-        };
+        let (status, body) =
+            match route.map(|r| page(c, k, &r, links.as_ref(), &mut cache, &tracker)) {
+                Some(Ok(html)) => ("200 OK", html),
+                Some(Err(e)) => ("400 Bad Request", esc(&e)),
+                None => ("404 Not Found", String::new()),
+            };
         let _ = write!(
             stream,
             "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n\
@@ -4207,7 +4232,12 @@ fn parse_route(target: &str) -> Option<Route> {
         .find_map(|kv| kv.strip_prefix("at="))
         .filter(|v| !v.is_empty())
         // A browser form sends `stamp`'s space form as `+` or `%20`.
-        .map(|v| v.replace("%3A", ":").replace("%3a", ":").replace('+', " ").replace("%20", " "));
+        .map(|v| {
+            v.replace("%3A", ":")
+                .replace("%3a", ":")
+                .replace('+', " ")
+                .replace("%20", " ")
+        });
     Some(Route {
         who: segs.first().map(|s| s.to_string()),
         agent: segs.get(1..).unwrap_or_default().join("/"),
@@ -4393,12 +4423,19 @@ const PLAN_TTL: i64 = 60;
 impl Cache {
     fn posts(&mut self, c: &Cfg, k: &Keys) -> Vec<Plan> {
         let t = now();
-        if self.posts.as_ref().is_none_or(|(at, _)| t - at >= RELAY_TTL) {
+        if self
+            .posts
+            .as_ref()
+            .is_none_or(|(at, _)| t - at >= RELAY_TTL)
+        {
             // ponytail: the newest MAX_POST_LIMIT entries are all a page can
             // scrub through; going further back means paging with `before=`.
             self.posts = Some((t, fetch_posts(c, k, MAX_POST_LIMIT)));
         }
-        self.posts.as_ref().map(|(_, p)| p.clone()).unwrap_or_default()
+        self.posts
+            .as_ref()
+            .map(|(_, p)| p.clone())
+            .unwrap_or_default()
     }
 
     fn live(&mut self, c: &Cfg, k: &Keys) -> Vec<Plan> {
@@ -4406,7 +4443,10 @@ impl Cache {
         if self.live.as_ref().is_none_or(|(at, _)| t - at >= RELAY_TTL) {
             self.live = Some((t, current_plans(c, k)));
         }
-        self.live.as_ref().map(|(_, p)| p.clone()).unwrap_or_default()
+        self.live
+            .as_ref()
+            .map(|(_, p)| p.clone())
+            .unwrap_or_default()
     }
 
     fn plan(&mut self) -> Option<Vec<tracker::Group>> {
@@ -4927,7 +4967,10 @@ fn render(
         ("", "")
     };
     let (banner, ghosts) = dash::history(view);
-    let shown = ns.iter().filter(|n| dash::shown(n, t) && !n.instance.contains('/')).count();
+    let shown = ns
+        .iter()
+        .filter(|n| dash::shown(n, t) && !n.instance.contains('/'))
+        .count();
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5293,7 +5336,10 @@ mod tests {
 
         let a = subagent_instance_in(&d, "claude-1", "Explore", "a8c0d38b", t);
         let b = subagent_instance_in(&d, "claude-1", "Explore", "a45eda7d", t);
-        assert_eq!((a.as_str(), b.as_str()), ("claude-1/explore-1", "claude-1/explore-2"));
+        assert_eq!(
+            (a.as_str(), b.as_str()),
+            ("claude-1/explore-1", "claude-1/explore-2")
+        );
         assert_eq!(
             subagent_instance_in(&d, "claude-1", "Explore", "a8c0d38b", t + 60),
             a,
@@ -5318,7 +5364,11 @@ mod tests {
     #[test]
     fn agent_kind_is_safe_in_a_name_and_a_shell() {
         assert_eq!(agent_kind("Explore"), "explore");
-        assert_eq!(agent_kind("my-plugin:reviewer"), "reviewer", "plugin scope dropped");
+        assert_eq!(
+            agent_kind("my-plugin:reviewer"),
+            "reviewer",
+            "plugin scope dropped"
+        );
         assert_eq!(agent_kind("rm -rf /; echo"), "rm-rf-echo");
         assert_eq!(agent_kind(""), "agent");
         assert_eq!(agent_kind("$(whoami)"), "whoami");
@@ -5336,10 +5386,28 @@ mod tests {
             p
         };
         let f = "src/auth/session.ts";
-        assert!(!matches_as(&claim_as("claude-1"), f, "demo", "me", "claude-1/explore-1"));
-        assert!(!matches_as(&claim_as("claude-1/explore-1"), f, "demo", "me", "claude-1"));
+        assert!(!matches_as(
+            &claim_as("claude-1"),
+            f,
+            "demo",
+            "me",
+            "claude-1/explore-1"
+        ));
+        assert!(!matches_as(
+            &claim_as("claude-1/explore-1"),
+            f,
+            "demo",
+            "me",
+            "claude-1"
+        ));
         assert!(
-            matches_as(&claim_as("claude-1/explore-1"), f, "demo", "me", "claude-1/explore-2"),
+            matches_as(
+                &claim_as("claude-1/explore-1"),
+                f,
+                "demo",
+                "me",
+                "claude-1/explore-2"
+            ),
             "siblings conflict"
         );
         assert!(
@@ -5347,7 +5415,13 @@ mod tests {
             "another session's subagent is just another agent"
         );
         assert!(
-            matches_as(&claim_as("claude-10"), f, "demo", "me", "claude-1/explore-1"),
+            matches_as(
+                &claim_as("claude-10"),
+                f,
+                "demo",
+                "me",
+                "claude-1/explore-1"
+            ),
             "a name that merely starts the same is not a parent"
         );
         let mut peer = claim_as("claude-1");
@@ -5371,16 +5445,24 @@ mod tests {
             r("robofinger claim \"write a\" a.txt").as_deref(),
             Some("robofinger claim --subagent explore:a8c0 \"write a\" a.txt")
         );
-        assert_eq!(r("robofinger release").as_deref(), Some("robofinger release --subagent explore:a8c0"));
+        assert_eq!(
+            r("robofinger release").as_deref(),
+            Some("robofinger release --subagent explore:a8c0")
+        );
         assert_eq!(
             r("cd src && robofinger claim x 'a/**' && robofinger release").as_deref(),
-            Some("cd src && robofinger claim --subagent explore:a8c0 x 'a/**' && robofinger release --subagent explore:a8c0")
+            Some(
+                "cd src && robofinger claim --subagent explore:a8c0 x 'a/**' && robofinger release --subagent explore:a8c0"
+            )
         );
         assert_eq!(
             r("~/.cargo/bin/robofinger check a.rs").as_deref(),
             Some("~/.cargo/bin/robofinger check --subagent explore:a8c0 a.rs")
         );
-        assert_eq!(r("robofinger").as_deref(), Some("robofinger --subagent explore:a8c0"));
+        assert_eq!(
+            r("robofinger").as_deref(),
+            Some("robofinger --subagent explore:a8c0")
+        );
         assert_eq!(
             r("robofinger --version").as_deref(),
             Some("robofinger --subagent explore:a8c0 --version")
@@ -5405,7 +5487,10 @@ mod tests {
         let mut a: Vec<String> = ["claim", "--subagent", "explore:a8c0", "task", "a/**"]
             .map(String::from)
             .to_vec();
-        assert_eq!(take_flag(&mut a, "--subagent").as_deref(), Some("explore:a8c0"));
+        assert_eq!(
+            take_flag(&mut a, "--subagent").as_deref(),
+            Some("explore:a8c0")
+        );
         assert_eq!(a, ["claim", "task", "a/**"]);
 
         let mut none: Vec<String> = ["release"].map(String::from).to_vec();
@@ -5424,7 +5509,11 @@ mod tests {
             hook_subagent(&v),
             Some(("reviewer".into(), "a8c0d38b4542dc838".into()))
         );
-        assert_eq!(hook_subagent(&serde_json::json!({"session_id": "x"})), None, "main agent");
+        assert_eq!(
+            hook_subagent(&serde_json::json!({"session_id": "x"})),
+            None,
+            "main agent"
+        );
         assert_eq!(hook_subagent(&serde_json::json!({"agent_id": ""})), None);
         assert_eq!(
             hook_subagent(&serde_json::json!({"agent_id": "a; rm -rf ~"})),
@@ -5961,9 +6050,20 @@ mod tests {
     #[test]
     fn only_the_local_trackers_own_layout_is_a_ticket() {
         let key = |s: &str| ticket_ref(s).map(|x| x.0);
-        assert_eq!(key("notes/scratch/foo/issues/7-x.md"), None, "scratch is not .scratch");
-        assert_eq!(key(".scratch/foo/issues/07-x.txt"), None, "a ticket is a .md file");
-        assert_eq!(key("(./.scratch/foo/issues/07-x.md)"), Some("foo#07".into()));
+        assert_eq!(
+            key("notes/scratch/foo/issues/7-x.md"),
+            None,
+            "scratch is not .scratch"
+        );
+        assert_eq!(
+            key(".scratch/foo/issues/07-x.txt"),
+            None,
+            "a ticket is a .md file"
+        );
+        assert_eq!(
+            key("(./.scratch/foo/issues/07-x.md)"),
+            Some("foo#07".into())
+        );
     }
 
     #[test]
@@ -5990,8 +6090,14 @@ mod tests {
         let quiet = start_context(vec![], "hazel-hare/claude-1");
         assert!(quiet.contains("robofinger claim"), "{quiet}");
         assert!(quiet.contains("ROBOFINGER.md"), "{quiet}");
-        assert!(!quiet.contains("[FOR YOU]"), "nothing to answer, so no answering rules");
-        assert!(quiet.contains("you direct them"), "the parent is the subagents' line to the team");
+        assert!(
+            !quiet.contains("[FOR YOU]"),
+            "nothing to answer, so no answering rules"
+        );
+        assert!(
+            quiet.contains("you direct them"),
+            "the parent is the subagents' line to the team"
+        );
         assert!(SUBAGENT_RULE.contains("report to your parent only"));
 
         let busy = start_context(
@@ -6000,7 +6106,10 @@ mod tests {
         );
         assert!(busy.starts_with("OPEN QUESTIONS"), "{busy}");
         assert!(busy.contains("You are `hazel-hare/claude-1`"), "{busy}");
-        assert!(busy.contains("robofinger claim") && busy.contains("[FOR YOU]"), "{busy}");
+        assert!(
+            busy.contains("robofinger claim") && busy.contains("[FOR YOU]"),
+            "{busy}"
+        );
     }
 
     /// A swarm's subagents start in the same instant. Each must keep the
@@ -6014,7 +6123,9 @@ mod tests {
             let hs: Vec<_> = (0..16)
                 .map(|i| {
                     let dir = &dir;
-                    s.spawn(move || subagent_instance_in(dir, "claude-1", "Explore", &format!("id{i}"), t))
+                    s.spawn(move || {
+                        subagent_instance_in(dir, "claude-1", "Explore", &format!("id{i}"), t)
+                    })
                 })
                 .collect();
             hs.into_iter().map(|h| h.join().unwrap()).collect()
@@ -6022,7 +6133,11 @@ mod tests {
         let unique: std::collections::HashSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), 16, "no two share a name: {names:?}");
         for (i, n) in names.iter().enumerate() {
-            assert_eq!(&subagent_instance_in(&dir, "claude-1", "Explore", &format!("id{i}"), t), n, "kept its name");
+            assert_eq!(
+                &subagent_instance_in(&dir, "claude-1", "Explore", &format!("id{i}"), t),
+                n,
+                "kept its name"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6040,16 +6155,32 @@ mod tests {
         join_in(&root, "https://relay.example/team").unwrap();
         assert!(joined_in(&root));
         let local = std::fs::read_to_string(root.join(".robofinger.local")).unwrap();
-        assert!(local.contains("ROBOFINGER_ALIAS=work") && local.contains("ROBOFINGER_URL=https://relay.example/team"));
+        assert!(
+            local.contains("ROBOFINGER_ALIAS=work")
+                && local.contains("ROBOFINGER_URL=https://relay.example/team")
+        );
         join_in(&root, "https://relay.example/other").unwrap();
         let local = std::fs::read_to_string(root.join(".robofinger.local")).unwrap();
-        assert_eq!(local.matches("ROBOFINGER_URL").count(), 1, "a second join replaces the first");
+        assert_eq!(
+            local.matches("ROBOFINGER_URL").count(),
+            1,
+            "a second join replaces the first"
+        );
         let ignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert_eq!(ignore.matches(".robofinger.local").count(), 1, "kept out of git, once");
+        assert_eq!(
+            ignore.matches(".robofinger.local").count(),
+            1,
+            "kept out of git, once"
+        );
 
         assert!(leave_in(&root).unwrap());
         assert!(!joined_in(&root));
-        assert!(std::fs::read_to_string(root.join(".robofinger.local")).unwrap().contains("ROBOFINGER_ALIAS=work"), "other settings stay");
+        assert!(
+            std::fs::read_to_string(root.join(".robofinger.local"))
+                .unwrap()
+                .contains("ROBOFINGER_ALIAS=work"),
+            "other settings stay"
+        );
         assert!(!leave_in(&root).unwrap(), "nothing left to leave");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -6058,7 +6189,9 @@ mod tests {
     fn a_subagent_is_told_its_path_and_its_parent() {
         let line = you_are("hazel-hare/claude-1/explore-2", Some("hazel-hare/claude-1"));
         assert!(
-            line.starts_with("- You are `hazel-hare/claude-1/explore-2`, a subagent of `hazel-hare/claude-1`"),
+            line.starts_with(
+                "- You are `hazel-hare/claude-1/explore-2`, a subagent of `hazel-hare/claude-1`"
+            ),
             "{line}"
         );
         assert!(!you_are("hazel-hare/claude-1", None).contains("subagent"));
@@ -6068,7 +6201,10 @@ mod tests {
     fn an_agent_path_is_the_derived_name_then_the_instance() {
         let key = "fHC-SO9SYAjaB29D8DIRTxTNF2LaicTKk046FtGSIkk";
         assert_eq!(agent_path(key, ""), name_for(key));
-        assert_eq!(agent_path(key, "claude-1/explore-2"), format!("{}/claude-1/explore-2", name_for(key)));
+        assert_eq!(
+            agent_path(key, "claude-1/explore-2"),
+            format!("{}/claude-1/explore-2", name_for(key))
+        );
     }
 
     #[test]
@@ -6129,7 +6265,10 @@ mod tests {
         assert_eq!((r.who, r.agent.as_str(), r.at), (None, "", None));
 
         let r = parse_route("/wheat-falcon").unwrap();
-        assert_eq!((r.who.as_deref(), r.agent.as_str()), (Some("wheat-falcon"), ""));
+        assert_eq!(
+            (r.who.as_deref(), r.agent.as_str()),
+            (Some("wheat-falcon"), "")
+        );
 
         let r = parse_route("/wheat-falcon/claude-1/explore-2?at=1792893051").unwrap();
         assert_eq!(r.who.as_deref(), Some("wheat-falcon"));
@@ -6137,16 +6276,33 @@ mod tests {
         assert_eq!(r.at.as_deref(), Some("1792893051"));
 
         let r = parse_route("/wheat-falcon/claude-1/?at=2h&x=1").unwrap();
-        assert_eq!((r.agent.as_str(), r.at.as_deref()), ("claude-1", Some("2h")), "trailing slash, other params");
+        assert_eq!(
+            (r.agent.as_str(), r.at.as_deref()),
+            ("claude-1", Some("2h")),
+            "trailing slash, other params"
+        );
 
         let r = parse_route("/wheat-falcon?at=2026-10-24+18%3A51").unwrap();
-        assert_eq!(r.at.as_deref(), Some("2026-10-24 18:51"), "a form's `+` is a space");
+        assert_eq!(
+            r.at.as_deref(),
+            Some("2026-10-24 18:51"),
+            "a form's `+` is a space"
+        );
         let r = parse_route("/wheat-falcon?at=2026-10-24%2018:51").unwrap();
         assert_eq!(r.at.as_deref(), Some("2026-10-24 18:51"), "so is `%20`");
 
-        assert!(parse_route("/w?all=1").unwrap().all, "every project, on request");
-        assert!(!parse_route("/w?at=2h").unwrap().all, "this project by default");
-        assert!(parse_route("/favicon.ico").is_none(), "costs a relay round trip for nothing");
+        assert!(
+            parse_route("/w?all=1").unwrap().all,
+            "every project, on request"
+        );
+        assert!(
+            !parse_route("/w?at=2h").unwrap().all,
+            "this project by default"
+        );
+        assert!(
+            parse_route("/favicon.ico").is_none(),
+            "costs a relay round trip for nothing"
+        );
         assert!(parse_route("/<script>").is_none());
         assert!(parse_route("/a/../b").is_none());
         assert!(parse_route("no-slash").is_none());
@@ -6168,11 +6324,22 @@ mod tests {
         assert!(!peer_matches(&at("claude-10"), Some(&parent), &[]));
         assert!(!peer_matches(&at("claude-2"), Some(&parent), &[]));
         assert!(
-            !peer_matches(&at("claude-1/explore-1"), Some(&format!("{me}/claude-1/explore-2")), &[]),
+            !peer_matches(
+                &at("claude-1/explore-1"),
+                Some(&format!("{me}/claude-1/explore-2")),
+                &[]
+            ),
             "a sibling"
         );
-        assert!(peer_matches(&at("claude-2"), Some(&me), &[]), "a bare name is everyone on that key");
-        assert!(!peer_matches(&at("claude-1"), Some("someone-else/claude-1"), &[]));
+        assert!(
+            peer_matches(&at("claude-2"), Some(&me), &[]),
+            "a bare name is everyone on that key"
+        );
+        assert!(!peer_matches(
+            &at("claude-1"),
+            Some("someone-else/claude-1"),
+            &[]
+        ));
     }
 
     /// The past is replayed from the timeline: a claim holds until its
@@ -6203,11 +6370,23 @@ mod tests {
                 ("claude-1/explore-1".into(), vec!["a.txt".into()]),
             ]
         );
-        assert_eq!(held(&posts, t0 + 80), vec![("claude-1".into(), vec!["src/**".into()])], "released");
-        assert_eq!(held(&posts, t0 + 100), vec![("claude-1".into(), vec!["lib/**".into()])], "replaced");
+        assert_eq!(
+            held(&posts, t0 + 80),
+            vec![("claude-1".into(), vec!["src/**".into()])],
+            "released"
+        );
+        assert_eq!(
+            held(&posts, t0 + 100),
+            vec![("claude-1".into(), vec!["lib/**".into()])],
+            "replaced"
+        );
 
         let lapse = DEFAULT_ETA * STALE_MULT;
-        assert_eq!(held(&posts, t0 + 100 + lapse + 1), vec![], "quiet past a claim's life");
+        assert_eq!(
+            held(&posts, t0 + 100 + lapse + 1),
+            vec![],
+            "quiet past a claim's life"
+        );
         let mut busy = posts.clone();
         busy.push(entry("claude-1", "", &[], t0 + 100 + lapse - 10));
         assert_eq!(
@@ -6228,7 +6407,11 @@ mod tests {
         assert_eq!(parse_at("2h", now), Ok(now - 7200));
         let t = 1_792_890_000;
         let typed = stamp(t).replace(' ', "T");
-        assert_eq!(parse_at(&typed, now), Ok(t - t % 60), "a stamp, typed back, lands on its minute");
+        assert_eq!(
+            parse_at(&typed, now),
+            Ok(t - t % 60),
+            "a stamp, typed back, lands on its minute"
+        );
         assert!(parse_at("yesterday", now).is_err());
         assert!(parse_at("2026-13-01T00:00", now).is_err());
     }
@@ -6239,7 +6422,11 @@ mod tests {
     fn scrubbing_steps_to_the_events_either_side() {
         let e = [100, 200, 300];
         assert_eq!(neighbours(&e, 200), (Some(100), Some(300)));
-        assert_eq!(neighbours(&e, 250), (Some(200), Some(300)), "between events");
+        assert_eq!(
+            neighbours(&e, 250),
+            (Some(200), Some(300)),
+            "between events"
+        );
         assert_eq!(neighbours(&e, 100), (None, Some(200)));
         assert_eq!(neighbours(&e, 300), (Some(200), None));
         assert_eq!(neighbours(&[], 5), (None, None));
@@ -6271,20 +6458,35 @@ mod tests {
         };
         let html = dashboard(&[claim], &[], &cfg, t, None, &view);
         let me = name_for("pk-me");
-        assert!(!html.contains("http-equiv=\"refresh\""), "a fixed moment stays put");
+        assert!(
+            !html.contains("http-equiv=\"refresh\""),
+            "a fixed moment stays put"
+        );
         assert!(
             html.contains(&format!("href=\"/{me}/claude-1/explore-2?at={t}\"")),
             "the subagent links to its own page at this moment"
         );
-        assert!(html.contains(&format!("href=\"/{me}/claude-1?at={}\"", t - 100)), "previous event");
-        assert!(html.contains(&format!("href=\"/{me}/claude-1?at={}\"", t + 60)), "next event");
-        assert!(html.contains(&format!("href=\"/{me}/claude-1\"")), "back to now");
+        assert!(
+            html.contains(&format!("href=\"/{me}/claude-1?at={}\"", t - 100)),
+            "previous event"
+        );
+        assert!(
+            html.contains(&format!("href=\"/{me}/claude-1?at={}\"", t + 60)),
+            "next event"
+        );
+        assert!(
+            html.contains(&format!("href=\"/{me}/claude-1\"")),
+            "back to now"
+        );
         assert!(
             html.contains(&format!("href=\"/{me}?at={t}\"")),
             "the breadcrumb climbs to the person, staying at this moment"
         );
 
         let live = dashboard(&[], &[], &cfg, t, None, &View::default());
-        assert!(live.contains("http-equiv=\"refresh\""), "the live page still refreshes");
+        assert!(
+            live.contains("http-equiv=\"refresh\""),
+            "the live page still refreshes"
+        );
     }
 }
