@@ -1175,7 +1175,6 @@ fn git_log_in(dir: &std::path::Path, since: i64, globs: &[String], format: &str)
         "log".to_string(),
         "--no-merges".to_string(),
         format.to_string(),
-        format!("--since=@{since}"),
         // Without this, git walks whatever branch HEAD is on *and* its
         // ancestors' merges into other branches.
         "--first-parent".to_string(),
@@ -1186,6 +1185,13 @@ fn git_log_in(dir: &std::path::Path, since: i64, globs: &[String], format: &str)
         // fall outside `--since` anyway. Revisit if a shared branch turns out
         // to leak teammates' commits into a note.
     ];
+    // Only a real moment. git reads a small `@N` as a date relative to now,
+    // not as seconds since 1970: `--since=@0` means roughly "now", so a
+    // window starting at 0 found nothing, or everything, depending on
+    // whether the clock had ticked since the last commit.
+    if since > 1_000_000_000 {
+        args.push(format!("--since=@{since}"));
+    }
     if !globs.is_empty() {
         args.push("--".to_string());
         args.extend(globs.iter().cloned());
