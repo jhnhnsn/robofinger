@@ -180,6 +180,14 @@ short name (`claude-1`, `claude-2`) in `$ROBOFINGER_HOME/instances`.
 Reservations are refreshed on use and expire after 24h, so a killed agent's
 name is reclaimed rather than climbing forever.
 
+Every agent is told its own path, the name its key derives to followed by its
+instance (`hazel-hare/claude-1`, or `hazel-hare/claude-1/explore-2` for a
+subagent). SessionStart and SubagentStart hand it over, `robofinger` prints
+`you are …`, and `claim` echoes it. If `ROBOFINGER_DASHBOARD` names where the
+team's dashboard is served, the start context gives the agent its page there
+too. That is the address of a deployment, not of an agent: the same path works
+on any dashboard that can read it.
+
 Both signals survive subprocess inheritance, which is the property that
 matters: the `PreToolUse` hook runs as a *fresh process* and must resolve to
 the same instance as the agent holding the claim. A pid would not — every

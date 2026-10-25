@@ -113,14 +113,42 @@ const SUBAGENT_RULE: &str = "\
 
 /// What SessionStart hands the agent. With nothing to act on, the rules for
 /// acting on it are just context spent, so only the claim rule goes in.
-fn start_context(mut blocks: Vec<String>) -> String {
+fn start_context(mut blocks: Vec<String>, me: &str) -> String {
     let rest = if blocks.is_empty() {
         "  - The full workflow is in ROBOFINGER.md at the repo root."
     } else {
         GUIDANCE
     };
-    blocks.push(format!("How to use this:\n{CLAIM_RULE}\n{rest}"));
+    blocks.push(format!(
+        "How to use this:\n{}\n{CLAIM_RULE}\n{rest}",
+        you_are(me, None)
+    ));
     blocks.join("\n\n")
+}
+
+/// The line that tells an agent its own agent path. Nothing else does: the
+/// name is worked out afresh in every hook, and an agent that cannot say who
+/// it is cannot tell anyone where to find it.
+fn you_are(me: &str, parent: Option<&str>) -> String {
+    let page = dashboard_base()
+        .map(|b| format!(" Its page: {b}/{me}"))
+        .unwrap_or_default();
+    let of = parent
+        .map(|p| format!(", a subagent of `{p}`"))
+        .unwrap_or_default();
+    format!(
+        "- You are `{me}`{of}: your agent path, the name your claims and entries are filed under.{page}"
+    )
+}
+
+/// Where this team's dashboard is served, if it says. A deployment's address,
+/// not an agent's: the same path works on any dashboard that can read it.
+fn dashboard_base() -> Option<String> {
+    std::env::var("ROBOFINGER_DASHBOARD")
+        .ok()
+        .or_else(|| config_file().get("ROBOFINGER_DASHBOARD").cloned())
+        .map(|s| s.trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
 }
 
 const USAGE: &str = "\
@@ -612,6 +640,16 @@ fn hook_subagent(input: &serde_json::Value) -> Option<(String, String)> {
     let id = input.get("agent_id")?.as_str().filter(|s| plain_token(s))?;
     let kind = input.get("agent_type").and_then(|v| v.as_str()).unwrap_or("");
     Some((agent_kind(kind), id.to_string()))
+}
+
+/// Whether a subagent hook names a type. Claude Code's own helpers (prompt
+/// suggestions, /btw) start and stop through the subagent hooks too, with no
+/// type of their own, and never claim.
+fn typed(input: &serde_json::Value) -> bool {
+    input
+        .get("agent_type")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
 }
 
 /// The `--subagent kind:id` value the hook wrote, back into (kind, id).
@@ -2675,7 +2713,10 @@ fn main() {
             let changed = prev.as_ref().map(|p| &p.touching) != Some(&globs);
             match publish(&c, &k, "working", &task, globs.clone()) {
                 Ok(_) => {
-                    println!("claimed {globs:?} ({task})");
+                    println!(
+                        "claimed {globs:?} as {} ({task})",
+                        agent_path(&k.pubkey(), &c.instance)
+                    );
                     if !dropped.is_empty() {
                         eprintln!(
                             "  released {} — a claim replaces, it does not add",
@@ -2974,7 +3015,7 @@ fn main() {
                 serde_json::json!({
                     "hookSpecificOutput": {
                         "hookEventName": "SessionStart",
-                        "additionalContext": start_context(blocks)
+                        "additionalContext": start_context(blocks, &agent_path(&me, &c.instance))
                     }
                 })
             );
@@ -2999,12 +3040,25 @@ fn main() {
         // so it gets the one rule it needs here. No network: subagents are
         // spawned in bursts, and this runs before each one's first prompt.
         "subagent-start" => {
+            let input = hook_input();
+            let parent = agent_path(&k.pubkey(), &c.instance);
+            // Named the way its hooks will name it, so what it is told matches
+            // what its claims are filed under. Claude Code's own untyped
+            // helpers get no name: they never claim, and naming one would
+            // spend a slot.
+            let you = match hook_subagent(&input) {
+                Some((kind, id)) if !kind.is_empty() && typed(&input) => {
+                    let me = agent_path(&k.pubkey(), &subagent_instance(&c.instance, &kind, &id));
+                    format!("{}\n", you_are(&me, Some(&parent)))
+                }
+                _ => String::new(),
+            };
             println!(
                 "{}",
                 serde_json::json!({
                     "hookSpecificOutput": {
                         "hookEventName": "SubagentStart",
-                        "additionalContext": format!("{CLAIM_RULE}\n{SUBAGENT_RULE}")
+                        "additionalContext": format!("{you}{CLAIM_RULE}\n{SUBAGENT_RULE}")
                     }
                 })
             );
@@ -3016,13 +3070,7 @@ fn main() {
         // the subagent running.
         "subagent-stop" => {
             let input = hook_input();
-            // Claude Code's own helpers (prompt suggestions, /btw) stop through
-            // this hook too, with no type of their own. They never claim.
-            let typed = input
-                .get("agent_type")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty());
-            if let (true, Some((kind, id))) = (typed, hook_subagent(&input)) {
+            if let (true, Some((kind, id))) = (typed(&input), hook_subagent(&input)) {
                 c.instance = subagent_instance(&c.instance, &kind, &id);
                 // Only a subagent that claimed has a row to release. Publishing
                 // one for every read-only subagent would spend the write budget
@@ -3427,6 +3475,15 @@ fn name_for(pubkey: &str) -> String {
     derived_alias(pubkey)
 }
 
+/// An agent's path: the name its key derives to, then its instance —
+/// `hazel-hare/claude-1/explore-2`. What a dashboard URL and a byline both say.
+fn agent_path(pubkey: &str, instance: &str) -> String {
+    match instance {
+        "" => name_for(pubkey),
+        i => format!("{}/{i}", name_for(pubkey)),
+    }
+}
+
 /// Who published a plan: "hazel-hare", or "hazel-hare/claude-2" when the
 /// instance needs showing.
 ///
@@ -3507,6 +3564,7 @@ fn show_self(c: &Cfg, k: &Keys) {
 
     println!("{} @ {}", c.alias, c.url);
     println!("{}", k.pubkey());
+    println!("you are {}", agent_path(&k.pubkey(), &c.instance));
 
     // Group by agent. One instance is the ordinary case and renders exactly
     // as before; several means two Claudes sharing this identity, and each
@@ -5448,14 +5506,35 @@ mod tests {
 
     #[test]
     fn a_quiet_session_start_still_says_to_claim() {
-        let quiet = start_context(vec![]);
+        let quiet = start_context(vec![], "hazel-hare/claude-1");
         assert!(quiet.contains("robofinger claim"), "{quiet}");
         assert!(quiet.contains("ROBOFINGER.md"), "{quiet}");
         assert!(!quiet.contains("[FOR YOU]"), "nothing to answer, so no answering rules");
 
-        let busy = start_context(vec!["OPEN QUESTIONS from your teammates".into()]);
+        let busy = start_context(
+            vec!["OPEN QUESTIONS from your teammates".into()],
+            "hazel-hare/claude-1",
+        );
         assert!(busy.starts_with("OPEN QUESTIONS"), "{busy}");
+        assert!(busy.contains("You are `hazel-hare/claude-1`"), "{busy}");
         assert!(busy.contains("robofinger claim") && busy.contains("[FOR YOU]"), "{busy}");
+    }
+
+    #[test]
+    fn a_subagent_is_told_its_path_and_its_parent() {
+        let line = you_are("hazel-hare/claude-1/explore-2", Some("hazel-hare/claude-1"));
+        assert!(
+            line.starts_with("- You are `hazel-hare/claude-1/explore-2`, a subagent of `hazel-hare/claude-1`"),
+            "{line}"
+        );
+        assert!(!you_are("hazel-hare/claude-1", None).contains("subagent"));
+    }
+
+    #[test]
+    fn an_agent_path_is_the_derived_name_then_the_instance() {
+        let key = "fHC-SO9SYAjaB29D8DIRTxTNF2LaicTKk046FtGSIkk";
+        assert_eq!(agent_path(key, ""), name_for(key));
+        assert_eq!(agent_path(key, "claude-1/explore-2"), format!("{}/claude-1/explore-2", name_for(key)));
     }
 
     #[test]
