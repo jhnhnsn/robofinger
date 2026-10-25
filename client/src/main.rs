@@ -165,6 +165,11 @@ THE TIMELINE
 
   serve [--port N]              the same record as a page in your browser
       robofinger serve          then open http://127.0.0.1:7380
+      …/hazel-hare/claude-1     one agent and the subagents under it
+      …/hazel-hare/claude-1?at=2h
+                                as it stood two hours ago, stepping event
+                                by event (at= also takes an epoch or
+                                2026-10-24T18:51)
       (who holds what, who has gone quiet, open questions, what landed.
        localhost only: it decrypts with your keys, so it is yours alone)
 
@@ -1587,11 +1592,17 @@ fn peer_matches(p: &Plan, want: Option<&str>, subs: &[Peer]) -> bool {
         // screen and types back. `p.alias` stays accepted: it is what older
         // entries were filed under, and a filter that stops matching history
         // is worse than one that is generous.
+        //
+        // Past the first `/` is an agent, the way the byline prints one —
+        // `hazel-hare/claude-1` is that agent and every subagent under it.
         Some(w) => {
-            derived_alias(&p.pubkey).eq_ignore_ascii_case(w)
+            let (who, agent) = w.split_once('/').unwrap_or((w, ""));
+            let agent = agent.trim_end_matches('/');
+            let named = derived_alias(&p.pubkey).eq_ignore_ascii_case(who)
                 || label_in(&p.pubkey, names_cached(), subs)
-                    .is_some_and(|l| l.eq_ignore_ascii_case(w))
-                || p.alias == w
+                    .is_some_and(|l| l.eq_ignore_ascii_case(who))
+                || p.alias == who;
+            named && (agent.is_empty() || p.instance == agent || nested_in(&p.instance, agent))
         }
     }
 }
@@ -2970,7 +2981,18 @@ fn main() {
             std::process::exit(0);
         }
         "end" => {
+            // Journal a session that ends still holding paths. The timeline is
+            // all a past view has, and without an entry it shows the claim
+            // held on until it would have lapsed. One write, and only then.
+            let t = now();
+            let held: Vec<String> = mine(&c, &k)
+                .filter(|p| p.live(t))
+                .map(|p| p.touching)
+                .unwrap_or_default();
             let _ = publish(&c, &k, "done", "", vec![]);
+            if !held.is_empty() {
+                timeline(&c, &k, "done", "session ended without releasing", held);
+            }
             std::process::exit(0);
         }
         // SubagentStart hook. A subagent never sees the SessionStart block,
@@ -3689,17 +3711,18 @@ fn serve(c: &Cfg, k: &Keys, port: u16) -> std::io::Result<()> {
         // on it. One thread blocked reading that socket stalls every real
         // request behind it, so give up on a silent one quickly.
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
-        // Only the request line matters; every path gets the dashboard. A
-        // favicon request costs a relay round trip, so answer it empty.
+        // Only the request line matters. Anything that is not a page — a
+        // favicon, a probe — gets an empty 404 rather than a relay round trip.
         let mut line = String::new();
         let _ = std::io::BufReader::new(&stream).read_line(&mut line);
-        let (status, body) = if line.starts_with("GET / ") || line.starts_with("GET /? ") {
-            let t = now();
-            let live = current_plans(c, k);
-            let posts = fetch_posts(c, k, MAX_POST_LIMIT);
-            ("200 OK", dashboard(&live, &posts, c, t, links.as_ref()))
-        } else {
-            ("404 Not Found", String::new())
+        let route = line
+            .strip_prefix("GET ")
+            .and_then(|r| r.split_whitespace().next())
+            .and_then(parse_route);
+        let (status, body) = match route.map(|r| page(c, k, &r, links.as_ref())) {
+            Some(Ok(html)) => ("200 OK", html),
+            Some(Err(e)) => ("400 Bad Request", esc(&e)),
+            None => ("404 Not Found", String::new()),
         };
         let _ = write!(
             stream,
@@ -3709,6 +3732,239 @@ fn serve(c: &Cfg, k: &Keys, port: u16) -> std::io::Result<()> {
         );
     }
     Ok(())
+}
+
+/// A dashboard page's address: `/<who>/<agent>/<subagent>…?at=<when>`.
+///
+/// The path is the byline the record already prints, so any name on the page
+/// is also a link to that agent and everything under it. `who` is the
+/// key-derived name, the one every reader computes alike, so a link means
+/// the same agent to everyone it is shared with.
+struct Route {
+    who: Option<String>,
+    agent: String,
+    at: Option<String>,
+}
+
+fn parse_route(target: &str) -> Option<Route> {
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let segs: Vec<&str> = path
+        .strip_prefix('/')?
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    // Names, slots and agent types are all plain tokens, so anything else —
+    // `..`, a favicon, markup — is not a page.
+    if segs.iter().any(|s| !plain_token(s)) {
+        return None;
+    }
+    let at = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("at="))
+        .filter(|v| !v.is_empty())
+        .map(|v| v.replace("%3A", ":").replace("%3a", ":"));
+    Some(Route {
+        who: segs.first().map(|s| s.to_string()),
+        agent: segs.get(1..).unwrap_or_default().join("/"),
+        at,
+    })
+}
+
+/// When `?at=` means: what `--since` takes, or a local time as `stamp`
+/// prints it (`2026-10-24T18:51`, or with a space).
+fn parse_at(s: &str, now: i64) -> Result<i64, String> {
+    parse_since(s, now).or_else(|_| {
+        local_minute(s).ok_or_else(|| {
+            format!("at= wants an epoch, a duration like 2h, or a local time like 2026-10-24T18:51, not {s:?}")
+        })
+    })
+}
+
+/// `stamp`, backwards: a local wall-clock time to an epoch.
+fn local_minute(s: &str) -> Option<i64> {
+    let (date, time) = s.split_once(['T', ' '])?;
+    let num = |x: Option<&str>| x?.parse::<i64>().ok();
+    let mut d = date.splitn(3, '-');
+    let (y, m, day) = (num(d.next())?, num(d.next())?, num(d.next())?);
+    let mut hm = time.splitn(3, ':');
+    let (h, min) = (num(hm.next())?, num(hm.next())?);
+    let sec = num(hm.next()).unwrap_or(0);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) || h > 23 || min > 59 || sec > 59 {
+        return None;
+    }
+    // Days from the civil date: the inverse of what `stamp` does.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let naive = (era * 146_097 + doe - 719_468) * 86_400 + h * 3600 + min * 60 + sec;
+    Some(naive - utc_offset(naive))
+}
+
+/// The events either side of `t`: where scrubbing steps to. By event rather
+/// than by interval, because the moments worth looking at are the ones where
+/// something changed.
+fn neighbours(epochs: &[i64], t: i64) -> (Option<i64>, Option<i64>) {
+    (
+        epochs.iter().copied().filter(|&e| e < t).max(),
+        epochs.iter().copied().filter(|&e| e > t).min(),
+    )
+}
+
+/// What each agent held at `t`, replayed from the timeline. The relay's claim
+/// rows keep only the last few per agent, so the past has to come from here.
+///
+/// A claim holds until its agent releases, finishes or claims again. The
+/// timeline records changes, not the republish a working agent does on every
+/// edit, so a claim whose agent has written nothing for longer than a claim
+/// lives is taken to have lapsed — the deadman switch, judged from the
+/// agent's own last word.
+fn claims_at(posts: &[Plan], t: i64) -> Vec<Plan> {
+    let mut seen: Vec<&Plan> = posts.iter().filter(|p| p.epoch <= t).collect();
+    seen.sort_by_key(|p| (p.epoch, p.id));
+    let mut held: std::collections::HashMap<(String, String), Plan> =
+        std::collections::HashMap::new();
+    let mut last: std::collections::HashMap<(String, String), i64> =
+        std::collections::HashMap::new();
+    for p in seen {
+        let key = (p.pubkey.clone(), p.instance.clone());
+        last.insert(key.clone(), p.epoch);
+        match p.kind.as_str() {
+            "claim" => {
+                let mut c = p.clone();
+                c.status = "working".into();
+                c.touching = p.globs.clone();
+                c.claimed_at = p.epoch;
+                c.eta_s = DEFAULT_ETA;
+                c.kind = String::new();
+                held.insert(key, c);
+            }
+            "release" | "done" => {
+                held.remove(&key);
+            }
+            _ => {}
+        }
+    }
+    held.into_iter()
+        .filter_map(|(key, mut c)| {
+            c.epoch = last[&key];
+            c.live(t).then_some(c)
+        })
+        .collect()
+}
+
+/// Where a dashboard page sits: whose record, which agent, and when — with
+/// the events either side, for stepping through it.
+#[derive(Default)]
+struct View {
+    who: Option<String>,
+    agent: String,
+    /// None for the live page.
+    at: Option<i64>,
+    prev: Option<i64>,
+    next: Option<i64>,
+    /// The earliest entry this page could see, so a moment before it says so
+    /// rather than looking quiet.
+    oldest: Option<i64>,
+}
+
+impl View {
+    fn path(&self) -> String {
+        match &self.who {
+            None => "/".into(),
+            Some(w) if self.agent.is_empty() => format!("/{w}"),
+            Some(w) => format!("/{w}/{}", self.agent),
+        }
+    }
+
+    /// `?at=` for links that stay at this page's moment.
+    fn moment(&self) -> String {
+        self.at.map(|t| format!("?at={t}")).unwrap_or_default()
+    }
+
+    /// Breadcrumb, then the scrub controls.
+    fn nav(&self, t: i64) -> String {
+        let q = self.moment();
+        let mut crumbs = vec![format!(r#"<a href="/{q}">everyone</a>"#)];
+        if let Some(w) = &self.who {
+            let mut href = format!("/{w}");
+            crumbs.push(format!(r#"<a href="{}{q}">{}</a>"#, esc(&href), esc(w)));
+            for seg in self.agent.split('/').filter(|s| !s.is_empty()) {
+                href = format!("{href}/{seg}");
+                crumbs.push(format!(r#"<a href="{}{q}">{}</a>"#, esc(&href), esc(seg)));
+            }
+        }
+        let path = esc(&self.path());
+        let step = |at: Option<i64>, label: &str| match at {
+            Some(e) => format!(r#"<a href="{path}?at={e}">{label}</a>"#),
+            None => format!("<span class=dim>{label}</span>"),
+        };
+        let mut scrub = vec![step(self.prev, "◀ previous event")];
+        if self.at.is_some() {
+            scrub.push(format!("<b>as of {}</b>", stamp(t)));
+            scrub.push(step(self.next, "next event ▶"));
+            scrub.push(format!(r#"<a href="{path}">now</a>"#));
+        }
+        if let Some(o) = self.oldest.filter(|&o| t < o) {
+            scrub.push(format!(
+                "<span class=dim>nothing this page can see goes back that far — it starts {}</span>",
+                stamp(o)
+            ));
+        }
+        format!(
+            "<nav class=crumbs>{}</nav><nav class=scrub>{}</nav>",
+            crumbs.join(" / "),
+            scrub.join(" · ")
+        )
+    }
+}
+
+/// One dashboard page: everyone, one person, or one agent and its subagents,
+/// now or as it stood at a moment.
+fn page(
+    c: &Cfg,
+    k: &Keys,
+    r: &Route,
+    links: Option<&(String, String)>,
+) -> Result<String, String> {
+    let now_t = now();
+    let at = r.at.as_deref().map(|s| parse_at(s, now_t)).transpose()?;
+    let scope = r.who.as_ref().map(|w| match r.agent.as_str() {
+        "" => w.clone(),
+        a => format!("{w}/{a}"),
+    });
+    let subs = crypto::load_peers();
+    let keep = |p: &Plan| peer_matches(p, scope.as_deref(), &subs);
+
+    // ponytail: the newest MAX_POST_LIMIT entries are all a page can scrub
+    // through; going further back means paging with `before=`.
+    let posts: Vec<Plan> = fetch_posts(c, k, MAX_POST_LIMIT)
+        .into_iter()
+        .filter(|p| keep(p))
+        .collect();
+    let epochs: Vec<i64> = posts.iter().map(|p| p.epoch).collect();
+    let t = at.unwrap_or(now_t);
+    let (prev, next) = neighbours(&epochs, t);
+    let view = View {
+        who: r.who.clone(),
+        agent: r.agent.clone(),
+        at,
+        prev,
+        next,
+        oldest: epochs.iter().min().copied(),
+    };
+    let (live, posts) = match at {
+        None => (
+            current_plans(c, k).into_iter().filter(|p| keep(p)).collect(),
+            posts,
+        ),
+        Some(t) => {
+            let then: Vec<Plan> = posts.into_iter().filter(|p| p.epoch <= t).collect();
+            (claims_at(&then, t), then)
+        }
+    };
+    Ok(dashboard(&live, &posts, c, t, links, &view))
 }
 
 fn esc(s: &str) -> String {
@@ -3830,6 +4086,7 @@ fn ticket_rows(
     repo: &dyn Fn(&Plan) -> String,
     t: i64,
     shas: &dyn Fn(&Plan) -> String,
+    agent: &dyn Fn(&Plan) -> String,
 ) -> String {
     // (key, link, entries newest first). Claims first, so a live claim is the
     // row's newest word even when an older release shares its ticket.
@@ -3884,7 +4141,7 @@ fn ticket_rows(
                 "<tr><td>{name}</td><td>{state}</td><td>{} {}</td><td>{}</td><td>{}</td></tr>",
                 esc(&head.task),
                 shas(&all),
-                esc(&who(head, true)),
+                agent(head),
                 ago(t - head.epoch),
             )
         })
@@ -3901,7 +4158,22 @@ fn dashboard(
     c: &Cfg,
     t: i64,
     links: Option<&(String, String)>,
+    view: &View,
 ) -> String {
+    // Every name on the page is a link to that agent's own page, at the same
+    // moment — the byline and the path are the same string.
+    let moment = view.moment();
+    let agent_href = |p: &Plan| match p.instance.as_str() {
+        "" => format!("/{}", name_for(&p.pubkey)),
+        i => format!("/{}/{i}", name_for(&p.pubkey)),
+    };
+    let agent = |p: &Plan| {
+        format!(
+            r#"<a href="{}{moment}">{}</a>"#,
+            esc(&agent_href(p)),
+            esc(&who(p, true))
+        )
+    };
     let held = |p: &Plan| {
         t.saturating_sub(if p.claimed_at > 0 {
             p.claimed_at
@@ -3958,7 +4230,7 @@ fn dashboard(
             .iter()
             .map(|(_, last, r)| {
                 let mine: Vec<&&Plan> = claims.iter().filter(|p| repo(p) == *r).collect();
-                let tickets = ticket_rows(&mine, &happened, r, &repo, t, &shas);
+                let tickets = ticket_rows(&mine, &happened, r, &repo, t, &shas, &agent);
                 // Anything filed under a ticket is summarised in its row; the
                 // claims table and the recent list keep only the rest.
                 let untagged: Vec<&&Plan> =
@@ -3976,7 +4248,7 @@ fn dashboard(
                             };
                             format!(
                                 "<tr><td>{state}</td><td>{}</td><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
-                                esc(&who(p, true)),
+                                agent(p),
                                 esc(&p.task),
                                 esc(&p.touching.join(" ")),
                                 dur(held(p)),
@@ -4006,7 +4278,7 @@ fn dashboard(
                         };
                         format!(
                             "<div class=item>{text}<div class=sub>{} · {}{paths}</div></div>",
-                            esc(&who(p, true)),
+                            agent(p),
                             ago(t - p.epoch),
                         )
                     })
@@ -4033,7 +4305,7 @@ fn dashboard(
             .map(|p| {
                 format!(
                     "<div class=item><b>{}</b> in {} — silent {}, claim lapses in {}<div class=sub><code>{}</code> {}</div></div>",
-                    esc(&who(p, true)),
+                    agent(p),
                     esc(&repo(p)),
                     dur(t - p.epoch),
                     dur(p.epoch + p.eta_s * STALE_MULT - t),
@@ -4055,11 +4327,52 @@ fn dashboard(
                 format!(
                     "<div class=item>{mine}<b>{}</b><div class=sub>{} → {to} · {} · {} · <code>robofinger answer --to {} --re {} \"…\"</code></div></div>",
                     esc(&p.task),
-                    esc(&who(p, true)),
+                    agent(p),
                     esc(&repo(p)),
                     ago(t - p.epoch),
                     esc(&p.alias),
                     p.id,
+                )
+            })
+            .collect()
+    };
+
+    // The agents on this page as a tree, each under its parent the way their
+    // names nest. Built from what the page can see, so an agent appears once
+    // it has claimed or written something.
+    let mut agents: Vec<(String, &Plan)> = Vec::new();
+    for p in claims.iter().copied().chain(posts.iter()) {
+        let key = agent_href(p);
+        match agents.iter_mut().find(|a| a.0 == key) {
+            Some(a) if p.epoch > a.1.epoch => a.1 = p,
+            Some(_) => {}
+            None => agents.push((key, p)),
+        }
+    }
+    // `/` sorts before any digit, so `claude-1/explore-1` lands under
+    // `claude-1` and ahead of `claude-10`.
+    agents.sort_by(|a, b| a.0.cmp(&b.0));
+    let agents_panel = if agents.is_empty() {
+        empty("Nobody on the record here")
+    } else {
+        agents
+            .iter()
+            .map(|(_, p)| {
+                let holding = claims
+                    .iter()
+                    .find(|c| c.pubkey == p.pubkey && c.instance == p.instance);
+                let state = match holding {
+                    Some(c) if stuck(c, t) => format!(
+                        r#"holds <code>{}</code> <span class="tag bad">quiet</span>"#,
+                        esc(&c.touching.join(" "))
+                    ),
+                    Some(c) => format!("holds <code>{}</code>", esc(&c.touching.join(" "))),
+                    None => format!("<span class=dim>last seen {}</span>", ago(t - p.epoch)),
+                };
+                format!(
+                    r#"<div class=item style="padding-left:{}px">{}<div class=sub>{state}</div></div>"#,
+                    16 * p.instance.matches('/').count(),
+                    agent(p),
                 )
             })
             .collect()
@@ -4072,10 +4385,20 @@ fn dashboard(
             String::new()
         }
     };
+    // A page fixed at a moment must not refresh itself away from it.
+    let refresh = if view.at.is_none() {
+        r#"<meta http-equiv="refresh" content="15">"#
+    } else {
+        ""
+    };
+    let when = match view.at {
+        Some(_) => format!("as of {}", stamp(t)),
+        None => format!("refreshed {}", stamp(t)),
+    };
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="15"><title>robofinger · {alias}</title>
+{refresh}<title>robofinger · {alias}</title>
 <style>
 :root{{--bg:#111;--panel:#1a1a1a;--line:#333;--fg:#ddd;--dim:#888;--hi:#f5a623;--ok:#3fb950;--bad:#f85149}}
 @media (prefers-color-scheme: light){{:root{{--bg:#f6f6f6;--panel:#fff;--line:#ddd;--fg:#222;--dim:#666;--hi:#b36b00;--ok:#1a7f37;--bad:#cf222e}}}}
@@ -4089,19 +4412,22 @@ table{{border-collapse:collapse;width:100%}} th,td{{text-align:left;padding:4px 
 .tag{{border:1px solid var(--dim);border-radius:3px;padding:0 6px;font-size:12px;white-space:nowrap}} .tag.bad{{border-color:var(--bad);color:var(--bad)}}
 .item{{padding:4px 0 8px}} .sub{{color:var(--dim);font-size:12px}} .none{{color:var(--dim);font-style:italic;margin:0}} .ok{{color:var(--ok);font-weight:bold;margin:0}}
 code{{font-size:12px}} a{{color:var(--hi)}} .dim{{color:var(--dim)}}
+nav{{font-size:12px;margin-top:6px}} nav.scrub b{{color:var(--hi)}}
 .ph{{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px}} h2.proj{{font-size:15px;text-transform:none;letter-spacing:0;color:var(--hi);margin:0}} .ph span{{font-size:12px}} table.tickets{{margin-bottom:10px}}
 </style></head><body>
-<header><h1>robofinger</h1><span class=dim>{alias} · {n} live claims across {np} repos · refreshed {stamp}</span></header>
+<header><h1>robofinger</h1><span class=dim>{alias} · {n} live claims across {np} repos · {when}</span>{nav}</header>
 <div class=grid><div>
 {project_panels}
 </div><div>
+<section><h2>Agents{c_agents}</h2>{agents_panel}</section>
 <section><h2>Stuck{c_stuck}</h2>{stuck_panel}</section>
 <section><h2>Open questions{c_asks}</h2>{asks_panel}</section>
 </div></div></body></html>"#,
         alias = esc(&c.alias),
         n = claims.len(),
-        stamp = stamp(t),
         np = projects.len(),
+        nav = view.nav(t),
+        c_agents = count(agents.len()),
         c_stuck = count(quiet.len()),
         c_asks = count(asks.len()),
     )
@@ -5029,7 +5355,7 @@ mod tests {
         let mut posts = posts;
         posts.insert(0, shipped);
 
-        let html = dashboard(&[fresh, quiet], &posts, &cfg, t, None);
+        let html = dashboard(&[fresh, quiet], &posts, &cfg, t, None, &View::default());
         let at = |r: &str| html.find(&format!("<h2 class=proj>{r}</h2>")).unwrap();
         assert!(at("repo") < at("other"), "busy repos first");
         assert!(html.contains("2 working"));
@@ -5150,7 +5476,7 @@ mod tests {
             alias: "me".into(),
             instance: String::new(),
         };
-        let html = dashboard(&[claim], &[earlier, loose], &cfg, t, None);
+        let html = dashboard(&[claim], &[earlier, loose], &cfg, t, None, &View::default());
         assert_eq!(
             html.matches("<td>#88</td>").count(),
             1,
@@ -5168,5 +5494,173 @@ mod tests {
             html.contains("unrelated cleanup"),
             "untagged work still listed"
         );
+    }
+    /// A timeline entry by agent `instance` of key `pk-me`, at `epoch`.
+    fn entry(instance: &str, kind: &str, globs: &[&str], epoch: i64) -> Plan {
+        let mut p = plan("me", "demo", &[], "post", 0);
+        p.instance = instance.into();
+        p.kind = kind.into();
+        p.globs = globs.iter().map(|s| s.to_string()).collect();
+        p.task = format!("{kind} by {instance}");
+        p.epoch = epoch;
+        p
+    }
+
+    /// The dashboard path is the byline the record already prints:
+    /// who, then the agent's own path, so a subagent nests under its parent.
+    #[test]
+    fn a_dashboard_path_names_who_and_which_agent() {
+        let r = parse_route("/").unwrap();
+        assert_eq!((r.who, r.agent.as_str(), r.at), (None, "", None));
+
+        let r = parse_route("/wheat-falcon").unwrap();
+        assert_eq!((r.who.as_deref(), r.agent.as_str()), (Some("wheat-falcon"), ""));
+
+        let r = parse_route("/wheat-falcon/claude-1/explore-2?at=1792893051").unwrap();
+        assert_eq!(r.who.as_deref(), Some("wheat-falcon"));
+        assert_eq!(r.agent, "claude-1/explore-2");
+        assert_eq!(r.at.as_deref(), Some("1792893051"));
+
+        let r = parse_route("/wheat-falcon/claude-1/?at=2h&x=1").unwrap();
+        assert_eq!((r.agent.as_str(), r.at.as_deref()), ("claude-1", Some("2h")), "trailing slash, other params");
+
+        assert!(parse_route("/favicon.ico").is_none(), "costs a relay round trip for nothing");
+        assert!(parse_route("/<script>").is_none());
+        assert!(parse_route("/a/../b").is_none());
+        assert!(parse_route("no-slash").is_none());
+    }
+
+    /// A path selects an agent and everything below it, never a sibling, and
+    /// never an agent that merely starts with the same characters.
+    #[test]
+    fn a_path_selects_an_agent_and_its_subagents() {
+        let me = name_for("pk-me");
+        let at = |instance: &str| {
+            let mut p = plan("me", "demo", &["a"], "working", 0);
+            p.instance = instance.into();
+            p
+        };
+        let parent = format!("{me}/claude-1");
+        assert!(peer_matches(&at("claude-1"), Some(&parent), &[]));
+        assert!(peer_matches(&at("claude-1/explore-2"), Some(&parent), &[]));
+        assert!(!peer_matches(&at("claude-10"), Some(&parent), &[]));
+        assert!(!peer_matches(&at("claude-2"), Some(&parent), &[]));
+        assert!(
+            !peer_matches(&at("claude-1/explore-1"), Some(&format!("{me}/claude-1/explore-2")), &[]),
+            "a sibling"
+        );
+        assert!(peer_matches(&at("claude-2"), Some(&me), &[]), "a bare name is everyone on that key");
+        assert!(!peer_matches(&at("claude-1"), Some("someone-else/claude-1"), &[]));
+    }
+
+    /// The past is replayed from the timeline: a claim holds until its
+    /// release, a later claim replaces it, and one that goes quiet for longer
+    /// than a claim lives fades — the timeline records changes, not heartbeats.
+    #[test]
+    fn claims_at_a_moment_are_replayed_from_the_timeline() {
+        let held = |posts: &[Plan], t: i64| -> Vec<(String, Vec<String>)> {
+            let mut v: Vec<_> = claims_at(posts, t)
+                .into_iter()
+                .map(|p| (p.instance, p.touching))
+                .collect();
+            v.sort();
+            v
+        };
+        let t0 = 1_000_000;
+        let posts = vec![
+            entry("claude-1", "claim", &["src/**"], t0),
+            entry("claude-1/explore-1", "claim", &["a.txt"], t0 + 10),
+            entry("claude-1/explore-1", "release", &["a.txt"], t0 + 70),
+            entry("claude-1", "claim", &["lib/**"], t0 + 100),
+        ];
+        assert_eq!(held(&posts, t0 - 1), vec![], "before anything");
+        assert_eq!(
+            held(&posts, t0 + 20),
+            vec![
+                ("claude-1".into(), vec!["src/**".into()]),
+                ("claude-1/explore-1".into(), vec!["a.txt".into()]),
+            ]
+        );
+        assert_eq!(held(&posts, t0 + 80), vec![("claude-1".into(), vec!["src/**".into()])], "released");
+        assert_eq!(held(&posts, t0 + 100), vec![("claude-1".into(), vec!["lib/**".into()])], "replaced");
+
+        let lapse = DEFAULT_ETA * STALE_MULT;
+        assert_eq!(held(&posts, t0 + 100 + lapse + 1), vec![], "quiet past a claim's life");
+        let mut busy = posts.clone();
+        busy.push(entry("claude-1", "", &[], t0 + 100 + lapse - 10));
+        assert_eq!(
+            held(&busy, t0 + 100 + lapse + 1).len(),
+            1,
+            "any entry from the agent says it is still there"
+        );
+        let mut done = posts.clone();
+        done.push(entry("claude-1", "done", &[], t0 + 200));
+        assert_eq!(held(&done, t0 + 201), vec![], "done drops it too");
+    }
+
+    /// `?at=` takes what a person types or a link carries.
+    #[test]
+    fn at_takes_an_epoch_a_duration_or_a_local_time() {
+        let now = 1_792_893_051;
+        assert_eq!(parse_at("1792800000", now), Ok(1_792_800_000));
+        assert_eq!(parse_at("2h", now), Ok(now - 7200));
+        let t = 1_792_890_000;
+        let typed = stamp(t).replace(' ', "T");
+        assert_eq!(parse_at(&typed, now), Ok(t - t % 60), "a stamp, typed back, lands on its minute");
+        assert!(parse_at("yesterday", now).is_err());
+        assert!(parse_at("2026-13-01T00:00", now).is_err());
+    }
+
+    /// Scrubbing steps from event to event, not by a fixed interval: the
+    /// moments worth looking at are the ones where something changed.
+    #[test]
+    fn scrubbing_steps_to_the_events_either_side() {
+        let e = [100, 200, 300];
+        assert_eq!(neighbours(&e, 200), (Some(100), Some(300)));
+        assert_eq!(neighbours(&e, 250), (Some(200), Some(300)), "between events");
+        assert_eq!(neighbours(&e, 100), (None, Some(200)));
+        assert_eq!(neighbours(&e, 300), (Some(200), None));
+        assert_eq!(neighbours(&[], 5), (None, None));
+    }
+
+    /// A page fixed at a moment does not refresh itself away from it, its
+    /// agent names link to their own pages at the same moment, and it can
+    /// step to the events either side.
+    #[test]
+    fn a_dashboard_at_a_moment_links_agents_and_steps_through_events() {
+        let cfg = Cfg {
+            instance: "claude-1".into(),
+            url: String::new(),
+            alias: "me".into(),
+        };
+        let t = 1_000_500;
+        let mut claim = plan("me", "demo", &["src/**"], "working", 0);
+        claim.instance = "claude-1/explore-2".into();
+        claim.epoch = t - 100;
+        let view = View {
+            who: Some(name_for("pk-me")),
+            agent: "claude-1".into(),
+            at: Some(t),
+            prev: Some(t - 100),
+            next: Some(t + 60),
+            oldest: Some(t - 100),
+        };
+        let html = dashboard(&[claim], &[], &cfg, t, None, &view);
+        let me = name_for("pk-me");
+        assert!(!html.contains("http-equiv=\"refresh\""), "a fixed moment stays put");
+        assert!(
+            html.contains(&format!("href=\"/{me}/claude-1/explore-2?at={t}\"")),
+            "the subagent links to its own page at this moment"
+        );
+        assert!(html.contains(&format!("href=\"/{me}/claude-1?at={}\"", t - 100)), "previous event");
+        assert!(html.contains(&format!("href=\"/{me}/claude-1?at={}\"", t + 60)), "next event");
+        assert!(html.contains(&format!("href=\"/{me}/claude-1\"")), "back to now");
+        assert!(
+            html.contains(&format!("href=\"/{me}?at={t}\"")),
+            "the breadcrumb climbs to the person, staying at this moment"
+        );
+
+        let live = dashboard(&[], &[], &cfg, t, None, &View::default());
+        assert!(live.contains("http-equiv=\"refresh\""), "the live page still refreshes");
     }
 }

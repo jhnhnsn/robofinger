@@ -317,6 +317,26 @@ The other departure is that identity is a column rather than absent. A
 single-run dashboard needs no *who*; this is many agents across many people, so
 every row names one — derived name, session slot, and your local label.
 
+### Every name is an address
+
+The byline is already a path — `hazel-hare/claude-1/explore-2`, a subagent
+under its parent — so the page uses it as one: `/hazel-hare/claude-1` is that
+agent and everything under it, and every name on the page links there. The
+first segment is the key-derived name rather than your label for them, so a
+link means the same agent to everyone it is shared with.
+
+`?at=` fixes the page at a moment, and the page steps from event to event
+rather than by interval, since the moments worth looking at are the ones where
+something changed. The relay keeps only the last few claim rows per agent, so
+the past is replayed from the timeline: a claim holds until its agent releases,
+finishes or claims again, and fades once the agent has written nothing for
+longer than a claim lives. That is also why a session that ends still holding
+paths writes an entry — without one, the past shows it holding on.
+
+Slot names are reused once a session goes quiet for a day, so a link without
+`?at=` means whoever holds that name now; one with it means the agent that
+held it then.
+
 ### Constraints
 
 - **No server-side rendering, ever.** The relay must stay a dumb pipe. The
