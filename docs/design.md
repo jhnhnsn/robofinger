@@ -337,6 +337,36 @@ Slot names are reused once a session goes quiet for a day, so a link without
 `?at=` means whoever holds that name now; one with it means the agent that
 held it then.
 
+### Live, scoped left to right
+
+The page reads broad to narrow, left to right:
+- **The project.** Its plan, in the order it lands, with who is on each item.
+- **The agents.** Machine identity, then agent, then subagent, each level
+  folding away. Each agent has a status line like the one under Claude Code's
+  input box: `✻ Running cargo test · 2m 14s`, `‖ Your turn`, `✓ Done`.
+- **The one entity the URL names.** What it holds and the trail of what it did.
+
+This machine's agents come from the activity spool, so they are live to the
+second. Everyone else's come from the relay, which knows what they hold and when
+they last wrote, but not what they are doing between writes. That waits on a
+presence channel that is never stored (#30).
+
+A live page re-fetches itself every two seconds and swaps the board in. It keeps
+what you folded folded and marks agents that have just appeared, and a small
+script ticks the durations in between. That script is the only one on the page,
+and it adds nothing a reader without it lacks: without script the page renders
+the same and reloads every 15 seconds. Pages fixed with `?at=` load no script at
+all. `serve` caches relay answers for 15 seconds and the tracker's for a minute,
+because the hooks on the same machine share the relay's per-IP limit with it.
+
+The plan comes from GitHub through `gh`, with the person's own credentials. It
+is grouped by milestone, earliest due first, or by `phase-*` label when there
+are no milestones. Every work item links to its tracker. GitHub, GitLab and
+Bitbucket links are derived from `origin`, and any other tracker takes a
+template: `ROBOFINGER_TICKET_URL=https://acme.atlassian.net/browse/{key}`. A
+`{key}` template is also what makes a bare `ENG-123` count as a ticket, since
+ADRs are numbered the same way.
+
 ### Constraints
 
 - **No server-side rendering, ever.** The relay must stay a dumb pipe. The

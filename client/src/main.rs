@@ -23,8 +23,10 @@
 
 mod activity;
 mod crypto;
+mod dash;
 mod hooks;
 mod selfupdate;
+mod tracker;
 
 use crypto::{Keys, Peer};
 use serde::{Deserialize, Serialize};
@@ -195,8 +197,11 @@ THE TIMELINE
       (--re quotes the question back, so the asker sees what was answered.
        ids come from `robofinger since --ids`)
 
-  serve [--port N]              the same record as a page in your browser
+  serve [--port N]              the same record as a live page in your browser
       robofinger serve          then open http://127.0.0.1:7380
+      (the plan comes from GitHub via `gh`; work items link to the tracker —
+       github, gitlab and bitbucket from `origin`, anything else via
+       ROBOFINGER_TICKET_URL, e.g. https://acme.atlassian.net/browse/{key})
       …/hazel-hare/claude-1     one agent and the subagents under it
       …/hazel-hare/claude-1?at=2h
                                 as it stood two hours ago, stepping event
@@ -955,14 +960,7 @@ fn commit_url_template() -> Option<String> {
     {
         return Some(t);
     }
-    let out = std::process::Command::new("git")
-        .current_dir(repo_root())
-        .args(["remote", "get-url", "origin"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let base = normalize_remote(&raw)?;
+    let base = origin_base()?;
     // The three big forges agree on everything but one path segment.
     let host = base
         .split('/')
@@ -978,6 +976,17 @@ fn commit_url_template() -> Option<String> {
         _ => return None,
     };
     Some(format!("{base}{seg}{{sha}}"))
+}
+
+/// This repo's `origin` as a browsable `https://host/org/repo`, or None.
+fn origin_base() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .current_dir(repo_root())
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    normalize_remote(String::from_utf8_lossy(&out.stdout).trim())
 }
 
 /// `git@host:org/repo.git` and `https://host/org/repo.git` to `https://host/org/repo`.
@@ -3627,7 +3636,20 @@ const FINISHED_SHOWN: i64 = 60;
 /// Each agent on this machine and what it is doing, from the activity spool:
 /// `(instance, status)`, in tree order.
 fn local_activity(t: i64) -> Vec<(String, activity::Status)> {
-    let events = activity::read(&activity::dir(&crypto::config_dir()));
+    local_spool(t).1
+}
+
+/// The spool as it stood at `t`, and each agent's status then. It keeps a
+/// few hundred lines per session, so a moment scrubbed to recently still
+/// shows what this machine's agents were doing in it.
+fn local_spool(t: i64) -> (Vec<activity::Event>, Vec<(String, activity::Status)>) {
+    let mut events = activity::read(&activity::dir(&crypto::config_dir()));
+    events.retain(|e| e.t <= t);
+    let statuses = statuses(&events, t);
+    (events, statuses)
+}
+
+fn statuses(events: &[activity::Event], t: i64) -> Vec<(String, activity::Status)> {
     let mut agents: Vec<&str> = events.iter().map(|e| e.agent.as_str()).collect();
     agents.sort();
     agents.dedup();
@@ -3890,6 +3912,8 @@ fn serve(c: &Cfg, k: &Keys, port: u16) -> std::io::Result<()> {
     // repo's origin, so it only links entries from this repo — a teammate's
     // sha from another project would get a link that 404s.
     let links = commit_url_template().map(|t| (project(), t));
+    let tracker = tracker::Tracker::load();
+    let mut cache = Cache::default();
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         // Browsers open a spare connection ahead of time and may never send
@@ -3904,7 +3928,7 @@ fn serve(c: &Cfg, k: &Keys, port: u16) -> std::io::Result<()> {
             .strip_prefix("GET ")
             .and_then(|r| r.split_whitespace().next())
             .and_then(parse_route);
-        let (status, body) = match route.map(|r| page(c, k, &r, links.as_ref())) {
+        let (status, body) = match route.map(|r| page(c, k, &r, links.as_ref(), &mut cache, &tracker)) {
             Some(Ok(html)) => ("200 OK", html),
             Some(Err(e)) => ("400 Bad Request", esc(&e)),
             None => ("404 Not Found", String::new()),
@@ -4105,6 +4129,49 @@ impl View {
     }
 }
 
+/// What `serve` keeps between requests. A live page re-fetches itself every
+/// two seconds, and a relay round trip each time would spend the per-IP
+/// limit the hooks on this machine also live under; the tracker is slower
+/// still. The activity spool is local and read fresh every time.
+#[derive(Default)]
+struct Cache {
+    posts: Option<(i64, Vec<Plan>)>,
+    live: Option<(i64, Vec<Plan>)>,
+    plan: Option<(i64, Option<Vec<tracker::Group>>)>,
+}
+
+/// How old a cached relay answer may be: what the page's refresh used to be.
+const RELAY_TTL: i64 = 15;
+const PLAN_TTL: i64 = 60;
+
+impl Cache {
+    fn posts(&mut self, c: &Cfg, k: &Keys) -> Vec<Plan> {
+        let t = now();
+        if self.posts.as_ref().is_none_or(|(at, _)| t - at >= RELAY_TTL) {
+            // ponytail: the newest MAX_POST_LIMIT entries are all a page can
+            // scrub through; going further back means paging with `before=`.
+            self.posts = Some((t, fetch_posts(c, k, MAX_POST_LIMIT)));
+        }
+        self.posts.as_ref().map(|(_, p)| p.clone()).unwrap_or_default()
+    }
+
+    fn live(&mut self, c: &Cfg, k: &Keys) -> Vec<Plan> {
+        let t = now();
+        if self.live.as_ref().is_none_or(|(at, _)| t - at >= RELAY_TTL) {
+            self.live = Some((t, current_plans(c, k)));
+        }
+        self.live.as_ref().map(|(_, p)| p.clone()).unwrap_or_default()
+    }
+
+    fn plan(&mut self) -> Option<Vec<tracker::Group>> {
+        let t = now();
+        if self.plan.as_ref().is_none_or(|(at, _)| t - at >= PLAN_TTL) {
+            self.plan = Some((t, tracker::plan()));
+        }
+        self.plan.as_ref().and_then(|(_, p)| p.clone())
+    }
+}
+
 /// One dashboard page: everyone, one person, or one agent and its subagents,
 /// now or as it stood at a moment.
 fn page(
@@ -4112,6 +4179,8 @@ fn page(
     k: &Keys,
     r: &Route,
     links: Option<&(String, String)>,
+    cache: &mut Cache,
+    tracker: &tracker::Tracker,
 ) -> Result<String, String> {
     let now_t = now();
     let at = r.at.as_deref().map(|s| parse_at(s, now_t)).transpose()?;
@@ -4122,12 +4191,8 @@ fn page(
     let subs = crypto::load_peers();
     let keep = |p: &Plan| peer_matches(p, scope.as_deref(), &subs);
 
-    // ponytail: the newest MAX_POST_LIMIT entries are all a page can scrub
-    // through; going further back means paging with `before=`.
-    let posts: Vec<Plan> = fetch_posts(c, k, MAX_POST_LIMIT)
-        .into_iter()
-        .filter(|p| keep(p))
-        .collect();
+    let all_posts = cache.posts(c, k);
+    let posts: Vec<Plan> = all_posts.iter().filter(|p| keep(p)).cloned().collect();
     let epochs: Vec<i64> = posts.iter().map(|p| p.epoch).collect();
     let t = at.unwrap_or(now_t);
     let (prev, next) = neighbours(&epochs, t);
@@ -4139,17 +4204,28 @@ fn page(
         next,
         oldest: epochs.iter().min().copied(),
     };
-    let (live, posts) = match at {
-        None => (
-            current_plans(c, k).into_iter().filter(|p| keep(p)).collect(),
-            posts,
-        ),
-        Some(t) => {
-            let then: Vec<Plan> = posts.into_iter().filter(|p| p.epoch <= t).collect();
-            (claims_at(&then, t), then)
-        }
+    let all_posts: Vec<Plan> = all_posts.into_iter().filter(|p| p.epoch <= t).collect();
+    let all_live = match at {
+        None => cache.live(c, k),
+        Some(t) => claims_at(&all_posts, t),
     };
-    Ok(dashboard(&live, &posts, c, t, links, &view))
+    let live: Vec<Plan> = all_live.iter().filter(|p| keep(p)).cloned().collect();
+    let posts: Vec<Plan> = posts.into_iter().filter(|p| p.epoch <= t).collect();
+    let (events, local) = local_spool(t);
+    let plan = cache.plan();
+    let me = k.pubkey();
+    let b = dash::Board {
+        live: &live,
+        posts: &posts,
+        all_live: &all_live,
+        all_posts: &all_posts,
+        local: &local,
+        events: &events,
+        me: &me,
+        plan: plan.as_deref(),
+        tracker,
+    };
+    Ok(render(&b, c, t, links, &view))
 }
 
 fn esc(s: &str) -> String {
@@ -4214,15 +4290,7 @@ fn ticket_ref(task: &str) -> Option<(String, Option<String>)> {
         let seg = parts.find(|seg| matches!(*seg, "issues" | "issue" | "browse"))?;
         let id = parts.next().filter(|id| !id.is_empty())?;
         // Bitbucket Server browses files under the same word Jira browses issues.
-        let jira_key = |id: &str| {
-            id.split_once('-').is_some_and(|(p, n)| {
-                p.starts_with(|c: char| c.is_ascii_uppercase())
-                    && p.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-                    && !n.is_empty()
-                    && n.bytes().all(|b| b.is_ascii_digit())
-            })
-        };
-        if seg == "browse" && !jira_key(id) {
+        if seg == "browse" && !tracker::is_key(id) {
             return None;
         }
         let key = if id.bytes().all(|b| b.is_ascii_digit()) {
@@ -4264,6 +4332,7 @@ fn carry_ticket(claim: &str, note: &str) -> String {
 
 /// One row per ticket in a repo: where it stands, who touched it last, and
 /// the commits filed under it.
+#[allow(clippy::too_many_arguments)]
 fn ticket_rows(
     claims: &[&&Plan],
     happened: &[&Plan],
@@ -4272,6 +4341,7 @@ fn ticket_rows(
     t: i64,
     shas: &dyn Fn(&Plan) -> String,
     agent: &dyn Fn(&Plan) -> String,
+    tr: &tracker::Tracker,
 ) -> String {
     // (key, link, entries newest first). Claims first, so a live claim is the
     // row's newest word even when an older release shares its ticket.
@@ -4281,7 +4351,7 @@ fn ticket_rows(
         .map(|p| **p)
         .chain(happened.iter().copied().filter(|p| repo(p) == r));
     for p in entries {
-        let Some((key, link)) = ticket_ref(&p.task) else {
+        let Some((key, link)) = tr.find(&p.task) else {
             continue;
         };
         match rows.iter_mut().find(|x| x.0 == key) {
@@ -4301,7 +4371,7 @@ fn ticket_rows(
             let head = es[0];
             let live = claims
                 .iter()
-                .find(|c| ticket_ref(&c.task).is_some_and(|x| x.0 == *key));
+                .find(|c| tr.find(&c.task).is_some_and(|x| x.0 == *key));
             let state = match (live, head.kind.as_str()) {
                 (Some(c), _) if stuck(c, t) => r#"<span class="tag bad">quiet</span>"#,
                 (Some(_), _) => r#"<span class="tag">working</span>"#,
@@ -4336,7 +4406,8 @@ fn ticket_rows(
     )
 }
 
-/// `links` is (project, commit url template): shas link only within that repo.
+/// The page from what tests hand it: no spool, no tracker, nothing unscoped.
+#[cfg(test)]
 fn dashboard(
     live: &[Plan],
     posts: &[Plan],
@@ -4345,6 +4416,32 @@ fn dashboard(
     links: Option<&(String, String)>,
     view: &View,
 ) -> String {
+    let tr = tracker::Tracker::none();
+    let b = dash::Board {
+        live,
+        posts,
+        all_live: live,
+        all_posts: posts,
+        local: &[],
+        events: &[],
+        me: "",
+        plan: None,
+        tracker: &tr,
+    };
+    render(&b, c, t, links, view)
+}
+
+/// `links` is (project, commit url template): shas link only within that repo.
+fn render(
+    b: &dash::Board,
+    c: &Cfg,
+    t: i64,
+    links: Option<&(String, String)>,
+    view: &View,
+) -> String {
+    let (live, posts) = (b.live, b.posts);
+    let tr = b.tracker;
+    let here = project();
     // Every name on the page is a link to that agent's own page, at the same
     // moment — the byline and the path are the same string.
     let moment = view.moment();
@@ -4415,11 +4512,16 @@ fn dashboard(
             .iter()
             .map(|(_, last, r)| {
                 let mine: Vec<&&Plan> = claims.iter().filter(|p| repo(p) == *r).collect();
-                let tickets = ticket_rows(&mine, &happened, r, &repo, t, &shas, &agent);
+                // The plan already shows this repo's tickets, with who is on them.
+                let tickets = if b.plan.is_some() && *r == here {
+                    String::new()
+                } else {
+                    ticket_rows(&mine, &happened, r, &repo, t, &shas, &agent, tr)
+                };
                 // Anything filed under a ticket is summarised in its row; the
                 // claims table and the recent list keep only the rest.
                 let untagged: Vec<&&Plan> =
-                    mine.iter().filter(|p| ticket_ref(&p.task).is_none()).copied().collect();
+                    mine.iter().filter(|p| tr.find(&p.task).is_none()).copied().collect();
                 let table = if untagged.is_empty() {
                     String::new()
                 } else {
@@ -4446,7 +4548,7 @@ fn dashboard(
                 };
                 let recent = happened
                     .iter()
-                    .filter(|p| repo(p) == *r && ticket_ref(&p.task).is_none())
+                    .filter(|p| repo(p) == *r && tr.find(&p.task).is_none())
                     .take(6)
                     .map(|p| {
                         // A note is prose somebody chose to write; a release
@@ -4522,46 +4624,17 @@ fn dashboard(
             .collect()
     };
 
-    // The agents on this page as a tree, each under its parent the way their
-    // names nest. Built from what the page can see, so an agent appears once
-    // it has claimed or written something.
-    let mut agents: Vec<(String, &Plan)> = Vec::new();
-    for p in claims.iter().copied().chain(posts.iter()) {
-        let key = agent_href(p);
-        match agents.iter_mut().find(|a| a.0 == key) {
-            Some(a) if p.epoch > a.1.epoch => a.1 = p,
-            Some(_) => {}
-            None => agents.push((key, p)),
-        }
-    }
-    // `/` sorts before any digit, so `claude-1/explore-1` lands under
-    // `claude-1` and ahead of `claude-10`.
-    agents.sort_by(|a, b| a.0.cmp(&b.0));
-    let agents_panel = if agents.is_empty() {
-        empty("Nobody on the record here")
-    } else {
-        agents
-            .iter()
-            .map(|(_, p)| {
-                let holding = claims
-                    .iter()
-                    .find(|c| c.pubkey == p.pubkey && c.instance == p.instance);
-                let state = match holding {
-                    Some(c) if stuck(c, t) => format!(
-                        r#"holds <code>{}</code> <span class="tag bad">quiet</span>"#,
-                        esc(&c.touching.join(" "))
-                    ),
-                    Some(c) => format!("holds <code>{}</code>", esc(&c.touching.join(" "))),
-                    None => format!("<span class=dim>last seen {}</span>", ago(t - p.epoch)),
-                };
-                format!(
-                    r#"<div class=item style="padding-left:{}px">{}<div class=sub>{state}</div></div>"#,
-                    16 * p.instance.matches('/').count(),
-                    agent(p),
-                )
-            })
-            .collect()
-    };
+    // The whole team around the agent being looked at, scoped broad to
+    // narrow left to right: the project, the agents, then the one entity.
+    let ns = dash::nodes(b, t);
+    let team = dash::counts(&ns);
+    let agents_panel = dash::tree(b, &ns, c, t, view);
+    let feed_panel = dash::feed(b, t, view);
+    let detail_panel = dash::detail(b, &ns, c, t, view);
+    let plan_panel = b
+        .plan
+        .map(|g| dash::plan(g, b, &ns, t, view, &here))
+        .unwrap_or_default();
 
     let count = |n: usize| {
         if n > 0 {
@@ -4570,27 +4643,30 @@ fn dashboard(
             String::new()
         }
     };
-    // A page fixed at a moment must not refresh itself away from it.
-    let refresh = if view.at.is_none() {
-        r#"<meta http-equiv="refresh" content="15">"#
+    // A page fixed at a moment must not refresh itself away from it. A live
+    // one re-fetches itself; without script it falls back to reloading.
+    let (refresh, live_js) = if view.at.is_none() {
+        (
+            r#"<noscript><meta http-equiv="refresh" content="15"></noscript>"#,
+            dash::LIVE_JS,
+        )
     } else {
-        ""
+        ("", "")
     };
     let when = match view.at {
         Some(_) => format!("as of {}", stamp(t)),
-        None => format!("refreshed {}", stamp(t)),
+        None => format!("live · {}", stamp(t)),
     };
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {refresh}<title>robofinger · {alias}</title>
 <style>
-:root{{--bg:#111;--panel:#1a1a1a;--line:#333;--fg:#ddd;--dim:#888;--hi:#f5a623;--ok:#3fb950;--bad:#f85149}}
-@media (prefers-color-scheme: light){{:root{{--bg:#f6f6f6;--panel:#fff;--line:#ddd;--fg:#222;--dim:#666;--hi:#b36b00;--ok:#1a7f37;--bad:#cf222e}}}}
+:root{{--bg:#111;--panel:#1a1a1a;--line:#333;--fg:#ddd;--dim:#999;--hi:#f5a623;--ok:#3fb950;--bad:#f85149;--wait:#79c0ff}}
+@media (prefers-color-scheme: light){{:root{{--bg:#f6f6f6;--panel:#fff;--line:#ddd;--fg:#222;--dim:#666;--hi:#b36b00;--ok:#1a7f37;--bad:#cf222e;--wait:#0969da}}}}
 body{{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;margin:0;padding:16px}}
 header{{border-bottom:2px solid var(--hi);padding-bottom:8px;margin-bottom:16px}}
 h1{{color:var(--hi);font-size:20px;display:inline;margin-right:16px}}
-.grid{{display:grid;grid-template-columns:2fr 1fr;gap:12px}}@media (max-width:800px){{.grid{{grid-template-columns:1fr}}}}
 section{{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:10px 12px;margin-bottom:12px;overflow-x:auto}}
 h2{{font-size:12px;text-transform:uppercase;letter-spacing:.05em;margin:0 0 8px}} .n{{color:var(--hi)}}
 table{{border-collapse:collapse;width:100%}} th,td{{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);vertical-align:top}} th{{color:var(--dim);font-weight:normal;font-size:12px}}
@@ -4599,20 +4675,32 @@ table{{border-collapse:collapse;width:100%}} th,td{{text-align:left;padding:4px 
 code{{font-size:12px}} a{{color:var(--hi)}} .dim{{color:var(--dim)}}
 nav{{font-size:12px;margin-top:6px}} nav.scrub b{{color:var(--hi)}}
 .ph{{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px}} h2.proj{{font-size:15px;text-transform:none;letter-spacing:0;color:var(--hi);margin:0}} .ph span{{font-size:12px}} table.tickets{{margin-bottom:10px}}
+{css}
 </style></head><body>
-<header><h1>robofinger</h1><span class=dim>{alias} · {n} live claims across {np} repos · {when}</span>{nav}</header>
-<div class=grid><div>
+<header><h1>robofinger</h1><span class=dim id=summary>{alias} · {team} · {n} live claims across {np} repos · {when}</span>{nav}</header>
+<div class=cols id=board>
+<div class=col-l>
+{plan_panel}
 {project_panels}
-</div><div>
+</div>
+<div class=col-m>
 <section><h2>Agents{c_agents}</h2>{agents_panel}</section>
+<section><h2>Activity</h2>{feed_panel}</section>
+</div>
+<div class=col-r>
+{detail_panel}
 <section><h2>Stuck{c_stuck}</h2>{stuck_panel}</section>
 <section><h2>Open questions{c_asks}</h2>{asks_panel}</section>
-</div></div></body></html>"#,
+</div>
+</div>
+{live_js}</body></html>"#,
         alias = esc(&c.alias),
+        team = dash::summary(&team),
+        css = dash::CSS,
         n = claims.len(),
         np = projects.len(),
         nav = view.nav(t),
-        c_agents = count(agents.len()),
+        c_agents = count(ns.len()),
         c_stuck = count(quiet.len()),
         c_asks = count(asks.len()),
     )
@@ -5544,7 +5632,7 @@ mod tests {
         let at = |r: &str| html.find(&format!("<h2 class=proj>{r}</h2>")).unwrap();
         assert!(at("repo") < at("other"), "busy repos first");
         assert!(html.contains("2 working"));
-        assert!(!html.contains("<script>"));
+        assert!(!html.contains("<script>x"), "task text is escaped");
         assert!(html.contains("&lt;script&gt;"));
         assert!(html.contains("for you"));
     }
@@ -5692,9 +5780,11 @@ mod tests {
             html.contains("abc1234"),
             "commits roll up from earlier releases"
         );
+        let row = &html[html.find("<td>#88</td>").unwrap()..];
+        let row = &row[..row.find("</tr>").unwrap()];
         assert!(
-            !html.contains("schema landed"),
-            "the live claim is the latest word"
+            !row.contains("schema landed"),
+            "the live claim is the latest word in its row"
         );
         assert!(
             html.contains("unrelated cleanup"),
