@@ -479,6 +479,7 @@ does not execute a single query:
 cd relay/cloudflare-d1 && ./test_trim.sh && ./test_rate.sh && ./test_cursor.sh
 ```
 
-`test_trim.sh` pins the instance-eviction ranking key; `test_cursor.sh` pins
-`?after=`/`?before=` paging. Both duplicate the SQL from `src/index.js` rather
-than importing it — keep them in sync.
+`test_trim.sh` pins the instance-eviction ranking key; `test_rate.sh` pins the
+write bucket — a burst of 120 lands, the next is refused, and it drains at
+30/min; `test_cursor.sh` pins `?after=`/`?before=` paging. All three duplicate
+the SQL from `src/index.js` rather than importing it — keep them in sync.

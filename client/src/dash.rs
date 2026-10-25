@@ -720,5 +720,7 @@ mod tests {
         assert!(!in_scope(&view, me, "claude-10"));
         assert!(!in_scope(&view, "pk-other", "claude-1"));
         assert!(in_scope(&View::default(), "pk-other", "x"));
+        let by_label = View { who: Some("macbook".into()), ..View::default() };
+        assert!(!in_scope(&by_label, me, "claude-1"), "a local label is not an address");
     }
 }

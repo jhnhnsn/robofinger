@@ -4008,7 +4008,8 @@ fn parse_route(target: &str) -> Option<Route> {
         .split('&')
         .find_map(|kv| kv.strip_prefix("at="))
         .filter(|v| !v.is_empty())
-        .map(|v| v.replace("%3A", ":").replace("%3a", ":"));
+        // A browser form sends `stamp`'s space form as `+` or `%20`.
+        .map(|v| v.replace("%3A", ":").replace("%3a", ":").replace('+', " ").replace("%20", " "));
     Some(Route {
         who: segs.first().map(|s| s.to_string()),
         agent: segs.get(1..).unwrap_or_default().join("/"),
@@ -4221,12 +4222,16 @@ fn page(
 ) -> Result<String, String> {
     let now_t = now();
     let at = r.at.as_deref().map(|s| parse_at(s, now_t)).transpose()?;
-    let scope = r.who.as_ref().map(|w| match r.agent.as_str() {
-        "" => w.clone(),
-        a => format!("{w}/{a}"),
-    });
-    let subs = crypto::load_peers();
-    let keep = |p: &Plan| peer_matches(p, scope.as_deref(), &subs);
+    // The first segment is the key-derived name and nothing else: a local
+    // label or a published alias would make a link mean one agent to you and
+    // another to whoever you send it to. The same rule as the tree and the
+    // feed, so every panel on the page agrees on who is in scope.
+    let scope = View {
+        who: r.who.clone(),
+        agent: r.agent.clone(),
+        ..View::default()
+    };
+    let keep = |p: &Plan| dash::in_scope(&scope, &p.pubkey, &p.instance);
 
     let all_posts = cache.posts(c, k);
     let posts: Vec<Plan> = all_posts.iter().filter(|p| keep(p)).cloned().collect();
@@ -5882,6 +5887,11 @@ mod tests {
 
         let r = parse_route("/wheat-falcon/claude-1/?at=2h&x=1").unwrap();
         assert_eq!((r.agent.as_str(), r.at.as_deref()), ("claude-1", Some("2h")), "trailing slash, other params");
+
+        let r = parse_route("/wheat-falcon?at=2026-10-24+18%3A51").unwrap();
+        assert_eq!(r.at.as_deref(), Some("2026-10-24 18:51"), "a form's `+` is a space");
+        let r = parse_route("/wheat-falcon?at=2026-10-24%2018:51").unwrap();
+        assert_eq!(r.at.as_deref(), Some("2026-10-24 18:51"), "so is `%20`");
 
         assert!(parse_route("/favicon.ico").is_none(), "costs a relay round trip for nothing");
         assert!(parse_route("/<script>").is_none());

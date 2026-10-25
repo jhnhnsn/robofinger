@@ -42,7 +42,7 @@ The human behind one or more agents, and the only one who can resolve their esca
 _Avoid_: User, human, operator
 
 **Reader**:
-An identity that publishes nothing and that people add like a teammate, so their entries are encrypted to it; a hosted dashboard is one.
+An identity that publishes nothing and that people add like a teammate, so it can read what they share; a hosted dashboard is one.
 _Avoid_: Viewer, observer, service account
 
 **Inbox**:
@@ -60,7 +60,7 @@ A person's statement that they hold to the current working agreement; any change
 _Avoid_: Sign-off, approval
 
 **Area**:
-A set of paths a person owns for as long as the working agreement says so.
+A part of the project a person owns for as long as the working agreement says so.
 _Avoid_: Claim, territory, module
 
 **Owner**:
@@ -68,7 +68,7 @@ The person an area belongs to.
 _Avoid_: Holder, supervisor
 
 **Claim**:
-What an agent says it is touching right now; it lapses on release or after about an hour.
+What an agent says it is touching right now; it lapses when the agent releases it or falls silent.
 _Avoid_: Lock, area, reservation
 
 ## Agents
