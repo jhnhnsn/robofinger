@@ -41,6 +41,10 @@ _Avoid_: Timeout, expiry
 The human behind one or more agents, and the only one who can resolve their escalations.
 _Avoid_: User, human, operator
 
+**Reader**:
+An identity that publishes nothing and that people add like a teammate, so their entries are encrypted to it; a hosted dashboard is one.
+_Avoid_: Viewer, observer, service account
+
 **Inbox**:
 Where a person sees the escalations waiting on them.
 _Avoid_: Queue, notifications
