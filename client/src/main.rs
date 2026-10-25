@@ -3673,7 +3673,17 @@ const FINISHED_SHOWN: i64 = 60;
 /// Each agent on this machine and what it is doing, from the activity spool:
 /// `(instance, status)`, in tree order.
 fn local_activity(t: i64) -> Vec<(String, activity::Status)> {
-    local_spool(t).1
+    local_spool(t)
+        .1
+        .into_iter()
+        .filter(|(_, s)| !finished_long_ago(s, t))
+        .collect()
+}
+
+/// Finished, and past the minute it stays on screen. Still known to have
+/// finished — its own page says so — but no longer worth a row.
+fn finished_long_ago(s: &activity::Status, t: i64) -> bool {
+    matches!(s.state, activity::State::Done | activity::State::Gone) && t - s.since >= FINISHED_SHOWN
 }
 
 /// The spool as it stood at `t`, and each agent's status then. It keeps a
@@ -3694,12 +3704,11 @@ fn statuses(events: &[activity::Event], t: i64) -> Vec<(String, activity::Status
         .into_iter()
         .filter_map(|a| {
             let mine: Vec<&activity::Event> = events.iter().filter(|e| e.agent == a).collect();
+            // A finished agent is kept as long as any other, so a page that
+            // names it says it finished rather than falling back to the
+            // timeline's "last seen", which reads as still around.
             let s = activity::status(&mine)?;
-            let shown = match s.state {
-                activity::State::Done | activity::State::Gone => t - s.since < FINISHED_SHOWN,
-                _ => t - s.since < ACTIVITY_WINDOW,
-            };
-            shown.then(|| (a.to_string(), s))
+            (t - s.since < ACTIVITY_WINDOW).then(|| (a.to_string(), s))
         })
         .collect()
 }
@@ -4742,7 +4751,7 @@ nav{{font-size:12px;margin-top:6px}} nav.scrub b{{color:var(--hi)}}
         n = claims.len(),
         np = projects.len(),
         nav = view.nav(t),
-        c_agents = count(ns.len()),
+        c_agents = count(ns.iter().filter(|n| dash::shown(n, t)).count()),
         c_stuck = count(quiet.len()),
         c_asks = count(asks.len()),
     )

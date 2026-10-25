@@ -153,11 +153,18 @@ fn line(n: &Node, t: i64) -> Line {
             post: "",
         };
     }
+    // A teammate's agent: the relay knows its last entry, not whether it is
+    // still running, so say what that entry was.
     match n.last {
         Some(l) => Line {
-            glyph: "○",
-            cls: "st-claim",
-            text: "last seen".into(),
+            glyph: if l.kind == "done" { "✓" } else { "○" },
+            cls: if l.kind == "done" { "st-done" } else { "st-claim" },
+            text: match l.kind.as_str() {
+                "done" => "finished",
+                "release" => "released",
+                _ => "last seen",
+            }
+            .into(),
             since: Some(l.epoch),
             pre: "",
             post: " ago",
@@ -255,19 +262,30 @@ pub fn counts(ns: &[Node]) -> Counts {
     count(&ns.iter().collect::<Vec<_>>())
 }
 
+/// Whether an agent gets a row in the tree. One that finished more than a
+/// minute ago has gone, unless it somehow still holds a claim.
+pub fn shown(n: &Node, t: i64) -> bool {
+    n.claim.is_some() || !n.status.is_some_and(|s| finished_long_ago(s, t))
+}
+
 /// Machine identity, then agent, then subagent, each level collapsible.
 pub fn tree(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
+    let visible: Vec<&Node> = ns.iter().filter(|n| shown(n, t)).collect();
+    let ns = &visible[..];
     if ns.is_empty() {
         return r#"<p class="none">Nobody on the record right now</p>"#.into();
     }
     let moment = view.moment();
     let selected = view.path();
     let mut keys: Vec<&str> = ns.iter().map(|n| n.pubkey.as_str()).collect();
+    if keys.is_empty() {
+        return r#"<p class="none">Nobody on the record right now</p>"#.into();
+    }
     keys.sort_by_key(|k| (*k != b.me, name_for(k)));
     keys.dedup();
     keys.iter()
         .map(|pk| {
-            let mine: Vec<&Node> = ns.iter().filter(|n| n.pubkey == *pk).collect();
+            let mine: Vec<&Node> = ns.iter().copied().filter(|n| n.pubkey == *pk).collect();
             let name = name_for(pk);
             let label = if *pk == b.me {
                 let live = if view.at.is_none() { ", live" } else { "" };
@@ -697,6 +715,17 @@ a.n{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finished_agent_leaves_the_tree_after_its_minute_but_stays_finished() {
+        let t = 10_000;
+        let done = |since| activity::Status { state: activity::State::Done, text: "Done".into(), since };
+        let (recent, old) = (done(t - 30), done(t - 600));
+        let node = |s| Node { pubkey: "pk".into(), instance: "claude-1/general-1".into(), claim: None, last: None, status: Some(s) };
+        assert!(shown(&node(&recent), t), "seen finishing");
+        assert!(!shown(&node(&old), t), "gone from the tree");
+        assert_eq!(line(&node(&old), t).cls, "st-done", "its own page still says it finished");
+    }
 
     #[test]
     fn elapsed_shows_seconds_while_they_matter() {
