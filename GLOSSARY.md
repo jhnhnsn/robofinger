@@ -51,9 +51,21 @@ _Avoid_: Queue, notifications
 
 ## Working together
 
+**Project**:
+What a team works on together and sees together; it can span several codebases, and only those who have joined it see its record.
+_Avoid_: Repo, namespace, workspace, group
+
+**Member**:
+A person whose folders have joined a project, and so who reads and is read by the others in it.
+_Avoid_: Peer, collaborator, participant
+
+**Invitation**:
+What one member hands another person so they can join a project, vouched for by the member who gives it.
+_Avoid_: Access grant, token, link
+
 **Working agreement**:
-The rules a team sets for working on one project, and that each person accepts before working alongside the others.
-_Avoid_: Conventions, policy, contract
+The guidance a team sets for working on one project: whose areas are whose, where anyone may work, and where to ask first. Each member accepts it on joining.
+_Avoid_: Conventions, policy, contract, rules
 
 **Acceptance**:
 A person's statement that they hold to the current working agreement; any change to the agreement needs a fresh one.
