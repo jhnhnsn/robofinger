@@ -70,6 +70,12 @@ The claim said what you intended. The note says what you did — it is what a
 teammate reads to decide whether they can proceed. Claims expire on their own
 after roughly an hour, so a forgotten release is not fatal, just unhelpful.
 
+**Subagents claim too.** A subagent is an agent of its own, named under its
+parent (`claude-1/explore-2`). It claims what it will edit even inside its
+parent's claim — that is how its siblings see it — and its claim is released
+for it when it finishes. A parent and its own subagents never warn each other;
+siblings do.
+
 ## The timeline
 
 Claims are ephemeral — they say who holds what *right now*, and release drops
@@ -297,10 +303,14 @@ fn hook_json(bin: &str) -> serde_json::Value {
     serde_json::json!({
         "SessionStart": [cmd("start")],
         "SessionEnd": [cmd("end")],
+        // Bash so a subagent's own `robofinger claim` can be tagged with which
+        // subagent ran it; the main agent's commands return without a lookup.
         "PreToolUse": [{
-            "matcher": "Edit|Write|NotebookEdit",
+            "matcher": "Edit|Write|NotebookEdit|Bash",
             "hooks": [{ "type": "command", "command": format!("{bin} check") }]
-        }]
+        }],
+        "SubagentStart": [cmd("subagent-start")],
+        "SubagentStop": [cmd("subagent-stop")]
     })
 }
 
@@ -313,13 +323,17 @@ fn self_path() -> String {
         .unwrap_or_else(|| "robofinger".into())
 }
 
-/// True when settings.json already points at robofinger for all three events.
+/// True when settings.json already points at robofinger for every event it
+/// hooks — so an install from before an event was added reads as missing it.
 fn already_installed(settings: &serde_json::Value) -> bool {
     let Some(hooks) = settings.get("hooks") else {
         return false;
     };
-    ["SessionStart", "SessionEnd", "PreToolUse"]
-        .iter()
+    let events = hook_json("robofinger");
+    events
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.keys())
         .all(|k| {
             hooks
                 .get(k)
@@ -340,7 +354,7 @@ fn already_installed(settings: &serde_json::Value) -> bool {
 
 /// Merge the hooks into settings.json. Backs up any existing file first.
 ///
-/// Only the three robofinger events are touched; every other key — model,
+/// Only robofinger's own events are touched; every other key — model,
 /// plugins, permissions — is preserved exactly.
 pub fn install(force: bool, scope: Scope) -> Result<String, String> {
     let path = settings_path_for(scope);
@@ -469,16 +483,10 @@ mod tests {
         });
         assert!(
             !already_installed(&partial),
-            "one of three is not installed"
+            "one event is not an install"
         );
 
-        let full = serde_json::json!({
-            "hooks": {
-                "SessionStart": [{"hooks":[{"command":"robofinger start"}]}],
-                "SessionEnd":   [{"hooks":[{"command":"robofinger end"}]}],
-                "PreToolUse":   [{"hooks":[{"command":"robofinger check"}]}]
-            }
-        });
+        let full = serde_json::json!({ "hooks": hook_json("robofinger") });
         assert!(already_installed(&full));
     }
 
@@ -574,6 +582,24 @@ mod tests {
         let s = serde_json::to_string(&h).unwrap();
         assert!(s.contains("/opt/bin/robofinger start"));
         assert!(s.contains("/opt/bin/robofinger check"));
-        assert!(s.contains("Edit|Write|NotebookEdit"));
+        assert!(s.contains("/opt/bin/robofinger subagent-start"));
+        assert!(s.contains("/opt/bin/robofinger subagent-stop"));
+        assert!(s.contains("Edit|Write|NotebookEdit|Bash"), "Bash, to tag a subagent's claims");
+    }
+
+    /// An install from before subagents has the first three events and none
+    /// of the rest. It has to read as not installed, or `init` keeps it.
+    #[test]
+    fn an_install_without_the_subagent_hooks_is_not_installed() {
+        let old = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{"hooks":[{"command":"robofinger start"}]}],
+                "SessionEnd":   [{"hooks":[{"command":"robofinger end"}]}],
+                "PreToolUse":   [{"hooks":[{"command":"robofinger check"}]}]
+            }
+        });
+        assert!(!already_installed(&old));
+        let current = serde_json::json!({ "hooks": hook_json("robofinger") });
+        assert!(already_installed(&current));
     }
 }

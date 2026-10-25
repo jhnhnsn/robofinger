@@ -103,6 +103,14 @@ const CLAIM_RULE: &str = "\
   - Before editing files, claim them: `robofinger claim \"<task>\" '<glob>' …`
     (a claim replaces your previous one). `robofinger release` when done.";
 
+/// What a subagent gets on top of the claim rule. It works inside its
+/// parent's claim, so without this it reads that claim as covering it — and
+/// its siblings, who are not covered by it, never see what it touches.
+const SUBAGENT_RULE: &str = "\
+  - You are a subagent: your claims are your own, filed under your parent's
+    name, and released for you when you finish. Claim what you will edit even
+    inside your parent's claim — it is how your sibling subagents see you.";
+
 /// What SessionStart hands the agent. With nothing to act on, the rules for
 /// acting on it are just context spent, so only the claim rule goes in.
 fn start_context(mut blocks: Vec<String>) -> String {
@@ -207,7 +215,10 @@ AGENTS
   done                          mark finished
   check <path>                  conflict check; reads hook JSON on stdin
 
-  Your agent runs these through the hooks. You rarely type them.
+  Your agent runs these through the hooks. You rarely type them. A subagent
+  is its own agent, named under its parent (claude-1/explore-2): the hooks
+  tag its robofinger calls with --subagent and release its claim when it
+  finishes (subagent-start, subagent-stop).
 
 SETUP
 
@@ -526,6 +537,179 @@ fn slot_in(dir: &std::path::Path, family: &str, key: &str, t: i64) -> String {
     let _ = std::fs::create_dir_all(dir);
     let _ = std::fs::write(&path, body);
     name
+}
+
+/// A subagent's instance: its parent's, then its type and a number, so the
+/// record reads as a tree — `claude-1/explore-2`.
+///
+/// The subagent inherits its parent's session, so `session_key` cannot tell
+/// them apart; what can is the id the tool hands every hook a subagent fires.
+/// That id is the reservation key, so the edit check (which reads it from hook
+/// input) and a claim (which gets it from `--subagent`) land on the same name.
+/// Numbered per parent, so one session's swarm does not shift another's.
+fn subagent_instance(parent: &str, agent_type: &str, agent_id: &str) -> String {
+    subagent_instance_in(&crypto::config_dir(), parent, agent_type, agent_id, now())
+}
+
+/// `subagent_instance`, with the directory and clock injected.
+fn subagent_instance_in(
+    dir: &std::path::Path,
+    parent: &str,
+    agent_type: &str,
+    agent_id: &str,
+    t: i64,
+) -> String {
+    let kind = agent_kind(agent_type);
+    let family = if parent.is_empty() {
+        kind
+    } else {
+        format!("{parent}/{kind}")
+    };
+    slot_in(dir, &family, agent_id, t)
+}
+
+/// A subagent type reduced to something safe as part of a relay storage key
+/// and inside a shell command: lowercase, alphanumerics and single dashes,
+/// short. A plugin-scoped type (`my-plugin:reviewer`) keeps only its own name.
+fn agent_kind(agent_type: &str) -> String {
+    let own = agent_type.rsplit(':').next().unwrap_or("");
+    let mut out = String::new();
+    for ch in own.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.truncate(20);
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "agent".into()
+    } else {
+        out
+    }
+}
+
+/// An id the tool generated, accepted only as a plain token: it is spliced
+/// unquoted into the command `tag_robofinger` writes.
+fn plain_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The subagent a hook fired in, as (kind, id), or None in the main
+/// conversation — Claude Code and Codex both send `agent_id` and `agent_type`
+/// only from inside a subagent.
+fn hook_subagent(input: &serde_json::Value) -> Option<(String, String)> {
+    let id = input.get("agent_id")?.as_str().filter(|s| plain_token(s))?;
+    let kind = input.get("agent_type").and_then(|v| v.as_str()).unwrap_or("");
+    Some((agent_kind(kind), id.to_string()))
+}
+
+/// The `--subagent kind:id` value the hook wrote, back into (kind, id).
+fn parse_subagent(s: &str) -> Option<(String, String)> {
+    let (kind, id) = s.rsplit_once(':')?;
+    plain_token(id).then(|| (agent_kind(kind), id.to_string()))
+}
+
+/// Tag every robofinger invocation in a shell command with `--subagent`, or
+/// None when there is none to tag.
+///
+/// A subagent's `robofinger claim` is a shell command, and a shell command
+/// sees the session's environment but not which subagent ran it — only the
+/// hook does. The flag goes after the subcommand because anything in front of
+/// `robofinger` stops a `Bash(robofinger:*)` allow rule matching, and the
+/// subagent's call is then refused outright.
+///
+/// Only a `robofinger` in command position is touched — at the start, or after
+/// `;`, `&`, `|`, `(`, a backtick or a newline, past any `VAR=value` — and
+/// nothing inside quotes, so a path or an argument that contains the word is
+/// left alone. A shell parser this is not; a miss costs a claim filed under
+/// the parent, which is where it would have gone anyway.
+fn tag_robofinger(cmd: &str, tag: &str) -> Option<String> {
+    if cmd.contains("--subagent") {
+        return None;
+    }
+    let breaks = |c: u8| b" \t\n;&|()`'\"".contains(&c);
+    let word_end = |mut i: usize| {
+        while i < cmd.len() && !breaks(cmd.as_bytes()[i]) {
+            i += 1;
+        }
+        i
+    };
+    let b = cmd.as_bytes();
+    let mut at = Vec::new();
+    let (mut i, mut command_position, mut quote) = (0, true, None::<u8>);
+    while i < b.len() {
+        let ch = b[i];
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else if ch == b'\\' && q == b'"' {
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            b'\'' | b'"' => {
+                quote = Some(ch);
+                command_position = false;
+                i += 1;
+            }
+            b';' | b'&' | b'|' | b'(' | b'`' | b'\n' => {
+                command_position = true;
+                i += 1;
+            }
+            b')' => {
+                command_position = false;
+                i += 1;
+            }
+            b' ' | b'\t' => i += 1,
+            b'\\' => {
+                command_position = false;
+                i += 2;
+            }
+            _ => {
+                let start = i;
+                i = word_end(i);
+                let word = &cmd[start..i];
+                let assignment = word
+                    .split_once('=')
+                    .is_some_and(|(k, _)| !k.is_empty() && k.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'));
+                if command_position && word.rsplit('/').next() == Some("robofinger") {
+                    // After the subcommand, when one follows.
+                    let mut j = i;
+                    while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+                        j += 1;
+                    }
+                    if j < b.len() && b[j].is_ascii_lowercase() {
+                        i = word_end(j);
+                    }
+                    at.push(i);
+                    command_position = false;
+                } else if !(command_position && assignment) {
+                    command_position = false;
+                }
+            }
+        }
+    }
+    if at.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(cmd.len() + at.len() * (tag.len() + 12));
+    let mut from = 0;
+    for p in at {
+        out.push_str(&cmd[from..p]);
+        out.push_str(" --subagent ");
+        out.push_str(tag);
+        from = p;
+    }
+    out.push_str(&cmd[from..]);
+    Some(out)
 }
 
 /// Two words derived from the public key: the default display name for an
@@ -1569,6 +1753,73 @@ fn message(args: &[String], flags: &[&str]) -> String {
     out.join(" ")
 }
 
+/// Remove `name` and its value from `args`, wherever they sit, returning the
+/// value. For a flag every command accepts, which has to be gone before any
+/// of them reads its arguments.
+fn take_flag(args: &mut Vec<String>, name: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == name)?;
+    args.remove(i);
+    (i < args.len()).then(|| args.remove(i))
+}
+
+/// The JSON a hook was handed on stdin, or Null.
+///
+/// Never blocks at a terminal: read_to_string waits for EOF, and a human
+/// typing a hook command by hand never sends one. Hooks pipe and close.
+fn hook_input() -> serde_json::Value {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        return serde_json::Value::Null;
+    }
+    let mut buf = String::new();
+    let _ = std::io::stdin().read_to_string(&mut buf);
+    serde_json::from_str(&buf).unwrap_or(serde_json::Value::Null)
+}
+
+/// Drop this agent's claim, journalling what happened under it. Returns the
+/// globs that were held, empty when there were none.
+fn release(c: &Cfg, k: &Keys, note: Option<String>) -> Vec<String> {
+    let prev = mine(c, k);
+    let task = prev.as_ref().map(|p| p.task.clone()).unwrap_or_default();
+    let held: Vec<String> = prev
+        .as_ref()
+        .map(|p| p.touching.clone())
+        .unwrap_or_default();
+    let _ = publish(c, k, "working", &task, vec![]);
+    // Releasing nothing is a no-op, not an event.
+    if !held.is_empty() {
+        // The note says what happened; the task only ever said what was
+        // intended. Prefer an explicit note, then the commits made
+        // under the claim — which say what happened without anyone
+        // having to write it down — then the intent, then the
+        // duration.
+        let at = prev.as_ref().map(|p| p.claimed_at).unwrap_or(0);
+        // The commits are recorded whether or not they supplied the
+        // note: an explicit --note says what happened, and the SHAs
+        // still say where to look.
+        let shas = if at > 0 {
+            commit_shas(at, &held)
+        } else {
+            vec![]
+        };
+        let text = match (&note, at) {
+            (Some(n), _) => n.clone(),
+            (None, at) if at > 0 => {
+                let done = commits_since(at, &held);
+                if done.is_empty() {
+                    format!("{task} (held {})", dur(now().saturating_sub(at)))
+                } else {
+                    done
+                }
+            }
+            _ => task.clone(),
+        };
+        let text = carry_ticket(&task, &text);
+        timeline_with_commits(c, k, "release", &text, held.clone(), shas);
+    }
+    held
+}
+
 /// My own current plan row for this agent, if there is one.
 ///
 /// Three commands need the row they are about to replace — to name what a
@@ -1693,6 +1944,26 @@ fn is_self(p: &Plan, pubkey: &str, instance: &str) -> bool {
     p.pubkey == pubkey && p.instance == instance
 }
 
+/// Is `child` a subagent of `parent`, at any depth?
+fn nested_in(child: &str, parent: &str) -> bool {
+    !parent.is_empty()
+        && child
+            .strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Could this claim conflict with an edit by `instance` on key `pubkey`?
+///
+/// Not when it is this agent's own, nor its parent's or one of its own
+/// subagents': a parent's claim covers the work it hands down (ADR 0003).
+/// Siblings are not exempt — parallel subagents in one session are the
+/// collision a swarm makes most likely.
+fn may_conflict(p: &Plan, pubkey: &str, instance: &str, here: &str, t: i64) -> bool {
+    let family = p.pubkey == pubkey
+        && (p.instance == instance || nested_in(&p.instance, instance) || nested_in(instance, &p.instance));
+    !family && p.project == here && p.live(t)
+}
+
 /// Does this peer have enough going on to name its agents?
 ///
 /// Counted on agents actually holding paths, not on plan rows: a sibling that
@@ -1710,7 +1981,7 @@ fn conflicts(c: &Cfg, k: &Keys, path: &str) -> Vec<(Plan, String)> {
     let plans = current_plans(c, k);
     let mut hits = Vec::new();
     for p in plans {
-        if is_self(&p, &k.pubkey(), &c.instance) || p.project != here || !p.live(t) {
+        if !may_conflict(&p, &k.pubkey(), &c.instance, &here, t) {
             continue;
         }
         for g in &p.touching {
@@ -1726,12 +1997,23 @@ fn conflicts(c: &Cfg, k: &Keys, path: &str) -> Vec<(Plan, String)> {
     hits
 }
 
+/// Commands a hook runs, inside an agent's session.
+fn is_hook(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "check" | "start" | "end" | "subagent-start" | "subagent-stop"
+    )
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // Written by the PreToolUse hook onto a subagent's robofinger calls; see
+    // `tag_robofinger`. Lifted out before any command reads its arguments.
+    let subagent = take_flag(&mut args, "--subagent").and_then(|s| parse_subagent(&s));
     let cmd = args.first().map(String::as_str).unwrap_or("");
 
     // Hooks run inside an agent's session and must never be what it waits on.
-    if matches!(cmd, "check" | "start" | "end") {
+    if is_hook(cmd) {
         NET_BUDGET.store(HOOK_TIMEOUT, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -1740,7 +2022,7 @@ fn main() {
     let k = match Keys::load_or_create() {
         Ok(k) => k,
         Err(e) => {
-            if matches!(cmd, "check" | "start" | "end") {
+            if is_hook(cmd) {
                 std::process::exit(0);
             }
             eprintln!("key error: {e}");
@@ -2331,8 +2613,8 @@ fn main() {
     }
 
     // Unconfigured: stay silent and succeed. A hook must never break a session.
-    let Some(c) = cfg() else {
-        if matches!(cmd, "check" | "start" | "end") {
+    let Some(mut c) = cfg() else {
+        if is_hook(cmd) {
             std::process::exit(0);
         }
         // A first run should orient you, not just fail. Bare invocation is the
@@ -2347,6 +2629,9 @@ fn main() {
         eprintln!("not configured yet — run: robofinger init --url <relay url>");
         std::process::exit(1);
     };
+    if let Some((kind, id)) = &subagent {
+        c.instance = subagent_instance(&c.instance, kind, id);
+    }
 
     match cmd {
         "claim" => {
@@ -2397,46 +2682,8 @@ fn main() {
             }
         }
         "release" => {
-            let note = flag(&args, "--note");
-            let prev = mine(&c, &k);
-            let task = prev.as_ref().map(|p| p.task.clone()).unwrap_or_default();
-            let held: Vec<String> = prev
-                .as_ref()
-                .map(|p| p.touching.clone())
-                .unwrap_or_default();
-            let _ = publish(&c, &k, "working", &task, vec![]);
+            release(&c, &k, flag(&args, "--note"));
             println!("released");
-            // Releasing nothing is a no-op, not an event.
-            if !held.is_empty() {
-                // The note says what happened; the task only ever said what was
-                // intended. Prefer an explicit note, then the commits made
-                // under the claim — which say what happened without anyone
-                // having to write it down — then the intent, then the
-                // duration.
-                let at = prev.as_ref().map(|p| p.claimed_at).unwrap_or(0);
-                // The commits are recorded whether or not they supplied the
-                // note: an explicit --note says what happened, and the SHAs
-                // still say where to look.
-                let shas = if at > 0 {
-                    commit_shas(at, &held)
-                } else {
-                    vec![]
-                };
-                let text = match (&note, at) {
-                    (Some(n), _) => n.clone(),
-                    (None, at) if at > 0 => {
-                        let done = commits_since(at, &held);
-                        if done.is_empty() {
-                            format!("{task} (held {})", dur(now().saturating_sub(at)))
-                        } else {
-                            done
-                        }
-                    }
-                    _ => task.clone(),
-                };
-                let text = carry_ticket(&task, &text);
-                timeline_with_commits(&c, &k, "release", &text, held, shas);
-            }
         }
         "done" => {
             let held: Vec<String> = mine(&c, &k).map(|p| p.touching).unwrap_or_default();
@@ -2446,20 +2693,46 @@ fn main() {
         }
         // PreToolUse hook: hook JSON on stdin, advisory warning on stdout.
         "check" => {
-            // Only read stdin when no path was given. read_to_string blocks
-            // until EOF, so doing it unconditionally hangs forever when a
-            // human runs `robofinger check <path>` at a terminal — stdin is
-            // the tty and nothing ever closes it. Hooks pipe JSON and close,
-            // so they are unaffected either way.
-            let path = args.get(1).cloned().or_else(|| {
-                use std::io::IsTerminal;
-                if std::io::stdin().is_terminal() {
-                    return None;
+            // Only read stdin when no path was given: `robofinger check
+            // <path>` is also typed by hand.
+            let input = if args.get(1).is_some() {
+                serde_json::Value::Null
+            } else {
+                hook_input()
+            };
+            let sub = hook_subagent(&input);
+
+            // A subagent's shell command: tag its robofinger calls with who
+            // ran them, so its claims are filed under its own name. No
+            // network, and nothing at all for the main agent's commands.
+            if input.get("tool_name").and_then(|v| v.as_str()) == Some("Bash") {
+                let line = input.pointer("/tool_input/command").and_then(|v| v.as_str());
+                if let (Some((kind, id)), Some(line)) = (&sub, line)
+                    && let Some(tagged) = tag_robofinger(line, &format!("{kind}:{id}"))
+                {
+                    // updatedInput replaces the whole input, so carry the
+                    // rest of it. No permission decision: whether the
+                    // command may run is still the user's rules to say.
+                    let mut updated = input["tool_input"].clone();
+                    updated["command"] = serde_json::Value::String(tagged);
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "updatedInput": updated
+                            }
+                        })
+                    );
                 }
-                let mut buf = String::new();
-                std::io::stdin().read_to_string(&mut buf).ok()?;
-                serde_json::from_str::<serde_json::Value>(&buf)
-                    .ok()?
+                std::process::exit(0);
+            }
+
+            if let Some((kind, id)) = &sub {
+                c.instance = subagent_instance(&c.instance, kind, id);
+            }
+            let path = args.get(1).cloned().or_else(|| {
+                input
                     .pointer("/tool_input/file_path")?
                     .as_str()
                     .map(String::from)
@@ -2698,6 +2971,45 @@ fn main() {
         }
         "end" => {
             let _ = publish(&c, &k, "done", "", vec![]);
+            std::process::exit(0);
+        }
+        // SubagentStart hook. A subagent never sees the SessionStart block,
+        // so it gets the one rule it needs here. No network: subagents are
+        // spawned in bursts, and this runs before each one's first prompt.
+        "subagent-start" => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "SubagentStart",
+                        "additionalContext": format!("{CLAIM_RULE}\n{SUBAGENT_RULE}")
+                    }
+                })
+            );
+            std::process::exit(0);
+        }
+        // SubagentStop hook: release whatever the subagent still holds, since
+        // the tool says when it is finished rather than leaving the claim to
+        // lapse. Prints nothing — a decision on stdout, or exit 2, would keep
+        // the subagent running.
+        "subagent-stop" => {
+            let input = hook_input();
+            // Claude Code's own helpers (prompt suggestions, /btw) stop through
+            // this hook too, with no type of their own. They never claim.
+            let typed = input
+                .get("agent_type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty());
+            if let (true, Some((kind, id))) = (typed, hook_subagent(&input)) {
+                c.instance = subagent_instance(&c.instance, &kind, &id);
+                // Only a subagent that claimed has a row to release. Publishing
+                // one for every read-only subagent would spend the write budget
+                // and push real claims out of the relay's instance cap.
+                let t = now();
+                if mine(&c, &k).is_some_and(|p| p.live(t) && !p.touching.is_empty()) {
+                    release(&c, &k, None);
+                }
+            }
             std::process::exit(0);
         }
         "post" => {
@@ -3849,7 +4161,7 @@ mod tests {
 
     /// `matches`, but for a caller running as a named agent on key `me`.
     fn matches_as(p: &Plan, rel: &str, here: &str, me: &str, instance: &str) -> bool {
-        if is_self(p, &format!("pk-{me}"), instance) || p.project != here || !p.live(now()) {
+        if !may_conflict(p, &format!("pk-{me}"), instance, here, now()) {
             return false;
         }
         p.touching.iter().any(|g| {
@@ -4102,6 +4414,169 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A subagent's name nests under its parent's, so the record reads as a
+    /// tree, and it is a function of the tool's id — the edit check and the
+    /// claim each work it out separately and have to land on the same name.
+    #[test]
+    fn subagents_nest_under_their_parent_and_number_per_parent() {
+        let d = std::env::temp_dir().join(format!("rf-sub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let t = 1_000_000;
+
+        let a = subagent_instance_in(&d, "claude-1", "Explore", "a8c0d38b", t);
+        let b = subagent_instance_in(&d, "claude-1", "Explore", "a45eda7d", t);
+        assert_eq!((a.as_str(), b.as_str()), ("claude-1/explore-1", "claude-1/explore-2"));
+        assert_eq!(
+            subagent_instance_in(&d, "claude-1", "Explore", "a8c0d38b", t + 60),
+            a,
+            "the same subagent keeps its name from one hook to the next"
+        );
+        assert_eq!(
+            subagent_instance_in(&d, "claude-2", "Explore", "c838c838", t),
+            "claude-2/explore-1",
+            "numbering is per parent, so one session's swarm does not shift another's"
+        );
+        assert_eq!(
+            subagent_instance_in(&d, "claude-1", "general-purpose", "d01dd01d", t),
+            "claude-1/general-purpose-1"
+        );
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The type comes from the tool and lands in an instance (a relay storage
+    /// key, capped at 64) and in a shell command the hook rewrites, so it is
+    /// reduced to something safe in both.
+    #[test]
+    fn agent_kind_is_safe_in_a_name_and_a_shell() {
+        assert_eq!(agent_kind("Explore"), "explore");
+        assert_eq!(agent_kind("my-plugin:reviewer"), "reviewer", "plugin scope dropped");
+        assert_eq!(agent_kind("rm -rf /; echo"), "rm-rf-echo");
+        assert_eq!(agent_kind(""), "agent");
+        assert_eq!(agent_kind("$(whoami)"), "whoami");
+        assert!(agent_kind(&"x".repeat(200)).len() <= 20);
+    }
+
+    /// A parent's claim covers the work it hands down, so a parent and its own
+    /// subagents never warn each other. Siblings do: parallel subagents in one
+    /// session are the collision a swarm makes most likely.
+    #[test]
+    fn a_parent_and_its_subagents_never_conflict_but_siblings_do() {
+        let claim_as = |instance: &str| {
+            let mut p = plan("me", "demo", &["src/auth/**"], "working", 0);
+            p.instance = instance.into();
+            p
+        };
+        let f = "src/auth/session.ts";
+        assert!(!matches_as(&claim_as("claude-1"), f, "demo", "me", "claude-1/explore-1"));
+        assert!(!matches_as(&claim_as("claude-1/explore-1"), f, "demo", "me", "claude-1"));
+        assert!(
+            matches_as(&claim_as("claude-1/explore-1"), f, "demo", "me", "claude-1/explore-2"),
+            "siblings conflict"
+        );
+        assert!(
+            matches_as(&claim_as("claude-1/explore-1"), f, "demo", "me", "claude-2"),
+            "another session's subagent is just another agent"
+        );
+        assert!(
+            matches_as(&claim_as("claude-10"), f, "demo", "me", "claude-1/explore-1"),
+            "a name that merely starts the same is not a parent"
+        );
+        let mut peer = claim_as("claude-1");
+        peer.pubkey = "pk-peer".into();
+        assert!(
+            matches_as(&peer, f, "demo", "me", "claude-1/explore-1"),
+            "the same slot name on someone else's key is no relation"
+        );
+    }
+
+    /// The hook tags each robofinger invocation a subagent runs, after the
+    /// subcommand — anything in front of `robofinger` stops a
+    /// `Bash(robofinger:*)` allow rule matching, and the subagent's call is
+    /// then refused. Only a command-position `robofinger` is touched: a path
+    /// or an argument containing the word is left alone.
+    #[test]
+    fn the_rewrite_tags_only_robofinger_at_command_position() {
+        let tag = "explore:a8c0";
+        let r = |c: &str| tag_robofinger(c, tag);
+        assert_eq!(
+            r("robofinger claim \"write a\" a.txt").as_deref(),
+            Some("robofinger claim --subagent explore:a8c0 \"write a\" a.txt")
+        );
+        assert_eq!(r("robofinger release").as_deref(), Some("robofinger release --subagent explore:a8c0"));
+        assert_eq!(
+            r("cd src && robofinger claim x 'a/**' && robofinger release").as_deref(),
+            Some("cd src && robofinger claim --subagent explore:a8c0 x 'a/**' && robofinger release --subagent explore:a8c0")
+        );
+        assert_eq!(
+            r("~/.cargo/bin/robofinger check a.rs").as_deref(),
+            Some("~/.cargo/bin/robofinger check --subagent explore:a8c0 a.rs")
+        );
+        assert_eq!(r("robofinger").as_deref(), Some("robofinger --subagent explore:a8c0"));
+        assert_eq!(
+            r("robofinger --version").as_deref(),
+            Some("robofinger --subagent explore:a8c0 --version")
+        );
+        assert_eq!(r("cat ~/github/robofinger/README.md"), None, "a path");
+        assert_eq!(r("grep robofinger notes.txt"), None, "an argument");
+        assert_eq!(r("echo \"then robofinger claim\""), None, "inside quotes");
+        assert_eq!(r("cargo build -p robofinger-client"), None);
+        assert_eq!(r("ls"), None);
+        assert_eq!(
+            r("robofinger claim --subagent explore:a8c0 x a"),
+            None,
+            "already tagged"
+        );
+    }
+
+    /// The flag can sit anywhere the hook put it, and must be gone before any
+    /// command reads its arguments — `claim` would otherwise publish it as a
+    /// glob.
+    #[test]
+    fn the_subagent_flag_is_lifted_out_wherever_it_sits() {
+        let mut a: Vec<String> = ["claim", "--subagent", "explore:a8c0", "task", "a/**"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(take_flag(&mut a, "--subagent").as_deref(), Some("explore:a8c0"));
+        assert_eq!(a, ["claim", "task", "a/**"]);
+
+        let mut none: Vec<String> = ["release"].map(String::from).to_vec();
+        assert_eq!(take_flag(&mut none, "--subagent"), None);
+        assert_eq!(none, ["release"]);
+    }
+
+    /// Hook input names the subagent with the tool's own id and type. Absent
+    /// in the main conversation, which keeps its session name. The id is
+    /// spliced into a shell command, so anything but a plain token is refused
+    /// rather than quoted.
+    #[test]
+    fn subagent_identity_comes_from_hook_input() {
+        let v = serde_json::json!({"agent_id": "a8c0d38b4542dc838", "agent_type": "my-plugin:Reviewer"});
+        assert_eq!(
+            hook_subagent(&v),
+            Some(("reviewer".into(), "a8c0d38b4542dc838".into()))
+        );
+        assert_eq!(hook_subagent(&serde_json::json!({"session_id": "x"})), None, "main agent");
+        assert_eq!(hook_subagent(&serde_json::json!({"agent_id": ""})), None);
+        assert_eq!(
+            hook_subagent(&serde_json::json!({"agent_id": "a; rm -rf ~"})),
+            None,
+            "not a plain token"
+        );
+        assert_eq!(
+            hook_subagent(&serde_json::json!({"agent_id": "abc"})),
+            Some(("agent".into(), "abc".into())),
+            "no type still names the subagent"
+        );
+        assert_eq!(
+            parse_subagent("reviewer:a8c0d38b4542dc838"),
+            Some(("reviewer".into(), "a8c0d38b4542dc838".into())),
+            "the flag round-trips what the hook wrote"
+        );
+        assert_eq!(parse_subagent("a8c0"), None);
     }
 
     /// The derived name must be a pure function of the key and never move: it

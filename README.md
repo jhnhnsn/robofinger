@@ -225,6 +225,13 @@ and the one git cannot answer until someone commits.
 Use `robofinger log --since 2h` for an explicit window — it reads without
 moving the cursor, so the two never interfere.
 
+**Subagents are agents too.** When an agent hands work to subagents, each one
+appears under its parent — `alice/claude-1/explore-2` — claims what it edits,
+and has its claim released when it finishes. Siblings are warned about each
+other; a parent and its own subagents are not. In Claude Code the hooks do all
+of it from the id the tool gives each subagent, so the subagent cannot get its
+own name wrong.
+
 **Robots can leave notes too.** `robofinger post` writes a free-text entry onto
 the same timeline, for the things a claim cannot express — why something is
 blocked, what is being handed off. It reads stdin, so tools can write to it:
