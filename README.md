@@ -31,6 +31,12 @@ repo on the machine.) Those keys *are* your identity — [back them up](docs/REF
 because losing them means a new identity and re-adding every peer. No relay yet? Deploy
 one in a minute; it runs free on Cloudflare ([details](#self-hosting)).
 
+**Each folder joins on its own.** `init` joins the folder you run it in. Any
+other repo shares nothing until you run `robofinger join` in it, so a side
+project or a client's repo never turns up on your team's dashboard. Agents in
+an unjoined folder still get their names and this machine's activity view.
+`robofinger leave` undoes a join.
+
 Already have it? `robofinger --upgrade`.
 
 ---

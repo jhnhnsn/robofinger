@@ -302,10 +302,19 @@ SETUP
       robofinger --upgrade            install it
   --version                     print version
 
+PROJECTS
+
+  join [<relay url>]            share this folder's work with a project
+      robofinger join           the relay in your global config
+      (a folder that has not joined publishes nothing; its agents still get
+       their names and the local activity view)
+  leave                         stop sharing this folder
+
 Config layers, lowest first:
-  ~/.config/robofinger/config   you, on this machine (written by init)
+  ~/.config/robofinger/config   you, on this machine (written by init) —
+                                your identity and home relay, not a project
   <repo>/.robofinger            the project — commit it to share
-  <repo>/.robofinger.local      you, in this repo — gitignore it
+  <repo>/.robofinger.local      you, in this repo (written by join; gitignored)
   environment                   ROBOFINGER_URL, ROBOFINGER_ALIAS, ...
 
 Keys are not layered: identity is global, so cloning a repo cannot make you
@@ -444,6 +453,76 @@ fn config_file() -> std::collections::HashMap<String, String> {
         merged.extend(parse_config(&root.join(f)));
     }
     merged
+}
+
+/// Whether this folder has joined a project: the environment, or the
+/// folder's own layers, name the relay it publishes to. The global config
+/// alone does not count. It says where you can be reached, not which project
+/// this folder is part of, and counting it is how every repo on a machine
+/// ended up on one team's dashboard (ADR 0006).
+fn joined() -> bool {
+    std::env::var("ROBOFINGER_URL").is_ok_and(|s| !s.is_empty())
+        || joined_in(std::path::Path::new(&repo_root()))
+}
+
+fn joined_in(root: &std::path::Path) -> bool {
+    [".robofinger", ".robofinger.local"].iter().any(|f| {
+        parse_config(&root.join(f))
+            .get("ROBOFINGER_URL")
+            .is_some_and(|u| !u.is_empty())
+    })
+}
+
+/// What an unjoined folder's agent, and its person, are told.
+const NOT_JOINED: &str = "this folder hasn't joined a robofinger project, so nothing \
+     here is shared and teammates' claims aren't checked. If your person wants this \
+     work coordinated, they can run `robofinger join` in it.";
+
+/// Join the folder at `root` to the project at `url`. Written to
+/// `.robofinger.local`, which is this person's and never committed: joining
+/// is something each member does, not something a clone inherits.
+fn join_in(root: &std::path::Path, url: &str) -> std::io::Result<std::path::PathBuf> {
+    let path = root.join(".robofinger.local");
+    let mut lines = without_url(&path);
+    lines.push(format!("ROBOFINGER_URL={url}"));
+    std::fs::write(&path, lines.join("\n") + "\n")?;
+    // A local file that ends up committed would join every clone to this
+    // person's choice of project.
+    if root.join(".git").exists() {
+        let ignore = root.join(".gitignore");
+        let body = std::fs::read_to_string(&ignore).unwrap_or_default();
+        if !body.lines().any(|l| l.trim() == ".robofinger.local") {
+            let sep = if body.is_empty() || body.ends_with('\n') { "" } else { "\n" };
+            std::fs::write(&ignore, format!("{body}{sep}.robofinger.local\n"))?;
+        }
+    }
+    Ok(path)
+}
+
+/// Undo `join_in`. True when there was a join to undo.
+fn leave_in(root: &std::path::Path) -> std::io::Result<bool> {
+    let path = root.join(".robofinger.local");
+    let before = std::fs::read_to_string(&path).unwrap_or_default();
+    let lines = without_url(&path);
+    if lines.len() == before.lines().count() {
+        return Ok(false);
+    }
+    if lines.is_empty() {
+        std::fs::remove_file(&path)?;
+    } else {
+        std::fs::write(&path, lines.join("\n") + "\n")?;
+    }
+    Ok(true)
+}
+
+/// A config file's lines, minus the relay it names.
+fn without_url(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.split_once('=').is_none_or(|(k, _)| k.trim() != "ROBOFINGER_URL"))
+        .map(String::from)
+        .collect()
 }
 
 /// `key=value` lines, `#` comments, missing file is empty.
@@ -1545,6 +1624,10 @@ fn recipients(k: &Keys, group: Option<&str>) -> Vec<age::x25519::Recipient> {
 
 /// Sign and PUT an envelope to `kind` ("plan" or "post") on our own relay.
 fn send(c: &Cfg, k: &Keys, kind: &str, seq: u64, body: String) -> Result<(), String> {
+    // The one place anything is written, so the one place to refuse.
+    if !joined() {
+        return Err(NOT_JOINED.into());
+    }
     let mut env = Envelope {
         pubkey: k.pubkey(),
         instance: c.instance.clone(),
@@ -2277,6 +2360,12 @@ fn main() {
                 eprintln!("write {}: {e}", path.display());
                 std::process::exit(1);
             }
+            // Running init here is the clearest sign this folder is meant to
+            // be shared. Every other folder joins on its own.
+            match join_in(std::path::Path::new(&repo_root()), &url) {
+                Ok(p) => println!("joined this folder to {url} ({})", p.display()),
+                Err(e) => eprintln!("could not join this folder: {e}"),
+            }
             if k.freshly_generated {
                 println!(
                     "generated a new identity in {}",
@@ -2755,6 +2844,38 @@ fn main() {
     }
 
     match cmd {
+        // Join this folder to a project: the relay named, or, with none, the
+        // one in your global config — the migration path for folders that
+        // used to publish there by default.
+        "join" => {
+            let url = args
+                .get(1)
+                .map(|u| u.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| c.url.clone());
+            let root = repo_root();
+            match join_in(std::path::Path::new(&root), &url) {
+                Ok(path) => {
+                    println!("joined {root} to {url}");
+                    println!("  written to {} (yours; kept out of git)", path.display());
+                    println!("  agents here now publish their claims and see teammates' claims");
+                }
+                Err(e) => {
+                    eprintln!("join failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "leave" => {
+            let root = repo_root();
+            match leave_in(std::path::Path::new(&root)) {
+                Ok(true) => println!("{root} left its project; nothing here is published now"),
+                Ok(false) => println!("{root} had not joined a project here (a committed .robofinger may still name one)"),
+                Err(e) => {
+                    eprintln!("leave failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "claim" => {
             let task = args.get(1).cloned().unwrap_or_default();
             // A mistyped flag must not become a published claim description.
@@ -2839,6 +2960,11 @@ fn main() {
                 spool(&c.instance, "tool", &tool, &target);
             }
             if !tool.is_empty() && tool != "Bash" && !edits(tool) {
+                std::process::exit(0);
+            }
+            // Nothing to check against, and nothing a subagent claims here
+            // would be shared.
+            if !joined() && args.get(1).is_none() {
                 std::process::exit(0);
             }
 
@@ -2952,6 +3078,22 @@ fn main() {
             let mut blocks: Vec<String> = Vec::new();
             activity::prune(&activity::dir(&crypto::config_dir()));
             spool_appear(&c.instance, &project());
+            if !joined() {
+                // No claim rule: claiming here would publish nothing.
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "SessionStart",
+                            "additionalContext": format!(
+                                "{}\n- robofinger: {NOT_JOINED}",
+                                you_are(&agent_path(&k.pubkey(), &c.instance), None)
+                            )
+                        }
+                    })
+                );
+                std::process::exit(0);
+            }
 
             let live = current_plans(&c, &k);
             let here = project();
@@ -3125,6 +3267,9 @@ fn main() {
         }
         "end" => {
             spool(&c.instance, "gone", "", "");
+            if !joined() {
+                std::process::exit(0);
+            }
             // Journal a session that ends still holding paths. The timeline is
             // all a past view has, and without an entry it shows the claim
             // held on until it would have lapsed. One write, and only then.
@@ -3170,7 +3315,11 @@ fn main() {
                 serde_json::json!({
                     "hookSpecificOutput": {
                         "hookEventName": "SubagentStart",
-                        "additionalContext": format!("{you}{CLAIM_RULE}\n{SUBAGENT_RULE}")
+                        "additionalContext": if joined() {
+                            format!("{you}{CLAIM_RULE}\n{SUBAGENT_RULE}")
+                        } else {
+                            format!("{you}- robofinger: {NOT_JOINED}")
+                        }
                     }
                 })
             );
@@ -3185,6 +3334,9 @@ fn main() {
             if let (true, Some((kind, id))) = (typed(&input), hook_subagent(&input)) {
                 c.instance = subagent_instance(&c.instance, &kind, &id);
                 spool(&c.instance, "done", "", "");
+                if !joined() {
+                    std::process::exit(0);
+                }
                 // Only a subagent that claimed has a row to release. Publishing
                 // one for every read-only subagent would spend the write budget
                 // and push real claims out of the relay's instance cap.
@@ -3784,6 +3936,11 @@ fn show_self(c: &Cfg, k: &Keys) {
     println!("{} @ {}", c.alias, c.url);
     println!("{}", k.pubkey());
     println!("you are {}", agent_path(&k.pubkey(), &c.instance));
+    if joined() {
+        println!("this folder: joined {}", c.url);
+    } else {
+        println!("this folder: not joined — {NOT_JOINED}");
+    }
 
     // Group by agent. One instance is the ordinary case and renders exactly
     // as before; several means two Claudes sharing this identity, and each
@@ -5862,6 +6019,33 @@ mod tests {
             assert_eq!(&subagent_instance_in(&dir, "claude-1", "Explore", &format!("id{i}"), t), n, "kept its name");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder shares nothing until it joins, and joining is the person's,
+    /// kept out of the repo.
+    #[test]
+    fn a_folder_joins_and_leaves_without_touching_what_is_committed() {
+        let root = std::env::temp_dir().join(format!("rf-join-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".robofinger.local"), "ROBOFINGER_ALIAS=work\n").unwrap();
+        assert!(!joined_in(&root), "the global relay alone is not a join");
+
+        join_in(&root, "https://relay.example/team").unwrap();
+        assert!(joined_in(&root));
+        let local = std::fs::read_to_string(root.join(".robofinger.local")).unwrap();
+        assert!(local.contains("ROBOFINGER_ALIAS=work") && local.contains("ROBOFINGER_URL=https://relay.example/team"));
+        join_in(&root, "https://relay.example/other").unwrap();
+        let local = std::fs::read_to_string(root.join(".robofinger.local")).unwrap();
+        assert_eq!(local.matches("ROBOFINGER_URL").count(), 1, "a second join replaces the first");
+        let ignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert_eq!(ignore.matches(".robofinger.local").count(), 1, "kept out of git, once");
+
+        assert!(leave_in(&root).unwrap());
+        assert!(!joined_in(&root));
+        assert!(std::fs::read_to_string(root.join(".robofinger.local")).unwrap().contains("ROBOFINGER_ALIAS=work"), "other settings stay");
+        assert!(!leave_in(&root).unwrap(), "nothing left to leave");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

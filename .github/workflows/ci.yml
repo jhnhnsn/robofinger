@@ -64,6 +64,9 @@ jobs:
           export ROBOFINGER_HOME="$RUNNER_TEMP/rf-bh"
           mkdir -p "$ROBOFINGER_HOME"
           echo "ROBOFINGER_URL=http://127.0.0.1:8791" > "$ROBOFINGER_HOME/config"
+          # The global config alone no longer makes a folder publish (ADR 0006);
+          # the environment does, so the writes are exercised too.
+          export ROBOFINGER_URL=http://127.0.0.1:8791
 
           python3 - <<'EOF' &
           import socket

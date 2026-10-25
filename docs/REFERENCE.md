@@ -163,6 +163,34 @@ answer that would undo a teammate's work. Naming the cases rather than saying
 "use your judgment" is deliberate: judgment alone produces agents that either
 never ask or ask constantly, and which one varies by model and by session.
 
+## Joining a project
+
+A folder publishes nothing until it joins a project (ADR 0006). Joining writes
+`ROBOFINGER_URL` into `<repo>/.robofinger.local`, which is the person's own
+file and is added to `.gitignore`, so a clone never inherits someone else's
+choice. A committed `.robofinger` that names a relay also counts, as does
+`ROBOFINGER_URL` in the environment. The global config does not count: it
+holds your identity and your home relay, the one your address points to, not
+the project a folder belongs to.
+
+```sh
+robofinger join                  # this folder → the relay in your global config
+robofinger join https://relay.example.com/team
+robofinger leave
+```
+
+`init` joins the folder it runs in. In an unjoined folder:
+- every write is refused, in the one function that writes;
+- SessionStart tells the agent its name and that nothing here is shared,
+  without the claim rule;
+- PreToolUse skips the conflict check;
+- SessionEnd and SubagentStop release nothing.
+
+The activity spool still records everything, so the local dashboard and
+`robofinger activity` keep working. Invitations (#34) will fill in a project's
+members on join; until then, a folder joined to a relay sees whoever it follows
+there.
+
 ## The activity spool
 
 What each agent on this machine is doing right now: the line Claude Code shows
