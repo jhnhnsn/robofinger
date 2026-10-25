@@ -187,9 +187,46 @@ robofinger leave
 - SessionEnd and SubagentStop release nothing.
 
 The activity spool still records everything, so the local dashboard and
-`robofinger activity` keep working. Invitations (#34) will fill in a project's
-members on join; until then, a folder joined to a relay sees whoever it follows
-there.
+`robofinger activity` keep working.
+
+### Invitations
+
+```sh
+robofinger invite [--expires 7d]     # in a joined folder; prints one string
+robofinger join '<invitation>'       # in the newcomer's folder
+robofinger members                   # who is in this folder's project
+```
+
+An invitation is a URL at the project's relay, ending `/join#…`. The fragment
+holds JSON:
+- the project name and relay
+- every member's address at that relay, each under the name its key derives
+  to, never under the inviter's private label for them
+- an expiry
+- an Ed25519 signature by the inviter over all of it
+
+`join` does four things:
+1. checks the signature, that the inviter is one of the members listed, and
+   the expiry;
+2. prints the inviter's two-word name, to be confirmed out loud;
+3. joins the folder and follows the members;
+4. posts a `join` entry carrying the joiner's address and the invitation.
+
+Members find newcomers at session start (and in `members`) by reading the
+relay's recent posts from every key. A newcomer is followed when:
+- the entry decrypts for them,
+- its address is the key that signed it,
+- the invitation was signed by them or by someone they already follow,
+- the entry was written before the invitation expired.
+
+An invitation is a bearer secret until then: anyone holding it can join, which
+is why it expires and why the join names who invited whom.
+
+Entries are encrypted to the project's members only, meaning the peers who
+publish to the relay this folder publishes to. Joining a second project does
+not start encrypting the first one's work to its members. A peer can have one
+home relay; following someone at another relay wins over an invitation, with
+a warning.
 
 ## The activity spool
 

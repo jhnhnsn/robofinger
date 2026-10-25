@@ -33,6 +33,9 @@ pub struct Event {
     /// The project a session appeared in, on its `appear`; empty elsewhere.
     /// Subagents belong to their top-level session's project.
     pub project: String,
+    /// Where the hook ran: the session's folder. What places a session in a
+    /// project when it started before its `appear` could say.
+    pub cwd: String,
 }
 
 pub fn dir(home: &Path) -> PathBuf {
@@ -55,6 +58,9 @@ pub fn append(dir: &Path, e: &Event) {
     let mut line = line;
     if !e.project.is_empty() {
         line["project"] = e.project.clone().into();
+    }
+    if !e.cwd.is_empty() {
+        line["cwd"] = e.cwd.clone().into();
     }
     let _ = std::fs::create_dir_all(dir);
     // One short write with O_APPEND: concurrent hooks interleave whole lines.
@@ -122,6 +128,7 @@ pub fn read(dir: &Path) -> Vec<Event> {
                 tool: s("tool"),
                 target: s("target"),
                 project: s("project"),
+                cwd: s("cwd"),
             });
         }
     }
@@ -256,6 +263,17 @@ pub fn project_of<'a>(events: &'a [Event], agent: &str) -> Option<&'a str> {
         .map(|e| e.project.as_str())
 }
 
+/// The folder an agent's session last worked in, for a session whose
+/// `appear` named no project.
+pub fn cwd_of<'a>(events: &'a [Event], agent: &str) -> Option<&'a str> {
+    let top = agent.split('/').next().unwrap_or(agent);
+    events
+        .iter()
+        .rev()
+        .find(|e| e.agent.split('/').next() == Some(top) && !e.cwd.is_empty())
+        .map(|e| e.cwd.as_str())
+}
+
 /// "Running cargo test", "Editing src/main.rs".
 pub fn doing(tool: &str, target: &str) -> String {
     let verb = match tool {
@@ -287,6 +305,7 @@ mod tests {
             tool: tool.into(),
             target: target.into(),
             project: String::new(),
+            cwd: String::new(),
         }
     }
 
@@ -304,6 +323,14 @@ mod tests {
             project_of(&es, "claude-2"),
             None,
             "from before projects were recorded"
+        );
+        let mut tool = ev(4, "claude-2/explore-1", "tool", "Read", "x");
+        tool.cwd = "/src/tooob".into();
+        let es = vec![ev(3, "claude-2", "appear", "", ""), tool];
+        assert_eq!(
+            cwd_of(&es, "claude-2"),
+            Some("/src/tooob"),
+            "its folder says instead"
         );
     }
 

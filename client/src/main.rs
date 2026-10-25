@@ -25,6 +25,7 @@ mod activity;
 mod crypto;
 mod dash;
 mod hooks;
+mod invite;
 mod selfupdate;
 mod tracker;
 
@@ -309,6 +310,13 @@ PROJECTS
       (a folder that has not joined publishes nothing; its agents still get
        their names and the local activity view)
   leave                         stop sharing this folder
+  invite [--expires 7d] [--name <project>]
+                                an invitation to this folder's project
+      (signed by you, listing the members; anyone holding it can join until
+       it expires, so hand it over directly)
+  join '<invitation>'           join with an invitation: checks who signed it,
+                                follows the members, and tells them
+  members                       who is in this folder's project
 
 Config layers, lowest first:
   ~/.config/robofinger/config   you, on this machine (written by init) —
@@ -403,6 +411,10 @@ struct Plan {
     /// construct it. The entry carries the ref, the viewer makes it clickable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     commits: Vec<String>,
+    /// A "join" entry only: who the joiner is and the invitation that let
+    /// them in, so members can check a member vouched (`invite::adopt`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    joined: Option<invite::Proof>,
     /// Relay row id, from the envelope. Read cursor for `since`; never
     /// published — see `Envelope::id`.
     #[serde(default, skip_serializing)]
@@ -530,6 +542,108 @@ fn without_url(path: &std::path::Path) -> Vec<String> {
         })
         .map(String::from)
         .collect()
+}
+
+/// This project's members as addresses at its relay: you, and every peer who
+/// publishes there. What an invitation lists, under neutral names: the label
+/// you gave someone is your business, not the newcomer's.
+fn members_here(c: &Cfg, k: &Keys) -> Vec<String> {
+    let home = Some(crypto::Home { url: c.url.clone() });
+    let mut out = vec![k.identity_blob(&c.alias, home.clone())];
+    for mut p in crypto::load_peers()
+        .into_iter()
+        .filter(|p| p.endpoint(&c.url) == c.url)
+    {
+        p.label = name_for(&p.pubkey);
+        p.home = home.clone();
+        p.groups = Vec::new();
+        out.push(p.to_blob());
+    }
+    out
+}
+
+/// `robofinger join <invitation>`: check it, join this folder, follow the
+/// members, and tell them, so they follow back.
+fn join_by_invitation(c: &mut Cfg, k: &Keys, raw: &str) {
+    let inv = match invite::decode(raw).and_then(|i| invite::check(&i, now()).map(|_| i)) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if inv.body.by == k.pubkey() {
+        eprintln!("that invitation is your own; hand it to the person joining");
+        std::process::exit(1);
+    }
+    let by = name_for(&inv.body.by);
+    println!(
+        "An invitation to {} on {}, from {by}. Check with them that their robofinger name is {by}.",
+        inv.body.project, inv.body.relay
+    );
+    let root = repo_root();
+    if let Err(e) = join_in(std::path::Path::new(&root), &inv.body.relay) {
+        eprintln!("join failed: {e}");
+        std::process::exit(1);
+    }
+    c.url = inv.body.relay.clone();
+
+    let mut peers = crypto::load_peers();
+    let mut added = Vec::new();
+    for m in &inv.body.members {
+        let Ok(mut p) = Peer::parse(m) else { continue };
+        if p.pubkey == k.pubkey() {
+            continue;
+        }
+        match peers.iter().find(|x| x.pubkey == p.pubkey) {
+            // One home per peer: following them elsewhere already wins, said
+            // out loud rather than silently repointed.
+            Some(x) if x.endpoint(&c.url) != c.url => {
+                eprintln!(
+                    "  already following {} at another relay; kept that",
+                    x.label
+                )
+            }
+            Some(_) => {}
+            None => {
+                p.home = Some(crypto::Home { url: c.url.clone() });
+                p.label = invite::free_label(&p, &peers);
+                added.push(p.label.clone());
+                peers.push(p);
+            }
+        }
+    }
+    if let Err(e) = crypto::save_peers(&peers) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+    println!("joined {root} to {}", inv.body.project);
+    if !added.is_empty() {
+        println!("  now following {}", added.join(", "));
+    }
+
+    let proof = invite::Proof {
+        address: k.identity_blob(&c.alias, Some(crypto::Home { url: c.url.clone() })),
+        invitation: raw.trim().to_string(),
+    };
+    let text = format!("joined {} (invited by {by})", inv.body.project);
+    match post_with(
+        c,
+        k,
+        &text,
+        None,
+        "join",
+        vec![],
+        vec![],
+        "",
+        0,
+        Some(proof),
+    ) {
+        Ok(_) => println!("  told the members; they follow you back at their next session start"),
+        Err(e) => {
+            eprintln!("  could not tell the members ({e}); they will not see you until you post")
+        }
+    }
 }
 
 /// `key=value` lines, `#` comments, missing file is empty.
@@ -1242,6 +1356,25 @@ fn project() -> String {
     project_name(lines.next(), lines.next())
 }
 
+/// `project`, for another folder: what a session working there files under.
+fn project_at(dir: &str) -> String {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+            "--show-toplevel",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let mut lines = out.lines();
+    project_name(lines.next(), lines.next())
+}
+
 /// The directory holding the shared `.git`, else the checkout's own directory
 /// (a submodule's common dir is `.git/modules/<name>`, which says nothing).
 fn project_name(common_dir: Option<&str>, toplevel: Option<&str>) -> String {
@@ -1596,6 +1729,7 @@ fn publish(
         kind: String::new(),
         globs: vec![],
         commits: vec![],
+        joined: None,
         to: String::new(),
         reply_to: 0,
         id: 0,
@@ -1605,7 +1739,7 @@ fn publish(
     // conflict warning that silently does not fire.
     let body = crypto::encrypt(
         &serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
-        &recipients(k, None),
+        &recipients(c, k, None),
     )?;
 
     send(c, k, "plan", plan.seq, body)
@@ -1619,9 +1753,15 @@ fn publish(
 /// `group` restricts the list. Excluded peers cannot decrypt the result at all;
 /// this is cryptographic, not a display filter. They can still see *that* you
 /// published, since the envelope is cleartext for the relay.
-fn recipients(k: &Keys, group: Option<&str>) -> Vec<age::x25519::Recipient> {
+fn recipients(c: &Cfg, k: &Keys, group: Option<&str>) -> Vec<age::x25519::Recipient> {
     let mut recips = vec![k.age_secret.to_public()];
-    for p in crypto::load_peers() {
+    // Only this project's members: the peers who publish to the relay this
+    // folder publishes to. Joining a second project must not start
+    // encrypting the first one's work to its members (ADR 0006).
+    for p in crypto::load_peers()
+        .into_iter()
+        .filter(|p| p.endpoint(&c.url) == c.url)
+    {
         if let Some(g) = group
             && !p.groups.iter().any(|pg| pg == g)
         {
@@ -1675,13 +1815,14 @@ fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
         kind: String::new(),
         globs: vec![],
         commits: vec![],
+        joined: None,
         to: String::new(),
         reply_to: 0,
         id: 0,
     };
     let body = crypto::encrypt(
         &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
-        &recipients(k, None),
+        &recipients(c, k, None),
     )?;
     send(c, k, "forward", entry.seq, body)
 }
@@ -2055,6 +2196,23 @@ fn post(
     to: &str,
     reply_to: i64,
 ) -> Result<(), String> {
+    post_with(c, k, text, group, kind, globs, commits, to, reply_to, None)
+}
+
+/// `post`, carrying a join's proof when there is one.
+#[allow(clippy::too_many_arguments)]
+fn post_with(
+    c: &Cfg,
+    k: &Keys,
+    text: &str,
+    group: Option<&str>,
+    kind: &str,
+    globs: Vec<String>,
+    commits: Vec<String>,
+    to: &str,
+    reply_to: i64,
+    joined: Option<invite::Proof>,
+) -> Result<(), String> {
     // Ask only for your own posts. `limit=1` over everyone returns whichever
     // peer posted most recently, and filtering that for your own key finds
     // nothing as soon as someone else is newer — seq falls back to 1 and the
@@ -2088,13 +2246,14 @@ fn post(
         kind: kind.to_string(),
         globs,
         commits,
+        joined,
         to: to.to_string(),
         reply_to,
         id: 0,
     };
     let body = crypto::encrypt(
         &serde_json::to_vec(&entry).map_err(|e| e.to_string())?,
-        &recipients(k, group),
+        &recipients(c, k, group),
     )?;
     send(c, k, "post", entry.seq, body)
 }
@@ -2198,8 +2357,16 @@ fn spool(agent: &str, kind: &str, tool: &str, target: &str) {
             tool: tool.into(),
             target: target.into(),
             project: String::new(),
+            cwd: here_dir(),
         },
     );
+}
+
+/// The folder a hook runs in, which is its session's.
+fn here_dir() -> String {
+    std::env::current_dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default()
 }
 
 /// A session appearing, with the project it appeared in, so the dashboard
@@ -2214,6 +2381,7 @@ fn spool_appear(agent: &str, project: &str) {
             tool: String::new(),
             target: String::new(),
             project: project.into(),
+            cwd: here_dir(),
         },
     );
 }
@@ -2862,6 +3030,53 @@ fn main() {
         // Join this folder to a project: the relay named, or, with none, the
         // one in your global config — the migration path for folders that
         // used to publish there by default.
+        "join" if args.get(1).is_some_and(|a| invite::is_invitation(a)) => {
+            join_by_invitation(&mut c, &k, &args[1]);
+        }
+        "invite" => {
+            if !joined() {
+                eprintln!("invite from a folder in the project: {NOT_JOINED}");
+                std::process::exit(1);
+            }
+            let t = now();
+            let ttl = flag(&args, "--expires").unwrap_or_else(|| "7d".into());
+            let exp = match parse_since(&ttl, t) {
+                Ok(past) => t + (t - past),
+                Err(e) => {
+                    eprintln!("--expires: {e}");
+                    std::process::exit(2);
+                }
+            };
+            let name = flag(&args, "--name").unwrap_or_else(project);
+            let members = members_here(&c, &k);
+            let inv = invite::make(&k, &name, &c.url, members.clone(), exp);
+            println!("{}", invite::encode(&inv));
+            let me = name_for(&k.pubkey());
+            eprintln!(
+                "\nAn invitation to {name} on {}, from {me}, listing {} member{}. Good until {}.",
+                c.url,
+                members.len(),
+                if members.len() == 1 { "" } else { "s" },
+                stamp(exp)
+            );
+            eprintln!("Anyone holding it can join until then, so hand it to the person directly.");
+            eprintln!(
+                "They run: robofinger join '<invitation>' — and should check it says it is from {me}."
+            );
+        }
+        "members" => {
+            for (name, by) in invite::adopt(&c, &k) {
+                println!("new: {name}, invited by {by}");
+            }
+            println!("{} on {}", project(), c.url);
+            println!("  {} (you)", name_for(&k.pubkey()));
+            for p in crypto::load_peers()
+                .iter()
+                .filter(|p| p.endpoint(&c.url) == c.url)
+            {
+                println!("  {} ({})", name_for(&p.pubkey), p.label);
+            }
+        }
         "join" => {
             let url = args
                 .get(1)
@@ -3115,6 +3330,17 @@ fn main() {
                     })
                 );
                 std::process::exit(0);
+            }
+
+            // Newcomers a member vouched for, followed before anything is
+            // read, so their claims are in this very briefing.
+            let adopted = invite::adopt(&c, &k);
+            if !adopted.is_empty() {
+                let names: Vec<String> = adopted
+                    .iter()
+                    .map(|(n, by)| format!("{n} (invited by {by})"))
+                    .collect();
+                blocks.push(format!("New in this project: {}.", names.join(", ")));
             }
 
             let live = current_plans(&c, &k);
@@ -4414,6 +4640,9 @@ struct Cache {
     posts: Option<(i64, Vec<Plan>)>,
     live: Option<(i64, Vec<Plan>)>,
     plan: Option<(i64, Option<Vec<tracker::Group>>)>,
+    /// Folder → project, so placing a session costs one git call per folder
+    /// for as long as `serve` runs.
+    projects: std::collections::HashMap<String, String>,
 }
 
 /// How old a cached relay answer may be: what the page's refresh used to be.
@@ -4447,6 +4676,13 @@ impl Cache {
             .as_ref()
             .map(|(_, p)| p.clone())
             .unwrap_or_default()
+    }
+
+    fn project_at(&mut self, dir: &str) -> String {
+        self.projects
+            .entry(dir.to_string())
+            .or_insert_with(|| project_at(dir))
+            .clone()
     }
 
     fn plan(&mut self) -> Option<Vec<tracker::Group>> {
@@ -4520,8 +4756,32 @@ fn page(
     // from before projects were recorded is shown rather than guessed away.
     let (mut events, mut local) = local_spool(t);
     if !r.all {
-        let all_events = events.clone();
-        let mine = |agent: &str| activity::project_of(&all_events, agent).is_none_or(|p| p == here);
+        // What each session's start said, else the folder its hooks ran in.
+        // A session neither can place is from before either was recorded,
+        // and is shown rather than guessed away.
+        let mut tops: Vec<String> = events
+            .iter()
+            .map(|e| e.agent.split('/').next().unwrap_or("").to_string())
+            .collect();
+        tops.sort();
+        tops.dedup();
+        let projects: std::collections::HashMap<String, Option<String>> = tops
+            .into_iter()
+            .map(|top| {
+                let p = activity::project_of(&events, &top)
+                    .map(String::from)
+                    .or_else(|| activity::cwd_of(&events, &top).map(|d| cache.project_at(d)));
+                (top, p)
+            })
+            .collect();
+        let mine = |agent: &str| {
+            let top = agent.split('/').next().unwrap_or("");
+            projects
+                .get(top)
+                .cloned()
+                .flatten()
+                .is_none_or(|p| p == here)
+        };
         events.retain(|e| mine(&e.agent));
         local.retain(|(inst, _)| mine(inst));
     }
@@ -5051,6 +5311,7 @@ mod tests {
             kind: String::new(),
             globs: vec![],
             commits: vec![],
+            joined: None,
             to: String::new(),
             reply_to: 0,
             id: 0,
