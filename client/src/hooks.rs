@@ -1,9 +1,12 @@
 //! Claude Code hook installation for `robofinger init`.
 //!
-//! Merges three hooks into `~/.claude/settings.json`:
-//!   SessionStart  — surface live peer claims into the agent's context
-//!   SessionEnd    — mark this agent's work done
-//!   PreToolUse    — warn before editing a path a peer has claimed
+//! Merges robofinger's hooks into `~/.claude/settings.json`:
+//!   SessionStart     — surface live peer claims into the agent's context
+//!   SessionEnd       — mark this agent's work done
+//!   PreToolUse       — warn before editing a path a peer has claimed
+//!   SubagentStart/Stop — name a subagent, and release what it held
+//!   PostToolUse, UserPromptSubmit, Notification, Stop — the activity spool
+//!     the live dashboard reads; local only
 //!
 //! Unlike envstow's skill install (which writes a fresh file), this edits a
 //! config the user already owns, so it backs up first, never clobbers unrelated
@@ -303,12 +306,21 @@ fn hook_json(bin: &str) -> serde_json::Value {
     serde_json::json!({
         "SessionStart": [cmd("start")],
         "SessionEnd": [cmd("end")],
-        // Bash so a subagent's own `robofinger claim` can be tagged with which
-        // subagent ran it; the main agent's commands return without a lookup.
+        // Every tool, so the activity spool sees reads and searches too. Only
+        // edits are checked against claims, and Bash so a subagent's own
+        // `robofinger claim` can be tagged with which subagent ran it; the
+        // rest return after a local append.
         "PreToolUse": [{
-            "matcher": "Edit|Write|NotebookEdit|Bash",
+            "matcher": "*",
             "hooks": [{ "type": "command", "command": format!("{bin} check") }]
         }],
+        "PostToolUse": [{
+            "matcher": "*",
+            "hooks": [{ "type": "command", "command": format!("{bin} activity idle") }]
+        }],
+        "UserPromptSubmit": [cmd("activity prompt")],
+        "Notification": [cmd("activity waiting")],
+        "Stop": [cmd("activity stop")],
         "SubagentStart": [cmd("subagent-start")],
         "SubagentStop": [cmd("subagent-stop")]
     })
@@ -324,7 +336,8 @@ fn self_path() -> String {
 }
 
 /// True when settings.json already points at robofinger for every event it
-/// hooks — so an install from before an event was added reads as missing it.
+/// hooks, with the matcher it would write — so an install from before an
+/// event was added, or before a matcher widened, reads as out of date.
 fn already_installed(settings: &serde_json::Value) -> bool {
     let Some(hooks) = settings.get("hooks") else {
         return false;
@@ -333,14 +346,16 @@ fn already_installed(settings: &serde_json::Value) -> bool {
     events
         .as_object()
         .into_iter()
-        .flat_map(|m| m.keys())
-        .all(|k| {
+        .flat_map(|m| m.iter())
+        .all(|(k, want)| {
+            let matcher = want.pointer("/0/matcher");
             hooks
                 .get(k)
                 .and_then(|v| v.as_array())
                 .is_some_and(|entries| {
                     entries.iter().any(|e| {
-                        e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+                        e.get("matcher") == matcher
+                            && e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
                             hs.iter().any(|h| {
                                 h.get("command")
                                     .and_then(|c| c.as_str())
@@ -584,7 +599,17 @@ mod tests {
         assert!(s.contains("/opt/bin/robofinger check"));
         assert!(s.contains("/opt/bin/robofinger subagent-start"));
         assert!(s.contains("/opt/bin/robofinger subagent-stop"));
-        assert!(s.contains("Edit|Write|NotebookEdit|Bash"), "Bash, to tag a subagent's claims");
+        assert!(s.contains("/opt/bin/robofinger activity stop"));
+        assert_eq!(h["PreToolUse"][0]["matcher"], "*", "every tool feeds the activity spool");
+    }
+
+    /// An install from before the activity spool hooks edits and Bash only.
+    /// It has to read as out of date, or `init` never widens it.
+    #[test]
+    fn an_install_with_a_narrower_matcher_is_not_installed() {
+        let mut old = serde_json::json!({ "hooks": hook_json("robofinger") });
+        old["hooks"]["PreToolUse"][0]["matcher"] = "Edit|Write|NotebookEdit|Bash".into();
+        assert!(!already_installed(&old));
     }
 
     /// An install from before subagents has the first three events and none

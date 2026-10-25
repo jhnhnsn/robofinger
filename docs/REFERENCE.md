@@ -163,6 +163,33 @@ answer that would undo a teammate's work. Naming the cases rather than saying
 "use your judgment" is deliberate: judgment alone produces agents that either
 never ask or ask constantly, and which one varies by model and by session.
 
+## The activity spool
+
+What each agent on this machine is doing right now: the line Claude Code shows
+under its input box, kept where a dashboard can read it. Hooks append one line
+per event to `$ROBOFINGER_HOME/activity/<slot>.jsonl`, one file per top-level
+session holding it and its subagents:
+
+| Hook | Event | Shows as |
+|---|---|---|
+| `SessionStart`, `SubagentStart` | `appear` | Starting |
+| `PreToolUse` (every tool) | `tool` | Running cargo test, Editing src/main.rs, Reading… |
+| `PostToolUse`, `UserPromptSubmit` | `idle`, `prompt` | Thinking |
+| `Notification` | `waiting` | Needs you: *the notification* |
+| `Stop` | `stop` | Your turn |
+| `SubagentStop`, `SessionEnd` | `done`, `gone` | Done, Ended |
+
+None of it leaves the machine. A tool call is too frequent an event for the
+relay's write budget, and a hook that waited on the network would slow every
+read and search. So PreToolUse matches every tool, but only edits are checked
+against claims (and Bash, to tag a subagent's own claims). The rest return after
+a local append, in about 10ms. Shell commands are cut to their first line and
+72 characters, and paths are made relative to the repo.
+
+Files are trimmed to their newest 400 lines once past 128KB. A file nobody has
+written to in a day is deleted at the next session start. `robofinger activity`
+prints the spool as a tree, and `robofinger serve` shows it live.
+
 ## Several agents, one identity
 
 Two coding agents in the same repo need to hold claims at the same time, so

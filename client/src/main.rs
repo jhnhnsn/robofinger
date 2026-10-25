@@ -21,6 +21,7 @@
 //!      ROBOFINGER_ALIAS (display name for this machine, defaults to hostname)
 //!      ROBOFINGER_HOME (key dir, defaults to ~/.config/robofinger)
 
+mod activity;
 mod crypto;
 mod hooks;
 mod selfupdate;
@@ -167,6 +168,9 @@ THE TIMELINE
       robofinger since --peer sam
       (--peer is a filtered read and does NOT advance your cursor, so it
        cannot swallow entries from everyone else)
+
+  activity                      what each agent on this machine is doing now
+      (read from the hooks' local spool; nothing is sent anywhere)
 
   log [-n N] [--peer <label>] [--since <when>] [--ids] [--url]
                                 the whole timeline, newest first
@@ -2050,8 +2054,28 @@ fn conflicts(c: &Cfg, k: &Keys, path: &str) -> Vec<(Plan, String)> {
 fn is_hook(cmd: &str) -> bool {
     matches!(
         cmd,
-        "check" | "start" | "end" | "subagent-start" | "subagent-stop"
+        "check" | "start" | "end" | "subagent-start" | "subagent-stop" | "activity"
     )
+}
+
+/// Note what an agent just did in this machine's activity spool. No network.
+fn spool(agent: &str, kind: &str, tool: &str, target: &str) {
+    activity::append(
+        &activity::dir(&crypto::config_dir()),
+        &activity::Event {
+            t: now(),
+            agent: agent.into(),
+            kind: kind.into(),
+            tool: tool.into(),
+            target: target.into(),
+        },
+    );
+}
+
+/// Tools whose target is a file this agent is about to change: the only ones
+/// a claim can conflict with.
+fn edits(tool: &str) -> bool {
+    matches!(tool, "Edit" | "MultiEdit" | "Write" | "NotebookEdit")
 }
 
 fn main() {
@@ -2753,6 +2777,22 @@ fn main() {
                 hook_input()
             };
             let sub = hook_subagent(&input);
+            if let Some((kind, id)) = &sub {
+                c.instance = subagent_instance(&c.instance, kind, id);
+            }
+
+            // Every tool call is a line in the activity spool; only edits and
+            // shell commands go any further. Matching every tool keeps the
+            // live view honest about reads and searches, and costs a local
+            // append — never the network.
+            let tool = input.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+            if !tool.is_empty() {
+                let (tool, target) = activity::describe(&input);
+                spool(&c.instance, "tool", &tool, &target);
+            }
+            if !tool.is_empty() && tool != "Bash" && !edits(tool) {
+                std::process::exit(0);
+            }
 
             // A subagent's shell command: tag its robofinger calls with who
             // ran them, so its claims are filed under its own name. No
@@ -2780,9 +2820,6 @@ fn main() {
                 std::process::exit(0);
             }
 
-            if let Some((kind, id)) = &sub {
-                c.instance = subagent_instance(&c.instance, kind, id);
-            }
             let path = args.get(1).cloned().or_else(|| {
                 input
                     .pointer("/tool_input/file_path")?
@@ -2850,6 +2887,8 @@ fn main() {
         "start" => {
             let t = now();
             let mut blocks: Vec<String> = Vec::new();
+            activity::prune(&activity::dir(&crypto::config_dir()));
+            spool(&c.instance, "appear", "", "");
 
             let live = current_plans(&c, &k);
             let here = project();
@@ -3022,6 +3061,7 @@ fn main() {
             std::process::exit(0);
         }
         "end" => {
+            spool(&c.instance, "gone", "", "");
             // Journal a session that ends still holding paths. The timeline is
             // all a past view has, and without an entry it shows the claim
             // held on until it would have lapsed. One write, and only then.
@@ -3048,7 +3088,9 @@ fn main() {
             // spend a slot.
             let you = match hook_subagent(&input) {
                 Some((kind, id)) if !kind.is_empty() && typed(&input) => {
-                    let me = agent_path(&k.pubkey(), &subagent_instance(&c.instance, &kind, &id));
+                    let inst = subagent_instance(&c.instance, &kind, &id);
+                    spool(&inst, "appear", "", "");
+                    let me = agent_path(&k.pubkey(), &inst);
                     format!("{}\n", you_are(&me, Some(&parent)))
                 }
                 _ => String::new(),
@@ -3072,6 +3114,7 @@ fn main() {
             let input = hook_input();
             if let (true, Some((kind, id))) = (typed(&input), hook_subagent(&input)) {
                 c.instance = subagent_instance(&c.instance, &kind, &id);
+                spool(&c.instance, "done", "", "");
                 // Only a subagent that claimed has a row to release. Publishing
                 // one for every read-only subagent would spend the write budget
                 // and push real claims out of the relay's instance cap.
@@ -3080,6 +3123,26 @@ fn main() {
                     release(&c, &k, None);
                 }
             }
+            std::process::exit(0);
+        }
+        // PostToolUse, UserPromptSubmit, Notification and Stop: a line in the
+        // activity spool and nothing else. Prints nothing — Stop would read a
+        // decision from stdout, and UserPromptSubmit adds it to the prompt.
+        "activity" => {
+            let kind = args.get(1).map(String::as_str).unwrap_or("");
+            if kind.is_empty() {
+                show_activity(&c, &k);
+                return;
+            }
+            if !matches!(kind, "idle" | "prompt" | "waiting" | "stop") {
+                std::process::exit(0);
+            }
+            let input = hook_input();
+            if let Some((sub_kind, id)) = hook_subagent(&input) {
+                c.instance = subagent_instance(&c.instance, &sub_kind, &id);
+            }
+            let message = input.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            spool(&c.instance, kind, "", &truncate(message, 72));
             std::process::exit(0);
         }
         "post" => {
@@ -3551,6 +3614,70 @@ fn show_plan(p: &Plan, t: i64, suffix: &str, current: bool, show_instance: bool)
     } else {
         println!("  claimed {}", ago(t - held));
     }
+}
+
+/// How long an agent with nothing new in the spool still counts as around.
+/// An idle session waiting at its prompt is real; one that crashed without a
+/// SessionEnd looks the same, and this is where it stops being shown.
+const ACTIVITY_WINDOW: i64 = 2 * 3600;
+/// How long a finished agent stays on screen, so finishing is something you
+/// see happen rather than a row that silently vanishes.
+const FINISHED_SHOWN: i64 = 60;
+
+/// Each agent on this machine and what it is doing, from the activity spool:
+/// `(instance, status)`, in tree order.
+fn local_activity(t: i64) -> Vec<(String, activity::Status)> {
+    let events = activity::read(&activity::dir(&crypto::config_dir()));
+    let mut agents: Vec<&str> = events.iter().map(|e| e.agent.as_str()).collect();
+    agents.sort();
+    agents.dedup();
+    agents
+        .into_iter()
+        .filter_map(|a| {
+            let mine: Vec<&activity::Event> = events.iter().filter(|e| e.agent == a).collect();
+            let s = activity::status(&mine)?;
+            let shown = match s.state {
+                activity::State::Done | activity::State::Gone => t - s.since < FINISHED_SHOWN,
+                _ => t - s.since < ACTIVITY_WINDOW,
+            };
+            shown.then(|| (a.to_string(), s))
+        })
+        .collect()
+}
+
+/// A status as one line: glyph, then what it is doing and for how long.
+fn status_line(s: &activity::Status, t: i64) -> String {
+    use activity::State::*;
+    let for_ = dur(t - s.since);
+    match s.state {
+        Working | Thinking => format!("✻ {} · {for_}", s.text),
+        NeedsYou | YourTurn => format!("‖ {} · {for_}", s.text),
+        Done | Gone => format!("✓ {} · {}", s.text, ago(t - s.since)),
+    }
+}
+
+/// `robofinger activity`: this machine's agents, live, the way `serve` shows them.
+fn show_activity(c: &Cfg, k: &Keys) {
+    let t = now();
+    let rows = local_activity(t);
+    if rows.is_empty() {
+        println!("no agents active on this machine");
+        return;
+    }
+    for (inst, s) in rows {
+        let depth = inst.matches('/').count();
+        let name = inst.rsplit('/').next().unwrap_or(&inst);
+        let mark = if inst == c.instance { "  (this one)" } else { "" };
+        println!(
+            "{}{:<w$} {}{mark}",
+            "  ".repeat(depth),
+            name,
+            status_line(&s, t),
+            w = 22usize.saturating_sub(2 * depth)
+        );
+    }
+    println!("
+as {}", name_for(&k.pubkey()));
 }
 
 /// `robofinger` with no arguments: your own status, the way `finger` with no

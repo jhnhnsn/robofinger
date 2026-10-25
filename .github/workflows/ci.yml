@@ -40,9 +40,10 @@ jobs:
           BIN=./target/release/robofinger
           export ROBOFINGER_HOME="$RUNNER_TEMP/rf-ci"
           fail=0
-          for cmd in check start end; do
+          for cmd in check start end subagent-start subagent-stop "activity idle" "activity stop"; do
             for payload in '' 'not json' '{"tool_input":{"command":"ls"}}'; do
-              printf '%s' "$payload" | env -u ROBOFINGER_URL -u ROBOFINGER_NS "$BIN" "$cmd" >/dev/null 2>&1
+              # $cmd unquoted: "activity idle" is a command and its argument.
+              printf '%s' "$payload" | env -u ROBOFINGER_URL -u ROBOFINGER_NS "$BIN" $cmd >/dev/null 2>&1
               rc=$?
               [ $rc -eq 0 ] || { echo "FAIL: $cmd with payload '$payload' exited $rc"; fail=1; }
             done
