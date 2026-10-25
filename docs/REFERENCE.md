@@ -234,6 +234,40 @@ not start encrypting the first one's work to its members. A peer can have one
 home relay; following someone at another relay wins over an invitation, with
 a warning.
 
+## The working agreement
+
+`AGREEMENT.md` at the repo root says whose areas are whose, where anyone may
+work, and where to ask first (ADR 0006). It is written for people and agents
+alike, and parsed forgivingly:
+
+```markdown
+## Areas
+- lilac-viper (John): robofinger in general — client/**, relay/**, docs/**
+- quiet-heron (Ana): the local archive — client/src/archive.rs
+
+## Play anywhere
+Tests, typos, docs/agents/**
+
+## Ask first
+- relay/cloudflare-d1/schema.sql (deployed; changes need a migration)
+```
+
+It is guidance and never enforced:
+- **SessionStart** lists the agent's person's areas, then everyone else's,
+  where anyone may work, and where to ask first.
+- **PreToolUse** adds a note before an edit lands in someone else's area or
+  on an "ask first" path. The most specific area wins, so
+  `client/src/archive.rs` beats `client/**`. Subagents are told to report it to
+  their parent.
+- **The dashboard** shows it as a panel, with who has accepted the current
+  version, and marks claims in someone else's area.
+
+Acceptance is recorded per folder as `ROBOFINGER_AGREEMENT=<version>` in
+`.robofinger.local`, where the version is a short hash of the file. Joining
+accepts the current version, `robofinger accept` accepts a changed one and
+posts that it did, and a session is told when the file has changed since its
+person accepted. `robofinger agreement` prints it.
+
 ## The activity spool
 
 What each agent on this machine is doing right now: the line Claude Code shows

@@ -22,6 +22,7 @@
 //!      ROBOFINGER_HOME (key dir, defaults to ~/.config/robofinger)
 
 mod activity;
+mod agreement;
 mod crypto;
 mod dash;
 mod hooks;
@@ -322,6 +323,8 @@ PROJECTS
   join '<invitation>'           join with an invitation: checks who signed it,
                                 follows the members, and tells them
   members                       who is in this folder's project
+  agreement                     this folder's AGREEMENT.md: whose areas are whose
+  accept                        accept it as it stands (joining accepts it too)
 
 Config layers, lowest first:
   ~/.config/robofinger/config   you, on this machine (written by init) —
@@ -569,6 +572,27 @@ fn leave_in(root: &std::path::Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Set `key` in the folder's own `.robofinger.local`, keeping the rest.
+fn set_local(root: &std::path::Path, key: &str, value: &str) -> std::io::Result<()> {
+    let path = root.join(".robofinger.local");
+    let mut lines: Vec<String> = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.split_once('=').is_none_or(|(k, _)| k.trim() != key))
+        .map(String::from)
+        .collect();
+    lines.push(format!("{key}={value}"));
+    std::fs::write(&path, lines.join("\n") + "\n")
+}
+
+/// Record that this person accepts the folder's working agreement as it
+/// stands, returning the version accepted, or None when there is none.
+fn accept_here(root: &std::path::Path) -> Option<String> {
+    let a = agreement::load(root)?;
+    set_local(root, "ROBOFINGER_AGREEMENT", &a.version).ok()?;
+    Some(a.version)
+}
+
 /// A config file's lines, minus the relay it names.
 fn without_url(path: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(path)
@@ -665,7 +689,14 @@ fn join_by_invitation(c: &mut Cfg, k: &Keys, raw: &str) {
         address: k.identity_blob(&c.alias, Some(crypto::Home { url: c.url.clone() })),
         invitation: raw.trim().to_string(),
     };
-    let text = format!("joined {} (invited by {by})", inv.body.project);
+    let accepted = accept_here(std::path::Path::new(&root));
+    let text = match &accepted {
+        Some(v) => format!(
+            "joined {} (invited by {by}), accepting the working agreement version {v}",
+            inv.body.project
+        ),
+        None => format!("joined {} (invited by {by})", inv.body.project),
+    };
     match post_with(
         c,
         k,
@@ -3118,6 +3149,36 @@ fn main() {
                 "They run: robofinger join '<invitation>' — and should check it says it is from {me}."
             );
         }
+        "accept" => {
+            let root = repo_root();
+            match accept_here(std::path::Path::new(&root)) {
+                Some(v) => {
+                    println!("accepted the working agreement (AGREEMENT.md, version {v})");
+                    let text = format!("accepted the working agreement, version {v}");
+                    if let Err(e) = post(&c, &k, &text, None, "accept", vec![], vec![], "", 0) {
+                        eprintln!("  not shared: {e}");
+                    }
+                }
+                None => println!("no AGREEMENT.md in {root}; nothing to accept"),
+            }
+        }
+        "agreement" => {
+            let root = repo_root();
+            match agreement::load(std::path::Path::new(&root)) {
+                Some(a) => {
+                    println!("{}", a.briefing(&name_for(&k.pubkey())));
+                    match config_file().get("ROBOFINGER_AGREEMENT") {
+                        Some(v) if *v == a.version => println!("\nyou accepted this version"),
+                        Some(v) => println!(
+                            "\nyou accepted version {v}; this is {} — `robofinger accept`",
+                            a.version
+                        ),
+                        None => println!("\nnot accepted yet — `robofinger accept`"),
+                    }
+                }
+                None => println!("no AGREEMENT.md in {root}"),
+            }
+        }
         "members" => {
             for (name, by) in invite::adopt(&c, &k) {
                 println!("new: {name}, invited by {by}");
@@ -3144,6 +3205,9 @@ fn main() {
                 Ok(path) => {
                     register(&url, &root);
                     println!("joined {root} to {url}");
+                    if let Some(v) = accept_here(std::path::Path::new(&root)) {
+                        println!("  accepted its working agreement (AGREEMENT.md, version {v})");
+                    }
                     println!("  written to {} (yours; kept out of git)", path.display());
                     println!("  agents here now publish their claims and see teammates' claims");
                 }
@@ -3303,6 +3367,25 @@ fn main() {
             };
 
             let hits = conflicts(&c, &k, &path);
+            // A word from the working agreement, independent of any claim:
+            // the path may be someone's area, or one to ask about first.
+            let note = agreement::load(std::path::Path::new(&repo_root())).and_then(|a| {
+                a.note_for(&relative_to_root(&path), &name_for(&k.pubkey()))
+                    .map(|n| if sub.is_some() { format!("{n} You are a subagent: report it to your parent instead of asking.") } else { n })
+            });
+            if hits.is_empty()
+                && let Some(n) = &note
+            {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "additionalContext": n
+                        }
+                    })
+                );
+            }
             if !hits.is_empty() {
                 let detail: Vec<String> = hits
                     .iter()
@@ -3350,6 +3433,10 @@ fn main() {
                         path,
                         holder
                     )
+                };
+                let msg = match &note {
+                    Some(n) => format!("{msg}\n\n{n}"),
+                    None => msg,
                 };
                 println!(
                     "{}",
@@ -3405,6 +3492,21 @@ fn main() {
                     .map(|(n, by)| format!("{n} (invited by {by})"))
                     .collect();
                 blocks.push(format!("New in this project: {}.", names.join(", ")));
+            }
+
+            if let Some(a) = agreement::load(std::path::Path::new(&repo_root())) {
+                let mut text = a.briefing(&name_for(&k.pubkey()));
+                match config_file().get("ROBOFINGER_AGREEMENT") {
+                    Some(v) if *v == a.version => {}
+                    Some(v) => text.push_str(&format!(
+                        "\n  It has changed since your person accepted version {v}. Mention it to \
+                         them; they accept the new one with `robofinger accept`."
+                    )),
+                    None => text.push_str(
+                        "\n  Your person has not accepted it yet; they do with `robofinger accept`.",
+                    ),
+                }
+                blocks.push(text);
             }
 
             let live = current_plans(&c, &k);
@@ -5073,6 +5175,7 @@ fn page(c: &Cfg, k: &Keys, r: &Route, proj: &Project, cache: &mut Cache) -> Resu
         local.retain(|(inst, _)| mine(inst));
     }
     let plan = cache.plan(&folder);
+    let agreement = agreement::load(std::path::Path::new(&folder));
     let me = k.pubkey();
     let b = dash::Board {
         live: &live,
@@ -5085,6 +5188,7 @@ fn page(c: &Cfg, k: &Keys, r: &Route, proj: &Project, cache: &mut Cache) -> Resu
         plan: plan.as_deref(),
         tracker: &tracker,
         here: &here,
+        agreement: agreement.as_ref(),
     };
     Ok(render(&b, c, t, links.as_ref(), &view))
 }
@@ -5289,6 +5393,7 @@ fn dashboard(
         plan: None,
         tracker: &tr,
         here: "",
+        agreement: None,
     };
     render(&b, c, t, links, view)
 }
@@ -5530,6 +5635,7 @@ fn render(
 <div class=workspace><main class=stage>{banner}<div class=stack>{ghosts}<div class=board id=board>
 <div class=side>
 {plan_panel}
+{agreement_panel}
 {project_panels}
 </div>
 <div class=center>
@@ -5551,6 +5657,7 @@ fn render(
         folder = dash::folder(),
         here_e = esc(&here),
         mode = dash::mode(view),
+        agreement_panel = dash::agreement_panel(b),
         switch = dash::switch(view, &here),
         me_name = esc(&name_for(b.me)),
         rail = dash::rail(view),

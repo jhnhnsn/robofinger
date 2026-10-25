@@ -28,6 +28,8 @@ pub struct Board<'a> {
     /// The codebase this project is chiefly worked in, by the name entries
     /// carry: what the roadmap and the untracked list are about.
     pub here: &'a str,
+    /// The project's working agreement, when its repo has one.
+    pub agreement: Option<&'a agreement::Agreement>,
 }
 
 /// One agent on the page.
@@ -451,13 +453,30 @@ fn row(n: &Node, b: &Board, t: i64, base: &str, moment: &str, selected: &str) ->
     } else {
         String::new()
     };
+    // A claim in someone else's area, per the working agreement: shown, never
+    // refused. A claimed glob is placed by what precedes its first wildcard.
+    let area = n
+        .claim
+        .zip(b.agreement)
+        .and_then(|(c, a)| {
+            c.touching.iter().find_map(|g| {
+                let lit = g
+                    .split(['*', '?', '['])
+                    .next()
+                    .unwrap_or(g)
+                    .trim_end_matches('/');
+                a.area_of(lit).filter(|ar| ar.owner != name_for(&n.pubkey))
+            })
+        })
+        .map(|ar| format!(" <span class=inarea>in {}'s area</span>", esc(&ar.owner)))
+        .unwrap_or_default();
     let ticket = n
         .claim
         .and_then(|c| b.tracker.find(&c.task))
         .map(|(k, _)| format!("<span class=tk>{}</span>", esc(&k)))
         .unwrap_or_default();
     format!(
-        r#"<a class="arow{}{}{}" data-agent="{p}" href="{base}/{p}{moment}"><span class="av{}">{}</span><span class=grow><span class="aname{}">{}</span>{id}<span class=astat>{}</span></span>{ticket}</a>"#,
+        r#"<a class="arow{}{}{}" data-agent="{p}" href="{base}/{p}{moment}"><span class="av{}">{}</span><span class=grow><span class="aname{}">{}</span>{id}<span class=astat>{}</span></span>{area}{ticket}</a>"#,
         if selected == format!("/{path}") {
             " sel"
         } else {
@@ -722,6 +741,83 @@ pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
         l.tone,
         line_html(&l, t),
         kv(&facts),
+    )
+}
+
+/// The working agreement as a panel: areas, where anyone may work, where to
+/// ask first, and who has accepted the version in the repo.
+pub fn agreement_panel(b: &Board) -> String {
+    let Some(a) = b.agreement else {
+        return String::new();
+    };
+    let accepted: Vec<String> = {
+        let mut names: Vec<String> = b
+            .all_posts
+            .iter()
+            .filter(|p| matches!(p.kind.as_str(), "accept" | "join") && p.task.contains(&a.version))
+            .map(|p| name_for(&p.pubkey))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    };
+    let areas: String = a
+        .areas
+        .iter()
+        .map(|ar| {
+            let who = if ar.person.is_empty() {
+                esc(&ar.owner)
+            } else {
+                format!("{} <span class=sub>({})</span>", esc(&ar.owner), esc(&ar.person))
+            };
+            format!(
+                "<div class=item><span class=grow><span class=pname>{who}</span><span class=pabout>{}</span><code>{}</code></span></div>",
+                esc(&ar.about),
+                esc(&ar.globs.join("  "))
+            )
+        })
+        .collect();
+    let mut extra = String::new();
+    let anywhere: Vec<String> = a
+        .anywhere_notes
+        .iter()
+        .chain(a.anywhere.iter())
+        .cloned()
+        .collect();
+    if !anywhere.is_empty() {
+        extra.push_str(&format!(
+            "<div class=kvrow><span class=kvk>Anyone</span><span class=kvv>{}</span></div>",
+            esc(&anywhere.join(", "))
+        ));
+    }
+    if !a.ask_first.is_empty() {
+        let items: Vec<String> = a
+            .ask_first
+            .iter()
+            .map(|(g, why)| {
+                if why.is_empty() {
+                    esc(g)
+                } else {
+                    format!("{} <span class=sub>({})</span>", esc(g), esc(why))
+                }
+            })
+            .collect();
+        extra.push_str(&format!(
+            "<div class=kvrow><span class=kvk>Ask first</span><span class=kvv>{}</span></div>",
+            items.join("<br>")
+        ));
+    }
+    extra.push_str(&format!(
+        "<div class=kvrow><span class=kvk>Accepted</span><span class=kvv>{}</span></div>",
+        if accepted.is_empty() {
+            "nobody yet, at this version".to_string()
+        } else {
+            esc(&accepted.join(", "))
+        }
+    ));
+    format!(
+        r#"<section class=card><p class=eyebrow>Working agreement · {}</p>{areas}<div class=kv>{extra}</div></section>"#,
+        esc(&a.version)
     )
 }
 
@@ -1127,6 +1223,7 @@ details.done[open]>summary.grp::before{transform:rotate(45deg)}
 .count{font-weight:500;letter-spacing:0;background:var(--line);border-radius:999px;padding:0 7px;text-transform:none}
 .quiet{margin:2px 0 6px 10px;font-size:12px;color:var(--fg2)}
 .tk{font-size:12px;color:var(--accent);font-weight:500;flex:none}
+.inarea{font-size:11px;font-weight:500;padding:1px 8px;border-radius:999px;background:var(--waitbg);color:var(--wait);white-space:nowrap;flex:none}
 .st{display:inline-flex;align-items:center;gap:6px;color:var(--fg2)}
 .t-work{color:var(--accent)}.t-wait{color:var(--wait)}.t-done{color:var(--done)}.t-quiet{color:var(--bad)}
 .spin{width:11px;height:11px;border-radius:50%;border:2px solid var(--accentbg);border-top-color:var(--accent);animation:spin .9s linear infinite;flex:none}
@@ -1244,6 +1341,7 @@ mod tests {
             plan: None,
             tracker: &tr,
             here: "",
+            agreement: None,
         };
         let ns = nodes(&b, 100);
         let cfg = Cfg {
