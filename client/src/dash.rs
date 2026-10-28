@@ -553,8 +553,12 @@ pub fn feed(b: &Board, t: i64, view: &View) -> String {
             "release" => format!("released · {}", p.task),
             "done" if p.task.is_empty() => "finished".into(),
             "done" => format!("finished · {}", p.task),
-            "ask" => format!("asks: {}", p.task),
-            "answer" => format!("answered: {}", p.task),
+            "ask" if p.to.is_empty() => format!("asks: {}", p.task),
+            "ask" => format!("asks {}: {}", p.to, p.task),
+            "answer" if p.to.is_empty() => format!("answered: {}", p.task),
+            "answer" => format!("answered {}: {}", p.to, p.task),
+            "directive" => format!("directed {}: {}", p.to, p.task),
+            _ if !p.to.is_empty() => format!("to {}: {}", p.to, p.task),
             _ => p.task.clone(),
         };
         items.push((p.epoch, agent_path(&p.pubkey, &p.instance), text));
@@ -634,6 +638,107 @@ fn short_when(e: i64) -> String {
 
 /// The entity the URL names: what it is doing, what it holds, and the trail
 /// of what it did.
+/// The page as data (#23): the agents in view and where each stands, the
+/// entries in view, and the moments either side, so a script can step
+/// through it the way the rail does. Same scope, same moment as the page.
+pub fn json(b: &Board, t: i64, view: &View) -> serde_json::Value {
+    let ns = nodes(b, t);
+    let agents: Vec<serde_json::Value> = ns
+        .iter()
+        .filter(|n| in_scope(view, &n.pubkey, &n.instance) && shown(n, t))
+        .map(|n| {
+            let l = line(n, t);
+            serde_json::json!({
+                "path": n.path(),
+                "state": l.tone,
+                "doing": l.text,
+                "since": l.since,
+                "claim": n.claim.map(|c| serde_json::json!({
+                    "task": c.task,
+                    "globs": c.touching,
+                    "state": if stuck(c, t) { "quiet" } else { "live" },
+                })),
+                "last_entry": n.last.map(|p| p.epoch),
+            })
+        })
+        .collect();
+    let mut posts: Vec<&Plan> = b.posts.iter().collect();
+    posts.sort_by_key(|p| std::cmp::Reverse(p.epoch));
+    let entries: Vec<serde_json::Value> = posts
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "epoch": p.epoch,
+                "path": agent_path(&p.pubkey, &p.instance),
+                "kind": if p.kind.is_empty() { "note" } else { p.kind.as_str() },
+                "text": p.task,
+                "to": p.to,
+                "re": p.reply_to,
+                "globs": p.globs,
+                "commits": p.commits,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "project": view.project,
+        "path": view.rel(),
+        "at": view.at,
+        "now": t,
+        "prev": view.prev,
+        "next": view.next,
+        "oldest": view.oldest,
+        "agents": agents,
+        "entries": entries,
+    })
+}
+
+/// Send to whoever the page is about (#29): a message to anyone, or a
+/// directive to one of your own agents (ADR 0008). Live pages only, since
+/// the past cannot be written to, and only with the token `serve` issued.
+pub fn send_form(b: &Board, view: &View) -> String {
+    let Some(who) = &view.who else {
+        return String::new();
+    };
+    if view.token.is_empty() || view.at.is_some() {
+        return String::new();
+    }
+    let to = view.rel().trim_start_matches('/').to_string();
+    let me = name_for(b.me);
+    let mine = *who == me;
+    let parent = view.agent.split('/').next().unwrap_or("");
+    let kinds = if mine && !view.agent.is_empty() {
+        r#"<div class="pill seg kinds"><label><input type=radio name=kind value=message checked>Message</label><label><input type=radio name=kind value=directive>Directive</label></div>"#
+    } else {
+        r#"<input type=hidden name=kind value=message>"#
+    };
+    let note = if view.agent.contains('/') {
+        format!(
+            "Goes to {who}/{parent}, which decides what to pass on: subagents do not hear from the team."
+        )
+    } else if !mine {
+        format!("A message: their agent weighs it. Only {who}'s person can direct it.")
+    } else if view.agent.is_empty() {
+        "A message to every one of your agents. To direct one, open it.".into()
+    } else {
+        "A directive is acted on as if you had typed it into the session; a message is weighed."
+            .into()
+    };
+    let sent = if view.sent {
+        format!("<p class=sent>Sent. It is {DELIVERY}.</p>")
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<section class=card id=send><p class=eyebrow>Send to {to}</p>{sent}<form method=post action="{action}"><input type=hidden name=token value="{token}">{kinds}<textarea name=text maxlength={max} rows=3 required placeholder="What should they know?"></textarea><div class=sendrow><span class=sub>{note}</span><button class=btn type=submit>Send</button></div></form></section>"#,
+        to = esc(&to),
+        action = esc(&view.path()),
+        token = esc(&view.token),
+        max = MAX_ENTRY,
+        note = esc(&note),
+    )
+}
+
 pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
     let Some(who) = &view.who else {
         return String::new();
@@ -1158,6 +1263,10 @@ pub const RAIL_JS: &str = r##"<script>
 /// is left alone while someone has hold of it.
 pub const LIVE_JS: &str = r##"<script>
 (function () {
+  // A sent form lands on ?sent=1; reloading that must not read as sending again.
+  if (/[?&]sent=1/.test(location.search)) {
+    history.replaceState(null, "", location.pathname + location.search.replace(/[?&]sent=1/, "").replace(/^&/, "?"));
+  }
   function elapsed(s) {
     s = Math.max(0, Math.floor(s));
     if (s < 60) return s + "s";
@@ -1180,6 +1289,7 @@ pub const LIVE_JS: &str = r##"<script>
       var open = {}, seen = {};
       document.querySelectorAll("details[data-id]").forEach(function (d) { open[d.dataset.id] = d.open; });
       document.querySelectorAll("[data-agent]").forEach(function (e) { seen[e.dataset.agent] = 1; });
+      var keep = document.getElementById("send");
       var ids = ["board", "summary"];
       var rail = document.getElementById("rail");
       if (rail && !rail.contains(document.activeElement)) ids.push("rail");
@@ -1187,6 +1297,9 @@ pub const LIVE_JS: &str = r##"<script>
         var a = document.getElementById(id), b = next.getElementById(id);
         if (a && b) a.replaceWith(b);
       });
+      // What is being typed survives the refresh.
+      var fresh = document.getElementById("send");
+      if (keep && fresh) fresh.replaceWith(keep);
       document.querySelectorAll("details[data-id]").forEach(function (d) {
         if (d.dataset.id in open) d.open = open[d.dataset.id];
       });
@@ -1228,6 +1341,13 @@ code,.mono{font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:12px}
 .banner-in svg{color:var(--accent)}
 .btn{background:var(--accent);color:#fff;border-radius:999px;padding:6px 14px;font-size:13px;font-weight:500;min-height:30px;display:inline-flex;align-items:center}
 .btn:hover{text-decoration:none;filter:brightness(1.08)}
+#send textarea{display:block;width:100%;margin:10px 0 8px;padding:8px 10px;font:inherit;color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:10px;resize:vertical}
+#send textarea:focus{outline:3px solid var(--accentbg);border-color:var(--accent)}
+#send .btn{border:0;cursor:pointer;font:inherit;font-weight:500;flex:none}
+.sendrow{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.kinds label{padding:2px 10px;border-radius:999px;color:var(--fg2);cursor:pointer;font-weight:500}.kinds input{position:absolute;opacity:0;pointer-events:none}
+.kinds label:has(input:checked){background:var(--accentbg);color:var(--accent)}.kinds label:has(input:focus-visible){outline:2px solid var(--accent)}
+.sent{color:var(--done);font-size:13px;margin:0 0 4px}
 .stack{position:relative}
 .ghost{position:absolute;inset:0;border-radius:18px;background:var(--panel);border:1px solid var(--line);pointer-events:none}
 .g1{transform:translateY(-14px) scale(.975);opacity:.55}.g2{transform:translateY(-26px) scale(.95);opacity:.3}.g3{transform:translateY(-36px) scale(.925);opacity:.14}
@@ -1359,6 +1479,121 @@ mod tests {
         );
     }
 
+    fn empty_board<'a>(
+        me: &'a str,
+        tr: &'a tracker::Tracker,
+        local: &'a [(String, activity::Status)],
+    ) -> Board<'a> {
+        Board {
+            live: &[],
+            posts: &[],
+            all_live: &[],
+            all_posts: &[],
+            local,
+            events: &[],
+            me,
+            plan: None,
+            tracker: tr,
+            here: "",
+            agreement: None,
+        }
+    }
+
+    /// A directive is offered only for your own agents, and only where it
+    /// can be sent: a live page served with a token.
+    #[test]
+    fn the_send_form_offers_a_directive_only_to_your_own_agents() {
+        let me = "pk-me";
+        let tr = tracker::Tracker::none();
+        let b = empty_board(me, &tr, &[]);
+        let page = |who: &str, agent: &str| View {
+            who: Some(who.into()),
+            agent: agent.into(),
+            project: "demo".into(),
+            token: "tok".into(),
+            ..View::default()
+        };
+        let mine = send_form(&b, &page(&name_for(me), "claude-1"));
+        assert!(
+            mine.contains("value=directive") && mine.contains("value=\"tok\""),
+            "{mine}"
+        );
+        assert!(
+            mine.contains(&format!("action=\"/demo/{}/claude-1\"", name_for(me))),
+            "{mine}"
+        );
+
+        let theirs = send_form(&b, &page("quiet-heron", "claude-1"));
+        assert!(!theirs.contains("value=directive"), "{theirs}");
+        assert!(
+            theirs.contains("Only quiet-heron&#39;s person")
+                || theirs.contains("Only quiet-heron's person"),
+            "{theirs}"
+        );
+
+        let sub = send_form(&b, &page("quiet-heron", "claude-1/explore-2"));
+        assert!(sub.contains("Goes to quiet-heron/claude-1"), "{sub}");
+
+        let past = View {
+            at: Some(5),
+            ..page(&name_for(me), "claude-1")
+        };
+        assert!(send_form(&b, &past).is_empty(), "the past is read-only");
+        let tokenless = View {
+            token: String::new(),
+            ..page(&name_for(me), "claude-1")
+        };
+        assert!(send_form(&b, &tokenless).is_empty());
+        assert!(
+            send_form(
+                &b,
+                &View {
+                    token: "tok".into(),
+                    ..View::default()
+                }
+            )
+            .is_empty(),
+            "nobody to send to"
+        );
+    }
+
+    /// The JSON form names the same agents and entries the page shows.
+    #[test]
+    fn the_page_as_data_scopes_like_the_page() {
+        let me = "pk-me";
+        let tr = tracker::Tracker::none();
+        let local = vec![
+            (
+                "claude-1".to_string(),
+                status(activity::State::Working, 90, ""),
+            ),
+            (
+                "claude-2".to_string(),
+                status(activity::State::Working, 90, ""),
+            ),
+        ];
+        let b = empty_board(me, &tr, &local);
+        let view = View {
+            who: Some(name_for(me)),
+            agent: "claude-1".into(),
+            project: "demo".into(),
+            prev: Some(40),
+            ..View::default()
+        };
+        let v = json(&b, 100, &view);
+        let paths: Vec<&str> = v["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, [format!("{}/claude-1", name_for(me))]);
+        assert_eq!(v["agents"][0]["state"], "work");
+        assert_eq!(v["path"], format!("/{}/claude-1", name_for(me)));
+        assert_eq!(v["prev"], 40);
+        assert!(v["entries"].as_array().unwrap().is_empty());
+    }
+
     #[test]
     fn subagents_sort_into_in_progress_and_done() {
         let me = "pk-me";
@@ -1391,6 +1626,7 @@ mod tests {
             url: String::new(),
             alias: "mac".into(),
             instance: String::new(),
+            codebase: None,
         };
         let html = tree(&b, &ns, &cfg, 100, &View::default());
         let progress = html

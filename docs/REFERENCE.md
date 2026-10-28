@@ -113,12 +113,42 @@ change who can read it: an addressed entry is still encrypted to everyone you
 follow, so the team sees the exchange rather than two agents negotiating in
 private. Anyone who can read the entry can read who it names.
 
-It carries a *label*, not a pubkey, because that is what a human or an agent
-types. The two ends routinely disagree about what a peer is called — `add --as`
-exists precisely to override a peer's suggested label — so `addressed_to_me`
-accepts any of: the recipient's alias, its instance, or `alias/instance`, all
-case-insensitively. Deliberately generous: a missed match means an agent never
-learns a question was for it, while a false match costs one extra line read.
+It carries an **agent path**: a person (`hazel-hare`, meaning every agent
+under that key) or one agent (`hazel-hare/claude-1`). The sender types whatever
+it calls the recipient, and `canonical_to` rewrites the first segment to the
+name the recipient's key derives to, which every reader computes alike. A local
+label (`add --as`) means nothing at the other end; the derived name means the
+same everywhere. Anything the sender does not recognise is sent as typed.
+
+The recipient (`addressee`) accepts its derived name, and, from older clients,
+its alias, a bare instance, or `alias/instance`, all case-insensitively.
+Segments are whole: `hazel-hare/claude-10` is not for `claude-1`. A subagent
+has no inbox (ADR 0005), so `hazel-hare/claude-1/explore-2` is delivered to
+`claude-1`, marked as meant for `explore-2`. Deliberately generous: a missed
+match means an agent never learns something was for it, while a false match
+costs one extra line read.
+
+### Delivery
+
+Mid-session delivery rides the PreToolUse hook every agent already runs. At
+most once every 20 seconds per agent (`mail::EVERY`), whatever tool it is
+calling, `check` reads the relay past that agent's own cursor
+(`delivered/<agent>` in the config directory) and puts anything addressed to it
+into that tool call's context. Parallel tool calls share one look through a
+lock. The session start shows the backlog and moves the same cursor, so nothing
+is delivered twice. An agent that is not working is not woken: it sees its
+messages when its person next prompts it. Subagents get nothing (ADR 0005).
+
+An answer sent with `--re` and no `--to` is addressed to whoever asked.
+
+### Directives
+
+A directive (`kind: "directive"`) is a message the receiving agent acts on as
+if its person had typed it (ADR 0008). Only one signed with the agent's own
+person's key counts: `robofinger direct` and the dashboard send one only to an
+agent under your own key, and an agent handed an entry of kind "directive" from
+any other key is told it is a message. Every message from someone else arrives
+marked as information to weigh, never an instruction.
 
 Escalation to a human is not encoded in the wire format. It is a rule stated in
 the SessionStart block and in every conflict warning — two agents wanting one
@@ -502,7 +532,8 @@ would be an identity swap rather than a move. Pointers expire after a year.
 ## Everything is request/response
 
 There are no long-lived connections. `check` runs per tool call and exits,
-doing one HTTP GET per distinct relay — roughly 100–300ms. Humans read with
+doing one HTTP GET per distinct relay — roughly 100–300ms — on an edit, and a
+look for messages at most every 20 seconds per agent on any tool call. Humans read with
 `robofinger <peer>` or `log` when they want to know.
 
 An earlier `watch` command held a WebSocket open for live pushes. It was

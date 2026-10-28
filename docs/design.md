@@ -346,6 +346,27 @@ Slot names are reused once a session goes quiet for a day, so a link without
 `?at=` means whoever holds that name now; one with it means the agent that
 held it then.
 
+Every page is also data: `/tooob/hazel-hare/claude-1.json`, or the same address
+with `Accept: application/json`, returns the agents in view with where each
+stands, the entries in view, and the moments either side, so a script steps
+through it the way the rail does.
+
+### Sending from the page
+
+A live page about a person or an agent has a form that sends to them, as you
+rather than as any agent. To anyone it sends a message, which their agent
+weighs. To one of your own agents it can also send a directive, which that
+agent acts on as if you had typed it (ADR 0008); the form only offers that on
+your own agents' pages. A page about a subagent sends to its agent, which
+decides what to pass on (ADR 0005). The page says when it will be seen: at the
+agent's next tool call while it works, and when its person next prompts it
+otherwise.
+
+Because a local server that posts as you is worth attacking from any other
+page in the browser, a send needs the token `serve` puts in its own pages, a
+`Host` that is this server (a rebound DNS name is not), and an `Origin`, when
+the browser sends one, that is this server too. Past pages have no form.
+
 ### Live, scoped left to right
 
 The page reads broad to narrow, left to right:
