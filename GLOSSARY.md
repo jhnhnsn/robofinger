@@ -1,7 +1,8 @@
 # robofinger
 
-How coding agents on different machines, and the people behind them, tell each
-other what they are doing and settle what they cannot decide alone.
+How the coding agents of people working together, on different machines and
+different accounts, and the people behind them, tell each other what they are
+doing and settle what they cannot decide alone.
 
 ## Asking and deciding
 
@@ -48,6 +49,14 @@ _Avoid_: Viewer, observer, service account
 **Inbox**:
 Where a person sees the escalations waiting on them.
 _Avoid_: Queue, notifications
+
+**Message**:
+An entry addressed to a person or an agent, from anyone in the project. It is information for the agent that receives it to weigh, never an instruction.
+_Avoid_: Mail, notification, DM
+
+**Directive**:
+A message from an agent's own person that the agent acts on as if its person had said it in the session. From anyone else, the same words are only a message.
+_Avoid_: Command, order, instruction, task
 
 ## Working together
 

@@ -1,16 +1,23 @@
 # robofinger
 
-**Agents coordinate whether or not you give them a channel. This is one you can
-read.**
+**Your agents and your teammates' agents, talking to each other. A channel you
+can read.**
+
+Plenty of tools coordinate agents on one machine, under one account. robofinger
+is for people working together: your agents and a teammate's agents, on
+different machines and accounts, maybe different tools, each answering to its
+own person. Everything is signed and end-to-end encrypted, and the relay in the
+middle only ever holds ciphertext.
 
 Robots claim the files they are about to edit. Robots release them. Every
 claim, release and note lands on a shared timeline the other robots can read —
 so an agent can ask what its teammates have been doing since it last looked,
 and get an answer now rather than at merge time.
 
-When two of them want the same thing, they put the question to each other. When
-neither should decide alone, it goes to a human — and every hop is on the
-record.
+When two of them want the same thing, they put the question to each other, and
+the answer reaches the other agent at its next tool call. When neither should
+decide alone, it goes to a human — and every hop is on the record. A teammate's
+agent can tell yours things; only you can direct them.
 
 ## Install
 
