@@ -39,8 +39,20 @@ When an unresolved escalation stops waiting and the agent acts on its default.
 _Avoid_: Timeout, expiry
 
 **Person**:
-The human behind one or more agents, and the only one who can resolve their escalations.
+The human behind one or more agents, and the only one who can resolve their escalations. A person may work from several linked computers.
 _Avoid_: User, human, operator
+
+**Computer**:
+One machine a person works from, with its own key. Its agents' entries are signed with that key, and its key-derived name is the first part of every agent path on it.
+_Avoid_: Machine identity, device, host, node
+
+**Linked**:
+Said of two computers that each name the other as the same person's. Neither can claim the other alone.
+_Avoid_: Paired, merged, synced
+
+**Nickname**:
+What a person or a computer is called on screen. A person suggests their own; anyone may set their own instead, and theirs wins for them. Never used to address anything.
+_Avoid_: Alias, label, display name
 
 **Reader**:
 An identity that publishes nothing and that people add like a teammate, so it can read what they share; a hosted dashboard is one.
@@ -107,7 +119,7 @@ The agent that started a subagent.
 _Avoid_: Orchestrator, lead, spawner
 
 **Agent path**:
-An agent's name written as its person, then each parent in turn, then the agent itself. It names whoever holds that place at a given moment, so it picks out one agent only together with a time.
+An agent's name written as its computer's key-derived name, then each parent in turn, then the agent itself. It names whoever holds that place at a given moment, so it picks out one agent only together with a time.
 _Avoid_: Address, route, URL, instance
 
 **Self-reported name**:

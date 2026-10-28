@@ -31,6 +31,19 @@ pub struct Body {
     /// Every member's address, the inviter's included, each at the project's
     /// relay.
     pub members: Vec<String>,
+    /// A link (ADR 0009): whoever joins with this becomes another of the
+    /// inviter's own computers. Left out of an ordinary invitation, so its
+    /// signed form is what it always was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub link: bool,
+    /// For a link: the inviter's other computers, so the new one names them
+    /// all and not just the one that made the code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub computers: Vec<String>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -58,13 +71,36 @@ impl Body {
 }
 
 pub fn make(k: &Keys, project: &str, relay: &str, members: Vec<String>, exp: i64) -> Invitation {
-    let body = Body {
-        project: project.into(),
-        relay: relay.into(),
-        by: k.pubkey(),
-        exp,
-        members,
-    };
+    sign(
+        k,
+        Body {
+            project: project.into(),
+            relay: relay.into(),
+            by: k.pubkey(),
+            exp,
+            members,
+            link: false,
+            computers: vec![],
+        },
+    )
+}
+
+/// An invitation that makes whoever holds it another of your computers.
+pub fn make_link(
+    k: &Keys,
+    project: &str,
+    relay: &str,
+    members: Vec<String>,
+    exp: i64,
+    computers: Vec<String>,
+) -> Invitation {
+    let mut inv = make(k, project, relay, members, exp);
+    inv.body.link = true;
+    inv.body.computers = computers;
+    sign(k, inv.body)
+}
+
+fn sign(k: &Keys, body: Body) -> Invitation {
     let sig = k.sign(&body.message());
     Invitation { body, sig }
 }
@@ -173,9 +209,14 @@ pub fn adopt(c: &Cfg, k: &Keys) -> Vec<(String, String)> {
         if !vouched || check(&inv, plan.epoch).is_err() || inv.body.relay != c.url {
             continue;
         }
+        // A link from this person's own computer: the newcomer is another
+        // of ours, so name it back (ADR 0009).
+        if inv.body.link && people::same_person(&inv.body.by, &me) {
+            let _ = people::link(std::slice::from_ref(&newcomer.pubkey), &me);
+        }
         newcomer.home = Some(crypto::Home { url: c.url.clone() });
         newcomer.label = free_label(&newcomer, &peers);
-        adopted.push((newcomer.label.clone(), name_for(&inv.body.by)));
+        adopted.push((name_for(&newcomer.pubkey), name_for(&inv.body.by)));
         peers.push(newcomer);
     }
     if !adopted.is_empty() {
@@ -250,6 +291,51 @@ mod tests {
         inv.body.relay = "https://evil.example/team".into();
         assert!(check(&inv, 1_000).unwrap_err().contains("signature"));
         assert!(decode("https://relay.example/team/join#not-base64!").is_err());
+    }
+
+    /// A link is signed as one: dropping the flag, or adding a computer,
+    /// breaks the signature, and an ordinary invitation signs as it always did.
+    #[test]
+    fn a_link_is_signed_as_a_link() {
+        let a = keys("l");
+        let me = a.identity_blob(
+            "john",
+            Some(crypto::Home {
+                url: "https://relay.example/team".into(),
+            }),
+        );
+        let inv = make_link(
+            &a,
+            "robofinger",
+            "https://relay.example/team",
+            vec![me.clone()],
+            2_000,
+            vec!["STUDIO".into()],
+        );
+        let back = decode(&encode(&inv)).unwrap();
+        assert!(back.body.link && back.body.computers == ["STUDIO"]);
+        assert!(check(&back, 1_000).is_ok());
+        let mut plain = back.clone();
+        plain.body.link = false;
+        assert!(
+            check(&plain, 1_000).is_err(),
+            "a link cannot pass as an invitation"
+        );
+        let mut more = back;
+        more.body.computers.push("MALLORY".into());
+        assert!(check(&more, 1_000).is_err());
+        let ordinary = make(
+            &a,
+            "robofinger",
+            "https://relay.example/team",
+            vec![me],
+            2_000,
+        );
+        assert!(
+            !serde_json::to_string(&ordinary.body)
+                .unwrap()
+                .contains("link")
+        );
     }
 
     #[test]

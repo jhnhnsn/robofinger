@@ -375,7 +375,17 @@ pub fn tree(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
         out
     };
     let mut keys: Vec<&str> = ns.iter().map(|n| n.pubkey.as_str()).collect();
-    keys.sort_by_key(|k| (*k != b.me, name_for(k)));
+    // Yours first, then each person's computers together (ADR 0009).
+    let me = people::person_key(b.me);
+    keys.sort_by_key(|k| {
+        let person = people::person_key(k);
+        (
+            person != me,
+            people::person(k).unwrap_or_else(|| name_for(&person)),
+            *k != b.me,
+            name_for(k),
+        )
+    });
     keys.dedup();
     keys.retain(|k| !tops(k).is_empty());
     if keys.is_empty() {
@@ -387,9 +397,10 @@ pub fn tree(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
             let name = name_for(pk);
             let label = if *pk == b.me {
                 let live = if view.at.is_none() { " · live" } else { "" };
-                format!("{} · this machine{live}", c.alias)
+                let nick = people::nickname(pk).unwrap_or_else(|| c.alias.clone());
+                format!("{nick} · this computer{live}")
             } else {
-                local_label(pk).unwrap_or_default()
+                people::nickname(pk).unwrap_or_default()
             };
             let sel = if selected == format!("/{name}") { " sel" } else { "" };
             let agents: String = tops(pk).iter().map(|n| block(n, &mine, b, t, &base, &moment, &selected)).collect();
@@ -638,6 +649,13 @@ fn short_when(e: i64) -> String {
 
 /// The entity the URL names: what it is doing, what it holds, and the trail
 /// of what it did.
+/// The key a page's name stands for, among this computer and those it follows.
+fn key_named(name: &str, me: &str) -> Option<String> {
+    std::iter::once(me.to_string())
+        .chain(crypto::load_peers().into_iter().map(|p| p.pubkey))
+        .find(|k| name_for(k) == name)
+}
+
 /// The page as data (#23): the agents in view and where each stands, the
 /// entries in view, and the moments either side, so a script can step
 /// through it the way the rail does. Same scope, same moment as the page.
@@ -704,8 +722,10 @@ pub fn send_form(b: &Board, view: &View) -> String {
         return String::new();
     }
     let to = view.rel().trim_start_matches('/').to_string();
-    let me = name_for(b.me);
-    let mine = *who == me;
+    // Any of your linked computers' agents are yours to direct (ADR 0009).
+    let mine = people::computers_of(b.me)
+        .iter()
+        .any(|k| name_for(k) == *who);
     let parent = view.agent.split('/').next().unwrap_or("");
     let kinds = if mine && !view.agent.is_empty() {
         r#"<div class="pill seg kinds"><label><input type=radio name=kind value=message checked>Message</label><label><input type=radio name=kind value=directive>Directive</label></div>"#
@@ -755,24 +775,53 @@ pub fn detail(b: &Board, ns: &[Node], c: &Cfg, t: i64, view: &View) -> String {
     };
     if view.agent.is_empty() {
         let mine: Vec<&Node> = ns.iter().filter(|n| name_for(&n.pubkey) == *who).collect();
-        let label = mine
+        // From the agents on the page, else from who this computer follows:
+        // a quiet computer has a page too.
+        let key = mine
             .first()
-            .map(|n| {
-                if n.pubkey == b.me {
-                    c.alias.clone()
-                } else {
-                    local_label(&n.pubkey).unwrap_or_default()
-                }
+            .map(|n| n.pubkey.clone())
+            .or_else(|| key_named(who, b.me));
+        let label = key
+            .as_deref()
+            .and_then(people::nickname)
+            .or_else(|| {
+                key.as_deref()
+                    .filter(|k| *k == b.me)
+                    .map(|_| c.alias.clone())
             })
             .unwrap_or_default();
+        let linked: Vec<String> = key
+            .as_deref()
+            .map(|k| {
+                people::computers_of(k)
+                    .iter()
+                    .filter(|o| *o != k)
+                    .map(|o| {
+                        let n = name_for(o);
+                        let nick = people::computer(o)
+                            .map(|c| format!(" ({})", esc(&c)))
+                            .unwrap_or_default();
+                        format!(
+                            r#"<a href="{base}/{n}{moment}">{n}</a>{nick}"#,
+                            base = view.base(),
+                            n = esc(&n)
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut rows = vec![
+            ("Now", summary(&count(&mine))),
+            ("Agents on record", mine.len().to_string()),
+        ];
+        if !linked.is_empty() {
+            rows.push(("Same person", linked.join(", ")));
+        }
         return format!(
-            "<section class=card><p class=eyebrow>Machine identity</p><div class=big>{}</div><div class=sub>{}</div><div class=kv>{}</div></section>",
+            "<section class=card><p class=eyebrow>Computer</p><div class=big>{}</div><div class=sub>{}</div><div class=kv>{}</div></section>",
             esc(who),
             esc(&label),
-            kv(&[
-                ("Now", summary(&count(&mine))),
-                ("Agents on record", mine.len().to_string())
-            ])
+            kv(&rows)
         );
     }
     let path = format!("{who}/{}", view.agent);

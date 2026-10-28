@@ -10,6 +10,8 @@
 //!   robofinger ask [--to <peer>] "<t>"    raise something for the team
 //!   robofinger answer --to <peer> "<t>"   reply to a question
 //!   robofinger direct --to <agent> "<t>"  tell one of your own agents what to do
+//!   robofinger name [<who>] <nickname>   what people and computers are called
+//!   robofinger link ['<code>']            make another computer yours
 //!   robofinger check <path>               exit 0 clean, 0 + hook JSON on conflict
 //!   robofinger id [label]                 print your shareable identity blob
 //!   robofinger add|rm|list                manage who you follow
@@ -29,6 +31,7 @@ mod dash;
 mod hooks;
 mod invite;
 mod mail;
+mod people;
 mod selfupdate;
 mod tracker;
 
@@ -272,6 +275,21 @@ PEOPLE
   moved <new address>           tell your peers you have moved
       robofinger moved https://newhost.example.com/plan/u/fHC…#age1tj2…
 
+  name [<who>] <nickname> | name [<who>] --computer <nickname>
+                                what people and computers are called
+      robofinger name John                   you, suggested to everyone
+      robofinger name --computer laptop      this computer, suggested
+      robofinger name hazel-hare Sam         yours for them, here only
+      robofinger name                        everyone, as you see them
+      (yours win on your screen; the key-derived name stays beside every
+       nickname, and nicknames never address anything)
+
+  link [--expires 1h]           a code that makes another computer yours
+  link '<code>'                 on that computer: become the same person
+      (both computers then name each other; teammates see one person, and
+       directives from either reach agents on both. Anyone holding the code
+       becomes you until it expires, so never hand it to anyone else)
+
 AGENTS
 
   claim \"<task>\" <glob>...      announce what you are touching
@@ -436,6 +454,10 @@ struct Plan {
     /// them in, so members can check a member vouched (`invite::adopt`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     joined: Option<invite::Proof>,
+    /// What the publishing computer says about itself: its person's and its
+    /// own suggested nicknames, and its person's other computers (ADR 0009).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    me: Option<people::Me>,
     /// Relay row id, from the envelope. Read cursor for `since`; never
     /// published — see `Envelope::id`.
     #[serde(default, skip_serializing)]
@@ -656,10 +678,18 @@ fn join_by_invitation(c: &mut Cfg, k: &Keys, raw: &str) {
         std::process::exit(1);
     }
     let by = name_for(&inv.body.by);
-    println!(
-        "An invitation to {} on {}, from {by}. Check with them that their robofinger name is {by}.",
-        inv.body.project, inv.body.relay
-    );
+    if inv.body.link {
+        println!(
+            "A link from {by}: this computer becomes another of the same person's, in {} on {}. \
+             Check that the other computer's robofinger name is {by}.",
+            inv.body.project, inv.body.relay
+        );
+    } else {
+        println!(
+            "An invitation to {} on {}, from {by}. Check with them that their robofinger name is {by}.",
+            inv.body.project, inv.body.relay
+        );
+    }
     let root = repo_root();
     if let Err(e) = join_in(std::path::Path::new(&root), &inv.body.relay) {
         eprintln!("join failed: {e}");
@@ -702,6 +732,16 @@ fn join_by_invitation(c: &mut Cfg, k: &Keys, raw: &str) {
         println!("  now following {}", added.join(", "));
     }
 
+    if inv.body.link {
+        let mut others = vec![inv.body.by.clone()];
+        others.extend(inv.body.computers.iter().cloned());
+        if let Err(e) = people::link(&others, &k.pubkey()) {
+            eprintln!("link failed: {e}");
+            std::process::exit(1);
+        }
+        println!("linked: this computer and {by} are one person once {by} next runs robofinger");
+    }
+
     let proof = invite::Proof {
         address: k.identity_blob(&c.alias, Some(crypto::Home { url: c.url.clone() })),
         invitation: raw.trim().to_string(),
@@ -712,6 +752,7 @@ fn join_by_invitation(c: &mut Cfg, k: &Keys, raw: &str) {
             "joined {} (invited by {by}), accepting the working agreement version {v}",
             inv.body.project
         ),
+        None if inv.body.link => format!("linked as another of {by}'s computers"),
         None => format!("joined {} (invited by {by})", inv.body.project),
     };
     match post_with(
@@ -1644,6 +1685,7 @@ fn decrypt_plan(e: &Envelope, k: &Keys) -> Option<Plan> {
     // From the envelope, not the ciphertext: the relay assigns it, so a
     // publisher cannot forge a cursor position that skips its own entries.
     plan.id = e.id;
+    people::seen(&plan);
     Some(plan)
 }
 
@@ -1823,6 +1865,7 @@ fn publish(
         globs: vec![],
         commits: vec![],
         joined: None,
+        me: people::published(),
         to: String::new(),
         reply_to: 0,
         id: 0,
@@ -1916,6 +1959,7 @@ fn publish_forward(c: &Cfg, k: &Keys, new_addr: &str) -> Result<(), String> {
         globs: vec![],
         commits: vec![],
         joined: None,
+        me: people::published(),
         to: String::new(),
         reply_to: 0,
         id: 0,
@@ -2406,6 +2450,7 @@ fn post_with(
         globs,
         commits,
         joined,
+        me: people::published(),
         to: if to.is_empty() {
             String::new()
         } else {
@@ -2568,7 +2613,11 @@ fn direct(c: &Cfg, k: &Keys, to: &str, text: &str) -> Result<String, String> {
     let to = canonical_to(to, k, &crypto::load_peers());
     let me = name_for(&k.pubkey());
     let (who, agent) = to.split_once('/').unwrap_or((&to, ""));
-    if who != me {
+    // Your own agents are those on any of your linked computers (ADR 0009).
+    let yours = people::computers_of(&k.pubkey())
+        .iter()
+        .any(|c| name_for(c) == who);
+    if !yours {
         return Err(format!(
             "only your own agents take directives, and {to} is not one of yours ({me}/…).\n  \
              tell a teammate's agent instead: robofinger post --to {to} \"…\""
@@ -2628,6 +2677,8 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    people::set_self(&k.pubkey());
 
     // These work without a relay configured.
     match cmd {
@@ -2882,57 +2933,147 @@ fn main() {
             eprintln!("\nshare that line with a peer; they run: robofinger add <it>");
             return;
         }
+        // Nicknames (ADR 0009). Yours for yourself and this computer travel
+        // with what you publish, as suggestions; yours for anyone else stay
+        // here and win on your screen.
         "name" => {
-            let mut names = load_names();
+            let mut rest: Vec<String> = args[1..].to_vec();
+            let computer = take_flag(&mut rest, "--computer");
             let peers = crypto::load_peers();
-            // Resolve however a user would type it: a full key, a prefix, or
-            // the label they already filed that peer under.
+            let me = k.pubkey();
+            // However it would be typed: a key or its start, the name a key
+            // derives to, or the label a peer is filed under.
             let resolve = |w: &str| -> Option<String> {
+                if w.eq_ignore_ascii_case(&name_for(&me)) {
+                    return Some(me.clone());
+                }
                 peers
                     .iter()
                     .find(|s| {
-                        s.pubkey == w || s.pubkey.starts_with(w) || s.label.eq_ignore_ascii_case(w)
+                        s.pubkey == w
+                            || (w.len() >= 6 && s.pubkey.starts_with(w))
+                            || s.label.eq_ignore_ascii_case(w)
+                            || name_for(&s.pubkey).eq_ignore_ascii_case(w)
                     })
                     .map(|s| s.pubkey.clone())
             };
-            let (key, label) = match (args.get(1), args.get(2)) {
-                (None, _) => {
-                    if names.is_empty() {
-                        println!("no local names yet");
-                        println!("  robofinger name <label>           name this identity");
-                        println!("  robofinger name <peer> <label>    name someone you follow");
+            let said = |what: Result<(), String>| {
+                if let Err(e) = what {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            };
+            match (rest.first(), rest.get(1), &computer) {
+                (None, _, None) => {
+                    let mine = people::load();
+                    let show = |v: &str| {
+                        if v.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            v.to_string()
+                        }
+                    };
+                    println!("you are {}", name_for(&me));
+                    let person = match (mine.person.as_str(), people::person(&me)) {
+                        ("", Some(p)) => format!("{p} (from your other computers)"),
+                        (p, _) => show(p),
+                    };
+                    println!("  person:   {person}");
+                    println!("  computer: {}", show(&mine.computer));
+                    for c in people::computers_of(&me).iter().filter(|c| **c != me) {
+                        let nick = people::computer(c).unwrap_or_else(|| "no nickname yet".into());
+                        println!("  linked:   {} ({nick})", name_for(c));
                     }
-                    let mut rows: Vec<_> = names.iter().collect();
+                    let pending: Vec<&String> = mine
+                        .computers
+                        .iter()
+                        .filter(|c| !people::same_person(&me, c))
+                        .collect();
+                    for c in pending {
+                        println!("  linking:  {} (until it names you back)", name_for(c));
+                    }
+                    println!("  (suggested to everyone; they may call you something else)");
+                    let mut rows: Vec<String> = peers
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "  {} ({})",
+                                name_for(&p.pubkey),
+                                people::nickname(&p.pubkey).unwrap_or_else(|| "no nickname".into())
+                            )
+                        })
+                        .collect();
                     rows.sort();
-                    for (k2, v) in rows {
-                        let mine = if *k2 == k.pubkey() { "  (you)" } else { "" };
-                        println!("{} ({}){}", derived_alias(k2), v, mine);
+                    if !rows.is_empty() {
+                        println!("\nwhat you call people you follow:");
+                        println!("{}", rows.join("\n"));
                     }
+                    println!(
+                        "\n  robofinger name <nickname>                  yours, suggested to everyone"
+                    );
+                    println!(
+                        "  robofinger name --computer <nickname>       this computer's, suggested"
+                    );
+                    println!(
+                        "  robofinger name <who> <nickname>            yours for someone, here only"
+                    );
+                    println!(
+                        "  robofinger name <who> --computer <nickname> yours for one of their computers"
+                    );
                     return;
                 }
-                // One argument names your own key, because that is the case
-                // `add --as` cannot reach.
-                (Some(l), None) => (k.pubkey(), l.clone()),
-                (Some(w), Some(l)) => match resolve(w) {
-                    Some(pk) => (pk, l.clone()),
-                    None => {
+                // Your own: suggested to everyone with what you publish.
+                (Some(nick), None, None) => {
+                    let mut mine = people::load();
+                    mine.person = nick.trim().to_string();
+                    said(people::save(&mine));
+                    println!(
+                        "you are {} ({})",
+                        name_for(&me),
+                        people::nickname(&me).unwrap_or_default()
+                    );
+                    eprintln!(
+                        "suggested to everyone you work with, from the next thing you publish."
+                    );
+                }
+                (None, _, Some(nick)) => {
+                    let mut mine = people::load();
+                    mine.computer = nick.trim().to_string();
+                    said(people::save(&mine));
+                    println!(
+                        "this computer is {} ({})",
+                        name_for(&me),
+                        people::nickname(&me).unwrap_or_default()
+                    );
+                    eprintln!(
+                        "suggested to everyone you work with, from the next thing you publish."
+                    );
+                }
+                (Some(w), nick, comp) => {
+                    let Some(key) = resolve(w) else {
                         eprintln!("nobody you follow matches {w:?} — see: robofinger list");
                         std::process::exit(1);
+                    };
+                    match (nick, comp) {
+                        (Some(n), None) => said(people::set_person_name(&key, n.trim())),
+                        (None, Some(n)) => said(people::set_computer_name(&key, n.trim())),
+                        _ => {
+                            eprintln!(
+                                "usage: robofinger name <who> <nickname>  or  robofinger name <who> --computer <nickname>"
+                            );
+                            std::process::exit(2);
+                        }
                     }
-                },
-            };
-            if label.is_empty() {
-                names.remove(&key);
-            } else {
-                names.insert(key.clone(), label.clone());
+                    println!(
+                        "{} ({})",
+                        name_for(&key),
+                        people::nickname(&key).unwrap_or_else(|| "no nickname".into())
+                    );
+                    if key != me {
+                        eprintln!("yours only — never published; they keep their own nicknames.");
+                    }
+                }
             }
-            let body: String = names.iter().map(|(k2, v)| format!("{k2}\t{v}\n")).collect();
-            if let Err(e) = std::fs::write(names_path(), body) {
-                eprintln!("write {}: {e}", names_path().display());
-                std::process::exit(1);
-            }
-            println!("{} ({})", derived_alias(&key), label);
-            eprintln!("local only — never published, and peers keep their own names for you.");
             return;
         }
         "add" | "rm" | "update" | "list" => {
@@ -3220,8 +3361,20 @@ fn main() {
         _ => {}
     }
 
+    // An invitation or a link code names its relay, so a computer that has
+    // never run `init` can still use one: that is how a new computer joins.
+    let from_code = || {
+        let code = args.get(1).filter(|_| matches!(cmd, "join" | "link"))?;
+        let inv = invite::decode(code).ok()?;
+        Some(Cfg {
+            url: inv.body.relay,
+            alias: hostname().unwrap_or_else(|| "unknown".into()),
+            instance: String::new(),
+            codebase: None,
+        })
+    };
     // Unconfigured: stay silent and succeed. A hook must never break a session.
-    let Some(mut c) = cfg() else {
+    let Some(mut c) = cfg().or_else(from_code) else {
         if is_hook(cmd) {
             std::process::exit(0);
         }
@@ -3279,6 +3432,56 @@ fn main() {
                 "They run: robofinger join '<invitation>' — and should check it says it is from {me}."
             );
         }
+        // Another computer of yours (ADR 0009): `link` prints a code, and
+        // `link <code>` on the other computer makes the two one person.
+        "link" => {
+            if let Some(code) = args.get(1) {
+                match invite::decode(code) {
+                    Ok(i) if i.body.link => join_by_invitation(&mut c, &k, code),
+                    Ok(_) => {
+                        eprintln!(
+                            "that is an invitation to a project, not a link: robofinger join '<it>'"
+                        );
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+            if !joined() {
+                eprintln!("link from a folder in a project: {NOT_JOINED}");
+                std::process::exit(1);
+            }
+            let t = now();
+            let ttl = flag(&args, "--expires").unwrap_or_else(|| "1h".into());
+            let exp = match parse_since(&ttl, t) {
+                Ok(past) => t + (t - past),
+                Err(e) => {
+                    eprintln!("--expires: {e}");
+                    std::process::exit(2);
+                }
+            };
+            let me = k.pubkey();
+            let others: Vec<String> = people::computers_of(&me)
+                .into_iter()
+                .filter(|x| *x != me)
+                .collect();
+            let inv = invite::make_link(&k, &project(), &c.url, members_here(&c, &k), exp, others);
+            println!("{}", invite::encode(&inv));
+            let name = name_for(&me);
+            eprintln!(
+                "\nA link to this computer ({name}), good until {}.",
+                stamp(exp)
+            );
+            eprintln!("On your other computer, in a clone of this project, run:");
+            eprintln!("  robofinger link '<the line above>'");
+            eprintln!(
+                "Whoever runs it becomes you, so never hand it to anyone else; invite them with `robofinger invite`."
+            );
+        }
         "accept" => {
             let root = repo_root();
             match accept_here(std::path::Path::new(&root)) {
@@ -3314,12 +3517,23 @@ fn main() {
                 println!("new: {name}, invited by {by}");
             }
             println!("{} on {}", project(), c.url);
-            println!("  {} (you)", name_for(&k.pubkey()));
+            let me = k.pubkey();
+            let nick = |pk: &str| {
+                people::nickname(pk)
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default()
+            };
+            println!("  {}{} — you", name_for(&me), nick(&me));
             for p in crypto::load_peers()
                 .iter()
                 .filter(|p| p.endpoint(&c.url) == c.url)
             {
-                println!("  {} ({})", name_for(&p.pubkey), p.label);
+                let yours = if people::same_person(&p.pubkey, &me) {
+                    " — your other computer"
+                } else {
+                    ""
+                };
+                println!("  {}{}{yours}", name_for(&p.pubkey), nick(&p.pubkey));
             }
         }
         "join" => {
@@ -4270,14 +4484,6 @@ fn ask(question: &str, default: Option<&str>) -> Option<String> {
     }
 }
 
-/// Peers, read once per process. `who` runs per rendered line and inside the
-/// PreToolUse hook, where the budget is ~100ms and a file read per entry is a
-/// cost for nothing — the peer list cannot change while one command runs.
-fn peers_cached() -> &'static Vec<Peer> {
-    static PEERS: std::sync::OnceLock<Vec<Peer>> = std::sync::OnceLock::new();
-    PEERS.get_or_init(crypto::load_peers)
-}
-
 /// `pubkey<TAB>name`, one per line. Local, never published, and separate from
 /// the peer list because the key you most want to name is your own — and you
 /// do not follow yourself.
@@ -4316,25 +4522,13 @@ fn label_in(
     })
 }
 
-fn local_label(pubkey: &str) -> Option<String> {
-    label_in(pubkey, names_cached(), peers_cached())
-}
-
-/// What to call the key that published something.
+/// The name a key derives to: a fingerprint every reader computes alike and
+/// can check out loud ("does yours say hazel-hare?"). Addresses use it, and
+/// every line shows it.
 ///
-/// Deliberately never `p.alias`. The alias rides in the envelope, so a peer
-/// can change how it appears to you between one entry and the next — publish
-/// as "alice" and be rendered as alice, on a timeline whose whole job is
-/// saying who did what. A name is only worth reading if it cannot move under
-/// you, so it comes from one of the two places the publisher does not control:
-///
-///   1. the label you filed them under (`add --as`) — a petname you chose
-///      beats anything they assert about themselves
-///   2. failing that, the name their public key derives to, which is a
-///      fingerprint you can check out loud: "does yours say hazel-hare?"
-///
-/// The published alias keeps its one job, which is suggesting a label at `add`
-/// time. That is what the address format has always called it: a suggestion.
+/// Deliberately never `p.alias`, which rides in the envelope and so could
+/// change under you from one entry to the next. What people and computers are
+/// called on screen is `people::nickname`, shown beside this, never instead.
 fn name_for(pubkey: &str) -> String {
     derived_alias(pubkey)
 }
@@ -4360,7 +4554,7 @@ fn who(p: &Plan, show_instance: bool) -> String {
     if show_instance && !p.instance.is_empty() {
         name = format!("{name}/{}", p.instance);
     }
-    match local_label(&p.pubkey) {
+    match people::nickname(&p.pubkey) {
         Some(l) => format!("{name} ({l})"),
         None => name,
     }
@@ -6017,7 +6211,7 @@ fn render(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 {refresh}<title>robofinger · {alias}</title>
 <style>{css}</style></head><body class="{body}">
-<header class=toolbar><a class=brand href="/" title="All projects">robofinger</a><span class=pill>{folder}{here_e}</span><span class=spacer></span><span class=sub id=summary>{team} · {n} live claims across {np} repos</span>{switch}{mode}<span class=pill>{me_name} · {alias}</span></header>
+<header class=toolbar><a class=brand href="/" title="All projects">robofinger</a><span class=pill>{folder}{here_e}</span><span class=spacer></span><span class=sub id=summary>{team} · {n} live claims across {np} repos</span>{switch}{mode}<span class=pill>{me_name} · {me_nick}</span></header>
 <div class=crumbs>{nav}</div>
 <div class=workspace><main class=stage>{banner}<div class=stack>{ghosts}<div class=board id=board>
 <div class=side>
@@ -6049,6 +6243,7 @@ fn render(
         send_panel = dash::send_form(b, view),
         switch = dash::switch(view, &here),
         me_name = esc(&name_for(b.me)),
+        me_nick = esc(&people::nickname(b.me).unwrap_or_else(|| c.alias.clone())),
         rail = dash::rail(view),
         rail_js = dash::RAIL_JS,
         n = claims.len(),
@@ -6097,6 +6292,7 @@ mod tests {
             globs: vec![],
             commits: vec![],
             joined: None,
+            me: None,
             to: String::new(),
             reply_to: 0,
             id: 0,

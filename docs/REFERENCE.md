@@ -91,16 +91,36 @@ a name a publisher asserts is a name it can choose, on a record whose only job
 is saying who did what. Readers build the name themselves, from two places the
 publisher does not control:
 
-    hazel-hare/claude-1 (cachy-g14)
-    └───┬────┘ └──┬───┘ └───┬────┘
-    from pubkey  session   your name for it, local
+    hazel-hare/claude-1 (John · laptop)
+    └───┬────┘ └──┬───┘ └──────┬─────┘
+    from pubkey  session   nicknames: the person, then the computer
 
 The first is a pure function of the public key the relay already verified every
 write against, so two people checking an address out loud — "does yours say
-hazel-hare?" — are comparing the key. The last comes from `names` in the config
-directory (`pubkey<TAB>name`, written by `robofinger name`), falling back to the
-label you filed a peer under with `add --as`. Neither leaves the machine, so two
-readers can call one author different things and both be right.
+hazel-hare?" — are comparing the key. It is a **computer**'s name: each
+computer has its own key.
+
+The nicknames in parentheses are for reading only (ADR 0009). For each, in
+order:
+
+1. yours: `names` (people) and `computer-names` in the config directory, both
+   `pubkey<TAB>nickname`, written by `robofinger name <who> …`. A person's
+   nickname filed under any one of their computers names all of them.
+2. theirs: what the computer says about itself in every entry it publishes
+   (`me` in the encrypted body: `person`, `computer`, `computers`), remembered
+   in `profiles`. A person's nickname from any of their linked computers
+   counts. It is dropped when it is a name you already use for someone else,
+   or your own.
+3. for a person, the label you filed a peer under with `add --as`.
+
+Two computers are one person when each lists the other's key in `computers`.
+Each list is signed by its own computer, so neither can claim the other alone,
+and either undoes a link by dropping it. `robofinger link` prints an invitation
+marked as a link (`link: true`, plus the computers already linked), good for an
+hour; `robofinger link <code>` on the other computer joins the folder to the
+project, follows the members and lists the linker and its computers. The linker
+lists the new computer back when it adopts it, as members adopt anyone a member
+invited. A directive from any of a person's linked computers counts as theirs.
 
 `ROBOFINGER_ALIAS` no longer appears in any entry. It survives as the name
 suggestion in your shared address — the part before `@`, which a peer adopts as
