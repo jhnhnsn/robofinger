@@ -286,6 +286,7 @@ PEOPLE
 
   link [--expires 1h]           a code that makes another computer yours
   link '<code>'                 on that computer: become the same person
+  unlink <computer>             stop naming that computer as yours
       (both computers then name each other; teammates see one person, and
        directives from either reach agents on both. Anyone holding the code
        becomes you until it expires, so never hand it to anyone else)
@@ -3481,6 +3482,30 @@ fn main() {
             eprintln!(
                 "Whoever runs it becomes you, so never hand it to anyone else; invite them with `robofinger invite`."
             );
+        }
+        // Stop naming a computer as yours. It is no longer the same person
+        // from the next thing this computer publishes (ADR 0009).
+        "unlink" => {
+            let Some(w) = args.get(1) else {
+                eprintln!("usage: robofinger unlink <computer>   (see them: robofinger name)");
+                std::process::exit(2);
+            };
+            let mut mine = people::load();
+            let before = mine.computers.len();
+            mine.computers
+                .retain(|c| !(name_for(c).eq_ignore_ascii_case(w) || c == w));
+            if mine.computers.len() == before {
+                eprintln!("{w} is not linked to this computer — see: robofinger name");
+                std::process::exit(1);
+            }
+            if let Err(e) = people::save(&mine) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+            println!(
+                "unlinked {w}: from the next thing this computer publishes, you are two people to everyone"
+            );
+            println!("  it can still read what you share until you also `robofinger rm` it");
         }
         "accept" => {
             let root = repo_root();
