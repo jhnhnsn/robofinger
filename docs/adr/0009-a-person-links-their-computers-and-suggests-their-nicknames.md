@@ -22,4 +22,4 @@ People name themselves and their computers ("John", "laptop"). Those nicknames t
 - An agent path still starts with a computer's key-derived name, so a link means the same agent to everyone. Nicknames are for reading, never for addressing.
 - A directive counts when it is signed by any computer of the agent's own person (ADR 0008).
 - A link code makes whoever holds it you, until it expires. It expires in an hour unless asked otherwise.
-- Teammates learn of a link from the next thing each computer publishes. Until both have, they still see two computers.
+- Each computer publishes a join when it takes up the link: the new one when it uses the code, the other when it next runs robofinger and adopts it. Until the second join, teammates still see two computers.

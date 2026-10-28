@@ -179,6 +179,7 @@ pub fn adopt(c: &Cfg, k: &Keys) -> Vec<(String, String)> {
     let mut peers = crypto::load_peers();
     let me = k.pubkey();
     let mut adopted = Vec::new();
+    let mut linked = Vec::new();
     for env in recent_posts(c) {
         if env.pubkey == me || peers.iter().any(|p| p.pubkey == env.pubkey) {
             continue;
@@ -213,6 +214,7 @@ pub fn adopt(c: &Cfg, k: &Keys) -> Vec<(String, String)> {
         // of ours, so name it back (ADR 0009).
         if inv.body.link && people::same_person(&inv.body.by, &me) {
             let _ = people::link(std::slice::from_ref(&newcomer.pubkey), &me);
+            linked.push(name_for(&newcomer.pubkey));
         }
         newcomer.home = Some(crypto::Home { url: c.url.clone() });
         newcomer.label = free_label(&newcomer, &peers);
@@ -221,6 +223,17 @@ pub fn adopt(c: &Cfg, k: &Keys) -> Vec<(String, String)> {
     }
     if !adopted.is_empty() {
         let _ = crypto::save_peers(&peers);
+    }
+    // Teammates believe a link only when both computers name each other. The
+    // newcomer's join names this one; say so back now, not whenever this
+    // computer next happens to publish.
+    if !linked.is_empty() {
+        let person = Cfg {
+            instance: String::new(),
+            ..c.clone()
+        };
+        let text = format!("linked {} as another of my computers", linked.join(", "));
+        let _ = post_with(&person, k, &text, None, "join", vec![], vec![], "", 0, None);
     }
     adopted
 }

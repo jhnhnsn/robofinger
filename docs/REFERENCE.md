@@ -120,7 +120,8 @@ marked as a link (`link: true`, plus the computers already linked), good for an
 hour; `robofinger link <code>` on the other computer joins the folder to the
 project, follows the members and lists the linker and its computers. The linker
 lists the new computer back when it adopts it, as members adopt anyone a member
-invited. A directive from any of a person's linked computers counts as theirs.
+invited, and posts a `join` of its own saying so. Both joins carry both lists,
+so teammates see one person as soon as they read them. A directive from any of a person's linked computers counts as theirs.
 
 `ROBOFINGER_ALIAS` no longer appears in any entry. It survives as the name
 suggestion in your shared address — the part before `@`, which a peer adopts as
